@@ -1,0 +1,35 @@
+<UserControl x:Class="FastEdit.Views.Controls.HexEditorControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="{DynamicResource EditorBackgroundBrush}"
+             Focusable="True"
+             KeyDown="HexCanvas_KeyDown"
+             MouseLeftButtonDown="HexCanvas_MouseDown">
+
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- Hex Content Canvas -->
+        <Canvas x:Name="HexCanvas"
+                Grid.Column="0"
+                ClipToBounds="True"
+                Focusable="True"
+                MouseWheel="HexCanvas_MouseWheel"
+                MouseLeftButtonDown="HexCanvas_MouseDown"/>
+
+        <!-- Vertical ScrollBar -->
+        <ScrollBar x:Name="VerticalScrollBar"
+                   Grid.Column="1"
+                   Orientation="Vertical"
+                   Minimum="0"
+                   Maximum="{Binding TotalRows}"
+                   ViewportSize="{Binding VisibleRows}"
+                   Value="{Binding ScrollPosition, Mode=TwoWay}"
+                   LargeChange="{Binding VisibleRows}"
+                   SmallChange="1"
+                   ValueChanged="ScrollBar_ValueChanged"/>
+    </Grid>
+</UserControl>
