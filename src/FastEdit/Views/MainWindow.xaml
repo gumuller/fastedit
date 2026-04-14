@@ -19,7 +19,8 @@
         WindowBackdropType="Mica"
         AllowDrop="True"
         Drop="Window_Drop"
-        DragOver="Window_DragOver">
+        DragOver="Window_DragOver"
+        Icon="pack://application:,,,/fastedit.ico">
 
     <ui:FluentWindow.Resources>
         <infra:BindingProxy x:Key="ViewModelProxy" Data="{Binding}"/>
