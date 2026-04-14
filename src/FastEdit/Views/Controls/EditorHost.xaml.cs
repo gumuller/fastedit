@@ -1,9 +1,12 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using FastEdit.Helpers;
+using FastEdit.Services;
 using FastEdit.Services.Interfaces;
 using FastEdit.Theming;
 using FastEdit.ViewModels;
+using ICSharpCode.AvalonEdit.Folding;
 using ICSharpCode.AvalonEdit.Highlighting;
 using ICSharpCode.AvalonEdit.Search;
 using Microsoft.Extensions.DependencyInjection;
@@ -16,6 +19,11 @@ public partial class EditorHost : UserControl
     private SearchPanel? _searchPanel;
     private System.Windows.Controls.TextBox? _replaceTextBox;
     private System.Windows.Controls.Primitives.ToggleButton? _replaceToggle;
+    private FoldingManager? _foldingManager;
+    private BracketHighlightRenderer? _bracketRenderer;
+    private readonly FileWatcherService _fileWatcher = new();
+    private readonly List<int> _bookmarks = new();
+    private System.Windows.Threading.DispatcherTimer? _foldingTimer;
 
     public EditorHost()
     {
@@ -35,9 +43,24 @@ public partial class EditorHost : UserControl
         WireReplaceControls();
 
         ApplySearchPanelMarkerBrush();
-
         ApplyEditorThemeBrushes();
         ApplyEditorSettings();
+
+        // Install bracket highlight renderer
+        _bracketRenderer = new BracketHighlightRenderer(TextEditor);
+        TextEditor.TextArea.TextView.BackgroundRenderers.Add(_bracketRenderer);
+        TextEditor.TextArea.Caret.PositionChanged += OnCaretPositionChangedForBrackets;
+
+        // Folding update timer
+        _foldingTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(2)
+        };
+        _foldingTimer.Tick += (s, args) => UpdateFoldings();
+        _foldingTimer.Start();
+
+        // File watcher for auto-reload
+        _fileWatcher.FileChanged += OnFileWatcherChanged;
 
         // Subscribe to theme changes
         var themeService = App.Services.GetService<IThemeService>();
@@ -55,6 +78,11 @@ public partial class EditorHost : UserControl
             mainVm.GoToLineRequested += OnGoToLineRequested;
             mainVm.DuplicateLineRequested += OnDuplicateLineRequested;
             mainVm.MoveLineRequested += OnMoveLineRequested;
+            mainVm.FormatDocumentRequested += OnFormatDocumentRequested;
+            mainVm.MinifyDocumentRequested += OnMinifyDocumentRequested;
+            mainVm.ToggleBookmarkRequested += OnToggleBookmark;
+            mainVm.NextBookmarkRequested += OnNextBookmark;
+            mainVm.PrevBookmarkRequested += OnPrevBookmark;
             mainVm.PropertyChanged += OnMainVmPropertyChanged;
         }
 
@@ -79,6 +107,18 @@ public partial class EditorHost : UserControl
                 break;
             case nameof(MainViewModel.EditorFontSize):
                 TextEditor.FontSize = vm.EditorFontSize;
+                break;
+            case nameof(MainViewModel.IsFoldingEnabled):
+                if (vm.IsFoldingEnabled)
+                    InstallFolding();
+                else
+                    UninstallFolding();
+                break;
+            case nameof(MainViewModel.IsMinimapVisible):
+                UpdateMinimapVisibility(vm.IsMinimapVisible);
+                break;
+            case nameof(MainViewModel.IsAutoReloadEnabled):
+                UpdateAutoReload(vm.IsAutoReloadEnabled);
                 break;
         }
     }
@@ -273,6 +313,167 @@ public partial class EditorHost : UserControl
 
         caret.Line = caret.Line + 1;
         caret.Column = col;
+    }
+
+    // --- Format / Minify ---
+    private void OnFormatDocumentRequested()
+    {
+        if (!IsActiveEditorHost() || _currentVm?.IsBinaryMode == true) return;
+        var lang = _currentVm?.SyntaxLanguage ?? "";
+
+        (string result, string? error) output;
+        if (FormatHelper.IsJsonLanguage(lang))
+            output = FormatHelper.PrettyPrintJson(TextEditor.Text);
+        else if (FormatHelper.IsXmlLanguage(lang))
+            output = FormatHelper.PrettyPrintXml(TextEditor.Text);
+        else return;
+
+        if (output.error != null)
+        {
+            var mainVm = App.Services.GetService<MainViewModel>();
+            if (mainVm != null) mainVm.StatusText = output.error;
+            return;
+        }
+        TextEditor.Document.Text = output.result;
+    }
+
+    private void OnMinifyDocumentRequested()
+    {
+        if (!IsActiveEditorHost() || _currentVm?.IsBinaryMode == true) return;
+        var lang = _currentVm?.SyntaxLanguage ?? "";
+
+        (string result, string? error) output;
+        if (FormatHelper.IsJsonLanguage(lang))
+            output = FormatHelper.MinifyJson(TextEditor.Text);
+        else if (FormatHelper.IsXmlLanguage(lang))
+            output = FormatHelper.MinifyXml(TextEditor.Text);
+        else return;
+
+        if (output.error != null)
+        {
+            var mainVm = App.Services.GetService<MainViewModel>();
+            if (mainVm != null) mainVm.StatusText = output.error;
+            return;
+        }
+        TextEditor.Document.Text = output.result;
+    }
+
+    // --- Code Folding ---
+    private void InstallFolding()
+    {
+        if (_currentVm == null || _currentVm.IsBinaryMode) return;
+        _foldingManager = FoldingHelper.Install(TextEditor, _currentVm.SyntaxLanguage);
+    }
+
+    private void UninstallFolding()
+    {
+        FoldingHelper.Uninstall(TextEditor);
+        _foldingManager = null;
+    }
+
+    private void UpdateFoldings()
+    {
+        if (_foldingManager == null || _currentVm == null) return;
+        FoldingHelper.Update(_foldingManager, _currentVm.SyntaxLanguage, TextEditor.Document);
+    }
+
+    // --- Bracket Matching ---
+    private void OnCaretPositionChangedForBrackets(object? sender, EventArgs e)
+    {
+        if (_bracketRenderer == null) return;
+        var result = BracketSearcher.FindMatchingBracket(TextEditor.Document, TextEditor.CaretOffset);
+        _bracketRenderer.SetHighlight(result);
+    }
+
+    // --- Bookmarks ---
+    private void OnToggleBookmark()
+    {
+        if (!IsActiveEditorHost() || _currentVm?.IsBinaryMode == true) return;
+        int line = TextEditor.TextArea.Caret.Line;
+        if (_bookmarks.Contains(line))
+            _bookmarks.Remove(line);
+        else
+            _bookmarks.Add(line);
+
+        _bookmarks.Sort();
+        var mainVm = App.Services.GetService<MainViewModel>();
+        if (mainVm != null)
+            mainVm.StatusText = _bookmarks.Contains(line)
+                ? $"Bookmark set at line {line}"
+                : $"Bookmark removed from line {line}";
+    }
+
+    private void OnNextBookmark()
+    {
+        if (!IsActiveEditorHost() || _bookmarks.Count == 0) return;
+        int currentLine = TextEditor.TextArea.Caret.Line;
+        var next = _bookmarks.FirstOrDefault(b => b > currentLine);
+        if (next == 0) next = _bookmarks[0]; // wrap around
+        GoToLine(next);
+    }
+
+    private void OnPrevBookmark()
+    {
+        if (!IsActiveEditorHost() || _bookmarks.Count == 0) return;
+        int currentLine = TextEditor.TextArea.Caret.Line;
+        var prev = _bookmarks.LastOrDefault(b => b < currentLine);
+        if (prev == 0) prev = _bookmarks[^1]; // wrap around
+        GoToLine(prev);
+    }
+
+    // --- Minimap ---
+    private void UpdateMinimapVisibility(bool visible)
+    {
+        if (visible && !_currentVm?.IsBinaryMode == true)
+        {
+            MinimapColumn.Width = new GridLength(100);
+            DocumentMap.Visibility = Visibility.Visible;
+            DocumentMap.AttachEditor(TextEditor);
+        }
+        else
+        {
+            MinimapColumn.Width = new GridLength(0);
+            DocumentMap.Visibility = Visibility.Collapsed;
+            DocumentMap.DetachEditor();
+        }
+    }
+
+    // --- Auto-Reload / Log Tailing ---
+    private void UpdateAutoReload(bool enabled)
+    {
+        if (!IsActiveEditorHost()) return;
+        if (enabled && !string.IsNullOrEmpty(_currentVm?.FilePath))
+        {
+            _fileWatcher.StartWatching(_currentVm.FilePath);
+        }
+        else
+        {
+            _fileWatcher.StopWatching();
+        }
+    }
+
+    private async void OnFileWatcherChanged(object? sender, string filePath)
+    {
+        // Small delay to let the writing process finish
+        await Task.Delay(200);
+
+        await Dispatcher.InvokeAsync(async () =>
+        {
+            if (_currentVm == null || _currentVm.FilePath != filePath) return;
+
+            try
+            {
+                var content = await System.IO.File.ReadAllTextAsync(filePath);
+                TextEditor.Text = content;
+                // Scroll to bottom (tail mode)
+                TextEditor.ScrollToEnd();
+
+                var mainVm = App.Services.GetService<MainViewModel>();
+                if (mainVm != null)
+                    mainVm.StatusText = $"Auto-reloaded: {System.IO.Path.GetFileName(filePath)}";
+            }
+            catch { /* file may be locked */ }
+        });
     }
 
     private bool IsActiveEditorHost()
@@ -476,6 +677,10 @@ public partial class EditorHost : UserControl
 
             Panel.SetZIndex(HexEditor, 1);
             Panel.SetZIndex(TextEditor, 0);
+
+            UninstallFolding();
+            DocumentMap.DetachEditor();
+            _fileWatcher.StopWatching();
         }
         else
         {
@@ -507,6 +712,24 @@ public partial class EditorHost : UserControl
             TextEditor.TextArea.Caret.PositionChanged += Caret_PositionChanged;
 
             ApplyEditorThemeBrushes();
+
+            // Install code folding
+            var mainVm = App.Services.GetService<MainViewModel>();
+            if (mainVm?.IsFoldingEnabled == true)
+                InstallFolding();
+
+            // Minimap
+            if (mainVm?.IsMinimapVisible == true)
+                UpdateMinimapVisibility(true);
+
+            // Auto-reload
+            if (mainVm?.IsAutoReloadEnabled == true && !string.IsNullOrEmpty(vm.FilePath))
+                _fileWatcher.StartWatching(vm.FilePath);
+            else
+                _fileWatcher.StopWatching();
+
+            // Clear bookmarks on tab switch
+            _bookmarks.Clear();
         }
     }
 

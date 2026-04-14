@@ -5,8 +5,14 @@
              xmlns:controls="clr-namespace:FastEdit.Views.Controls">
 
     <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition x:Name="MinimapColumn" Width="0"/>
+        </Grid.ColumnDefinitions>
+
         <!-- Text Editor (shown when not binary mode) -->
         <avalonedit:TextEditor x:Name="TextEditor"
+                               Grid.Column="0"
                                FontFamily="Cascadia Code, Consolas, Courier New"
                                FontSize="14"
                                ShowLineNumbers="True"
@@ -23,12 +29,19 @@
                                               EnableEmailHyperlinks="True"
                                               WordWrapIndentation="4"
                                               ConvertTabsToSpaces="True"
-                                              IndentationSize="4"/>
+                                              IndentationSize="4"
+                                              EnableRectangularSelection="True"/>
             </avalonedit:TextEditor.Options>
         </avalonedit:TextEditor>
 
+        <!-- Document Map / Minimap -->
+        <controls:DocumentMapControl x:Name="DocumentMap"
+                                     Grid.Column="1"
+                                     Visibility="Collapsed"/>
+
         <!-- Hex Editor (shown when binary mode) -->
         <controls:HexEditorControl x:Name="HexEditor"
+                                   Grid.ColumnSpan="2"
                                    Visibility="Collapsed"/>
     </Grid>
 </UserControl>

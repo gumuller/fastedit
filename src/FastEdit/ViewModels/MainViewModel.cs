@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.IO;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using FastEdit.Helpers;
 using FastEdit.Services.Interfaces;
 using FastEdit.Theming;
 
@@ -43,12 +44,31 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private double _editorFontSize = 14;
 
+    [ObservableProperty]
+    private bool _isFoldingEnabled = true;
+
+    [ObservableProperty]
+    private bool _isMinimapVisible;
+
+    [ObservableProperty]
+    private bool _isAutoReloadEnabled;
+
+    [ObservableProperty]
+    private string _lineEnding = "CRLF";
+
     // Events for editor-specific actions
     public event Action? FindRequested;
     public event Action? ReplaceRequested;
     public event Action<int>? GoToLineRequested;
     public event Action? DuplicateLineRequested;
     public event Action<bool>? MoveLineRequested; // true = up
+    public event Action? FormatDocumentRequested;
+    public event Action? MinifyDocumentRequested;
+    public event Action? ToggleBookmarkRequested;
+    public event Action? NextBookmarkRequested;
+    public event Action? PrevBookmarkRequested;
+    public event Action? FindInFilesRequested;
+    public event Action? CompareFilesRequested;
 
     public MainViewModel(
         IFileService fileService,
@@ -206,6 +226,86 @@ public partial class MainViewModel : ObservableObject
     private void MoveLineDown() => MoveLineRequested?.Invoke(false);
 
     [RelayCommand]
+    private void FormatDocument() => FormatDocumentRequested?.Invoke();
+
+    [RelayCommand]
+    private void MinifyDocument() => MinifyDocumentRequested?.Invoke();
+
+    [RelayCommand]
+    private void ToggleFolding()
+    {
+        IsFoldingEnabled = !IsFoldingEnabled;
+        StatusText = IsFoldingEnabled ? "Code Folding: On" : "Code Folding: Off";
+    }
+
+    [RelayCommand]
+    private void ToggleMinimap()
+    {
+        IsMinimapVisible = !IsMinimapVisible;
+        StatusText = IsMinimapVisible ? "Minimap: Visible" : "Minimap: Hidden";
+    }
+
+    [RelayCommand]
+    private void ToggleAutoReload()
+    {
+        IsAutoReloadEnabled = !IsAutoReloadEnabled;
+        StatusText = IsAutoReloadEnabled ? "Auto-Reload: On" : "Auto-Reload: Off";
+    }
+
+    [RelayCommand]
+    private void ToggleBookmark() => ToggleBookmarkRequested?.Invoke();
+
+    [RelayCommand]
+    private void NextBookmark() => NextBookmarkRequested?.Invoke();
+
+    [RelayCommand]
+    private void PrevBookmark() => PrevBookmarkRequested?.Invoke();
+
+    [RelayCommand]
+    private void FindInFiles() => FindInFilesRequested?.Invoke();
+
+    [RelayCommand]
+    private void CompareFiles() => CompareFilesRequested?.Invoke();
+
+    [RelayCommand]
+    private void ConvertLineEndings(string? target)
+    {
+        if (SelectedTab == null || SelectedTab.IsBinaryMode || string.IsNullOrEmpty(target)) return;
+
+        var targetType = target switch
+        {
+            "CRLF" => LineEndingType.CRLF,
+            "LF" => LineEndingType.LF,
+            "CR" => LineEndingType.CR,
+            _ => LineEndingType.CRLF
+        };
+
+        SelectedTab.Content = LineEndingHelper.Convert(SelectedTab.Content, targetType);
+        LineEnding = LineEndingHelper.ToDisplayString(targetType);
+        StatusText = $"Converted to {target}";
+    }
+
+    [RelayCommand]
+    private async Task ChangeEncodingAsync(string? encodingName)
+    {
+        if (SelectedTab == null || string.IsNullOrEmpty(SelectedTab.FilePath) || string.IsNullOrEmpty(encodingName))
+            return;
+
+        try
+        {
+            var encoding = System.Text.Encoding.GetEncoding(encodingName);
+            var content = await File.ReadAllTextAsync(SelectedTab.FilePath, encoding);
+            SelectedTab.Content = content;
+            SelectedTab.Encoding = encodingName;
+            StatusText = $"Re-read with {encodingName}";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Encoding error: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
     private async Task OpenRecentFileAsync(string? filePath)
     {
         if (string.IsNullOrEmpty(filePath)) return;
@@ -328,9 +428,16 @@ public partial class MainViewModel : ObservableObject
 
     private void UpdateStatusForTab(EditorTabViewModel tab)
     {
-        StatusText = tab.IsBinaryMode
-            ? $"Hex Mode - {tab.FileSize:N0} bytes"
-            : $"Ln {tab.Line}, Col {tab.Column} | {tab.Encoding}";
+        if (tab.IsBinaryMode)
+        {
+            StatusText = $"Hex Mode - {tab.FileSize:N0} bytes";
+            LineEnding = "";
+        }
+        else
+        {
+            StatusText = $"Ln {tab.Line}, Col {tab.Column} | {tab.Encoding}";
+            LineEnding = LineEndingHelper.ToDisplayString(LineEndingHelper.Detect(tab.Content));
+        }
     }
 
     public async Task RestoreSessionAsync()

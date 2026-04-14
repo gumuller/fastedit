@@ -1,0 +1,99 @@
+<UserControl x:Class="FastEdit.Views.Controls.FindInFilesPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d"
+             d:DesignHeight="300" d:DesignWidth="400">
+    <Grid Background="{DynamicResource PanelBackgroundBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <Grid Grid.Row="0" Margin="8,6">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="FIND IN FILES" FontSize="11" FontWeight="SemiBold"
+                       Foreground="{DynamicResource WindowForegroundBrush}"
+                       VerticalAlignment="Center"/>
+            <Button Grid.Column="1" Content="✕" Click="ClosePanel_Click"
+                    Background="Transparent" BorderThickness="0"
+                    Foreground="{DynamicResource WindowForegroundBrush}"
+                    FontSize="10" Padding="4,2"/>
+        </Grid>
+
+        <!-- Search Controls -->
+        <StackPanel Grid.Row="1" Margin="8,0,8,6">
+            <TextBox x:Name="SearchBox" Text="{Binding SearchPattern, UpdateSourceTrigger=PropertyChanged}"
+                     Background="{DynamicResource EditorBackgroundBrush}"
+                     Foreground="{DynamicResource WindowForegroundBrush}"
+                     BorderBrush="{DynamicResource PanelBorderBrush}"
+                     Padding="4,3" Margin="0,0,0,4"
+                     KeyDown="SearchBox_KeyDown"/>
+
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBox Text="{Binding FileFilter, UpdateSourceTrigger=PropertyChanged}"
+                         Background="{DynamicResource EditorBackgroundBrush}"
+                         Foreground="{DynamicResource WindowForegroundBrush}"
+                         BorderBrush="{DynamicResource PanelBorderBrush}"
+                         Padding="4,3" ToolTip="File filter (e.g. *.cs;*.xml)"/>
+
+                <Button Grid.Column="1" Content="Search" Command="{Binding SearchCommand}"
+                        Margin="4,0,0,0" Padding="12,3"
+                        Foreground="{DynamicResource WindowForegroundBrush}"
+                        Background="{DynamicResource TabActiveBackgroundBrush}"/>
+            </Grid>
+
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                <CheckBox Content="Match Case" IsChecked="{Binding MatchCase}"
+                          Foreground="{DynamicResource WindowForegroundBrush}" Margin="0,0,12,0"/>
+                <CheckBox Content="Regex" IsChecked="{Binding UseRegex}"
+                          Foreground="{DynamicResource WindowForegroundBrush}"/>
+            </StackPanel>
+        </StackPanel>
+
+        <!-- Results -->
+        <ListBox Grid.Row="2" ItemsSource="{Binding Results}"
+                 Background="{DynamicResource EditorBackgroundBrush}"
+                 BorderThickness="0,1,0,0"
+                 BorderBrush="{DynamicResource PanelBorderBrush}"
+                 VirtualizingPanel.IsVirtualizing="True"
+                 VirtualizingPanel.VirtualizationMode="Recycling"
+                 MouseDoubleClick="Results_MouseDoubleClick"
+                 HorizontalContentAlignment="Stretch">
+            <ListBox.ItemTemplate>
+                <DataTemplate>
+                    <Grid Margin="4,2">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="{Binding FileName}" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource AccentBrush}" FontSize="11.5" Margin="0,0,4,0"/>
+                        <TextBlock Grid.Column="1" Text="{Binding LineNumber, StringFormat=':{0} '}"
+                                   Foreground="{DynamicResource TabForegroundBrush}" FontSize="11.5" Margin="0,0,6,0"/>
+                        <TextBlock Grid.Column="2" Text="{Binding LineText}" TextTrimming="CharacterEllipsis"
+                                   Foreground="{DynamicResource WindowForegroundBrush}" FontSize="11.5"
+                                   FontFamily="Cascadia Code, Consolas, Courier New"/>
+                    </Grid>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+
+        <!-- Status -->
+        <TextBlock Grid.Row="3" Text="{Binding StatusText}" Margin="8,4"
+                   Foreground="{DynamicResource TabForegroundBrush}" FontSize="11"/>
+    </Grid>
+</UserControl>

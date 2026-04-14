@@ -40,6 +40,10 @@
         <KeyBinding Key="OemPlus" Modifiers="Control" Command="{Binding ZoomInCommand}"/>
         <KeyBinding Key="OemMinus" Modifiers="Control" Command="{Binding ZoomOutCommand}"/>
         <KeyBinding Key="D0" Modifiers="Control" Command="{Binding ResetZoomCommand}"/>
+        <KeyBinding Key="F" Modifiers="Control+Shift" Command="{Binding FindInFilesCommand}"/>
+        <KeyBinding Key="F2" Modifiers="Control" Command="{Binding ToggleBookmarkCommand}"/>
+        <KeyBinding Key="F2" Command="{Binding NextBookmarkCommand}"/>
+        <KeyBinding Key="F2" Modifiers="Shift" Command="{Binding PrevBookmarkCommand}"/>
     </Window.InputBindings>
 
     <Grid>
@@ -87,19 +91,46 @@
                 <Separator/>
                 <MenuItem Header="_Find..." Command="{Binding FindCommand}" InputGestureText="Ctrl+F"/>
                 <MenuItem Header="Find and _Replace..." Command="{Binding ReplaceCommand}" InputGestureText="Ctrl+H"/>
+                <MenuItem Header="Find in Fi_les..." Command="{Binding FindInFilesCommand}" InputGestureText="Ctrl+Shift+F"/>
                 <MenuItem Header="_Go to Line..." Command="{Binding GoToLineCommand}" InputGestureText="Ctrl+G"/>
                 <Separator/>
                 <MenuItem Header="_Duplicate Line" Command="{Binding DuplicateLineCommand}" InputGestureText="Ctrl+D"/>
                 <MenuItem Header="Move Line _Up" Command="{Binding MoveLineUpCommand}" InputGestureText="Alt+Up"/>
                 <MenuItem Header="Move Line Do_wn" Command="{Binding MoveLineDownCommand}" InputGestureText="Alt+Down"/>
+                <Separator/>
+                <MenuItem Header="_Format Document" Command="{Binding FormatDocumentCommand}" InputGestureText="JSON/XML"/>
+                <MenuItem Header="Mi_nify Document" Command="{Binding MinifyDocumentCommand}"/>
+                <Separator/>
+                <MenuItem Header="Toggle _Bookmark" Command="{Binding ToggleBookmarkCommand}" InputGestureText="Ctrl+F2"/>
+                <MenuItem Header="Next Boo_kmark" Command="{Binding NextBookmarkCommand}" InputGestureText="F2"/>
+                <MenuItem Header="Pre_v Bookmark" Command="{Binding PrevBookmarkCommand}" InputGestureText="Shift+F2"/>
+                <Separator/>
+                <MenuItem Header="Line Endings">
+                    <MenuItem Header="Windows (CRLF)" Command="{Binding ConvertLineEndingsCommand}" CommandParameter="CRLF"/>
+                    <MenuItem Header="Unix (LF)" Command="{Binding ConvertLineEndingsCommand}" CommandParameter="LF"/>
+                    <MenuItem Header="Classic Mac (CR)" Command="{Binding ConvertLineEndingsCommand}" CommandParameter="CR"/>
+                </MenuItem>
+                <MenuItem Header="Encoding">
+                    <MenuItem Header="UTF-8" Command="{Binding ChangeEncodingCommand}" CommandParameter="utf-8"/>
+                    <MenuItem Header="UTF-16 LE" Command="{Binding ChangeEncodingCommand}" CommandParameter="utf-16"/>
+                    <MenuItem Header="UTF-16 BE" Command="{Binding ChangeEncodingCommand}" CommandParameter="utf-16BE"/>
+                    <MenuItem Header="ASCII" Command="{Binding ChangeEncodingCommand}" CommandParameter="us-ascii"/>
+                    <MenuItem Header="ISO 8859-1" Command="{Binding ChangeEncodingCommand}" CommandParameter="iso-8859-1"/>
+                    <MenuItem Header="Windows 1252" Command="{Binding ChangeEncodingCommand}" CommandParameter="windows-1252"/>
+                </MenuItem>
             </MenuItem>
             <MenuItem Header="_View">
                 <MenuItem Header="_Word Wrap" IsCheckable="True" IsChecked="{Binding IsWordWrapEnabled}" Command="{Binding ToggleWordWrapCommand}"/>
                 <MenuItem Header="Show _Whitespace" IsCheckable="True" IsChecked="{Binding IsWhitespaceVisible}" Command="{Binding ToggleWhitespaceCommand}"/>
+                <MenuItem Header="Code _Folding" IsCheckable="True" IsChecked="{Binding IsFoldingEnabled}" Command="{Binding ToggleFoldingCommand}"/>
+                <MenuItem Header="_Minimap" IsCheckable="True" IsChecked="{Binding IsMinimapVisible}" Command="{Binding ToggleMinimapCommand}"/>
                 <Separator/>
                 <MenuItem Header="Zoom _In" Command="{Binding ZoomInCommand}" InputGestureText="Ctrl++"/>
                 <MenuItem Header="Zoom _Out" Command="{Binding ZoomOutCommand}" InputGestureText="Ctrl+-"/>
                 <MenuItem Header="_Reset Zoom" Command="{Binding ResetZoomCommand}" InputGestureText="Ctrl+0"/>
+                <Separator/>
+                <MenuItem Header="_Auto-Reload (Tail)" IsCheckable="True" IsChecked="{Binding IsAutoReloadEnabled}" Command="{Binding ToggleAutoReloadCommand}"/>
+                <MenuItem Header="Compare _Files..." Command="{Binding CompareFilesCommand}"/>
                 <Separator/>
                 <MenuItem Header="_Theme" ItemsSource="{Binding AvailableThemes}">
                     <MenuItem.ItemContainerStyle>
@@ -125,6 +156,11 @@
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
+
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
 
             <!-- File Tree Panel -->
             <Border Grid.Column="0" Background="{DynamicResource PanelBackgroundBrush}">
@@ -234,6 +270,12 @@
                     </StackPanel>
                 </Border>
             </Grid>
+
+            <!-- Find In Files Panel -->
+            <controls:FindInFilesPanel x:Name="FindInFilesPanel"
+                                       Grid.Row="1" Grid.ColumnSpan="3"
+                                       Height="250"
+                                       Visibility="Collapsed"/>
         </Grid>
 
         <!-- Status Bar -->
@@ -244,6 +286,8 @@
             <StatusBarItem HorizontalAlignment="Right">
                 <StackPanel Orientation="Horizontal">
                     <TextBlock Text="{Binding SelectedTab.SyntaxLanguage}" Foreground="{DynamicResource StatusBarForegroundBrush}" Margin="0,0,16,0"/>
+                    <TextBlock Text="{Binding LineEnding}" Foreground="{DynamicResource StatusBarForegroundBrush}" Margin="0,0,16,0"
+                               ToolTip="Line ending type"/>
                     <TextBlock Text="{Binding SelectedTab.Encoding}" Foreground="{DynamicResource StatusBarForegroundBrush}" Margin="0,0,16,0"/>
                     <Button Content="{Binding SelectedTab.IsBinaryMode, Converter={StaticResource BoolToModeConverter}}"
                             Command="{Binding SelectedTab.ToggleModeAsyncCommand}"

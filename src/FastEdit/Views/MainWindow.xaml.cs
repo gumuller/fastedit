@@ -3,6 +3,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using FastEdit.ViewModels;
 using FastEdit.Views.Controls;
+using FastEdit.Views.Dialogs;
 using Microsoft.Extensions.DependencyInjection;
 using Wpf.Ui.Controls;
 
@@ -11,6 +12,7 @@ namespace FastEdit.Views;
 public partial class MainWindow : FluentWindow
 {
     private MainViewModel? _viewModel;
+    private FindInFilesViewModel? _findInFilesVm;
 
     public MainWindow()
     {
@@ -21,8 +23,15 @@ public partial class MainWindow : FluentWindow
         Loaded += MainWindow_Loaded;
         Closing += MainWindow_Closing;
 
-        // Subscribe to GoToLine event
+        // Subscribe to events
         _viewModel.GoToLineRequested += OnGoToLineRequested;
+        _viewModel.FindInFilesRequested += OnFindInFilesRequested;
+        _viewModel.CompareFilesRequested += OnCompareFilesRequested;
+
+        // Setup Find in Files
+        _findInFilesVm = new FindInFilesViewModel();
+        _findInFilesVm.NavigateToResult += OnNavigateToSearchResult;
+        FindInFilesPanel.DataContext = _findInFilesVm;
     }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
@@ -130,6 +139,54 @@ public partial class MainWindow : FluentWindow
                 }
             }
         }
+    }
+
+    // --- Find in Files ---
+    private void OnFindInFilesRequested()
+    {
+        if (_findInFilesVm != null)
+        {
+            _findInFilesVm.FolderPath = _viewModel?.FileTree.RootPath;
+        }
+        FindInFilesPanel.Visibility = Visibility.Visible;
+        FindInFilesPanel.FocusSearch();
+    }
+
+    private async void OnNavigateToSearchResult(object? sender, (string filePath, int line) result)
+    {
+        if (_viewModel == null) return;
+        await _viewModel.OpenFileCommand.ExecuteAsync(result.filePath);
+
+        // Give UI time to load the tab
+        await System.Threading.Tasks.Task.Delay(100);
+        Dispatcher.Invoke(() =>
+        {
+            var editorHost = FindActiveEditorHost();
+            editorHost?.GoToLine(result.line);
+        });
+    }
+
+    // --- Compare Files ---
+    private void OnCompareFilesRequested()
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "Select first file to compare",
+            Multiselect = false
+        };
+        if (dialog.ShowDialog() != true) return;
+        var leftPath = dialog.FileName;
+
+        dialog.Title = "Select second file to compare";
+        if (dialog.ShowDialog() != true) return;
+        var rightPath = dialog.FileName;
+
+        var compareWindow = new CompareFilesWindow
+        {
+            Owner = this
+        };
+        compareWindow.CompareFiles(leftPath, rightPath);
+        compareWindow.Show();
     }
 
     // --- Helper: Find active EditorHost in visual tree ---

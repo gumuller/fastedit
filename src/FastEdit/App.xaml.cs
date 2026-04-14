@@ -18,6 +18,21 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        // Global exception handlers for debugging
+        DispatcherUnhandledException += (s, args) =>
+        {
+            System.Diagnostics.Trace.TraceError($"Unhandled UI exception: {args.Exception}");
+            MessageBox.Show($"Error: {args.Exception.Message}\n\n{args.Exception.StackTrace}",
+                "FastEdit Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            args.Handled = true;
+        };
+
+        AppDomain.CurrentDomain.UnhandledException += (s, args) =>
+        {
+            if (args.ExceptionObject is Exception ex)
+                System.Diagnostics.Trace.TraceError($"Unhandled domain exception: {ex}");
+        };
+
         _host = Host.CreateDefaultBuilder()
             .ConfigureServices((context, services) =>
             {
