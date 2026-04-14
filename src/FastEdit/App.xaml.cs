@@ -1,4 +1,5 @@
 using System.Windows;
+using FastEdit.Helpers;
 using FastEdit.Services;
 using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
@@ -52,6 +53,9 @@ public partial class App : Application
             .Build();
 
         Services = _host.Services;
+
+        // Register custom syntax highlighting definitions
+        SyntaxHighlightingRegistrar.RegisterAll();
 
         // Apply saved theme from settings
         var settingsService = Services.GetRequiredService<ISettingsService>();

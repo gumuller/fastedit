@@ -1,0 +1,59 @@
+<?xml version="1.0"?>
+<SyntaxDefinition name="Dockerfile" extensions=".dockerfile;Dockerfile" xmlns="http://icsharpcode.net/sharpdevelop/syntaxdefinition/2008">
+
+  <Color name="Comment" />
+  <Color name="String" />
+  <Color name="Keywords" fontWeight="bold" />
+  <Color name="Preprocessor" />
+
+  <RuleSet>
+    <!-- Comments -->
+    <Span color="Comment">
+      <Begin>\#</Begin>
+    </Span>
+
+    <!-- Double-quoted strings -->
+    <Span color="String">
+      <Begin>"</Begin>
+      <End>"</End>
+      <RuleSet>
+        <Span begin="\\" end="." />
+        <Rule color="Preprocessor">\$\{[^}]+\}</Rule>
+        <Rule color="Preprocessor">\$[A-Za-z_]\w*</Rule>
+      </RuleSet>
+    </Span>
+
+    <!-- Single-quoted strings -->
+    <Span color="String">
+      <Begin>'</Begin>
+      <End>'</End>
+    </Span>
+
+    <!-- Variables -->
+    <Rule color="Preprocessor">\$\{[^}]+\}</Rule>
+    <Rule color="Preprocessor">\$[A-Za-z_]\w*</Rule>
+
+    <!-- Dockerfile instructions (case-insensitive, at start of line) -->
+    <Keywords color="Keywords">
+      <Word>FROM</Word>
+      <Word>RUN</Word>
+      <Word>CMD</Word>
+      <Word>LABEL</Word>
+      <Word>MAINTAINER</Word>
+      <Word>EXPOSE</Word>
+      <Word>ENV</Word>
+      <Word>ADD</Word>
+      <Word>COPY</Word>
+      <Word>ENTRYPOINT</Word>
+      <Word>VOLUME</Word>
+      <Word>USER</Word>
+      <Word>WORKDIR</Word>
+      <Word>ARG</Word>
+      <Word>ONBUILD</Word>
+      <Word>STOPSIGNAL</Word>
+      <Word>HEALTHCHECK</Word>
+      <Word>SHELL</Word>
+      <Word>AS</Word>
+    </Keywords>
+  </RuleSet>
+</SyntaxDefinition>

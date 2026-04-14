@@ -9,10 +9,14 @@
             <ColumnDefinition Width="*"/>
             <ColumnDefinition x:Name="MinimapColumn" Width="0"/>
         </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition x:Name="SplitRow" Height="0"/>
+        </Grid.RowDefinitions>
 
         <!-- Text Editor (shown when not binary mode) -->
         <avalonedit:TextEditor x:Name="TextEditor"
-                               Grid.Column="0"
+                               Grid.Column="0" Grid.Row="0"
                                FontFamily="Cascadia Code, Consolas, Courier New"
                                FontSize="14"
                                ShowLineNumbers="True"
@@ -34,14 +38,29 @@
             </avalonedit:TextEditor.Options>
         </avalonedit:TextEditor>
 
+        <!-- Split Editor (second view of same document) -->
+        <GridSplitter x:Name="SplitSplitter" Grid.Row="0" Grid.Column="0"
+                      Height="4" HorizontalAlignment="Stretch" VerticalAlignment="Bottom"
+                      Background="{DynamicResource BorderBrush}"
+                      Visibility="Collapsed"/>
+        <avalonedit:TextEditor x:Name="SplitEditor"
+                               Grid.Column="0" Grid.Row="1"
+                               FontFamily="Cascadia Code, Consolas, Courier New"
+                               FontSize="14"
+                               ShowLineNumbers="True"
+                               Background="{DynamicResource EditorBackgroundBrush}"
+                               Foreground="{DynamicResource EditorForegroundBrush}"
+                               LineNumbersForeground="{DynamicResource EditorLineNumbersForegroundBrush}"
+                               Visibility="Collapsed"/>
+
         <!-- Document Map / Minimap -->
         <controls:DocumentMapControl x:Name="DocumentMap"
-                                     Grid.Column="1"
+                                     Grid.Column="1" Grid.RowSpan="2"
                                      Visibility="Collapsed"/>
 
         <!-- Hex Editor (shown when binary mode) -->
         <controls:HexEditorControl x:Name="HexEditor"
-                                   Grid.ColumnSpan="2"
+                                   Grid.ColumnSpan="2" Grid.RowSpan="2"
                                    Visibility="Collapsed"/>
     </Grid>
 </UserControl>

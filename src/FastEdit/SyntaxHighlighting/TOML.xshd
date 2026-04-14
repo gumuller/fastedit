@@ -1,0 +1,78 @@
+<?xml version="1.0"?>
+<SyntaxDefinition name="TOML" extensions=".toml" xmlns="http://icsharpcode.net/sharpdevelop/syntaxdefinition/2008">
+
+  <Color name="Comment" />
+  <Color name="String" />
+  <Color name="Keywords" />
+  <Color name="NumberLiteral" />
+  <Color name="TrueFalse" fontWeight="bold" />
+  <Color name="Preprocessor" />
+
+  <RuleSet>
+    <!-- Comments -->
+    <Span color="Comment">
+      <Begin>\#</Begin>
+    </Span>
+
+    <!-- Multi-line basic strings -->
+    <Span color="String" multiline="true">
+      <Begin>"""</Begin>
+      <End>"""</End>
+      <RuleSet>
+        <Span begin="\\" end="." />
+      </RuleSet>
+    </Span>
+
+    <!-- Multi-line literal strings -->
+    <Span color="String" multiline="true">
+      <Begin>'''</Begin>
+      <End>'''</End>
+    </Span>
+
+    <!-- Basic strings -->
+    <Span color="String">
+      <Begin>"</Begin>
+      <End>"</End>
+      <RuleSet>
+        <Span begin="\\" end="." />
+      </RuleSet>
+    </Span>
+
+    <!-- Literal strings -->
+    <Span color="String">
+      <Begin>'</Begin>
+      <End>'</End>
+    </Span>
+
+    <!-- Array of tables [[name]] -->
+    <Rule color="Preprocessor">\[\[[^\]]*\]\]</Rule>
+
+    <!-- Table headers [name] -->
+    <Rule color="Preprocessor">\[[^\]]*\]</Rule>
+
+    <!-- Booleans -->
+    <Keywords color="TrueFalse">
+      <Word>true</Word>
+      <Word>false</Word>
+    </Keywords>
+
+    <!-- Date/time (ISO 8601 variants) -->
+    <Rule color="NumberLiteral">\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[-+]\d{2}:\d{2})?\b</Rule>
+    <Rule color="NumberLiteral">\b\d{4}-\d{2}-\d{2}\b</Rule>
+    <Rule color="NumberLiteral">\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b</Rule>
+
+    <!-- Special float values -->
+    <Rule color="NumberLiteral">[+-]?(?:inf|nan)\b</Rule>
+
+    <!-- Numbers: hex, octal, binary, float, integer -->
+    <Rule color="NumberLiteral">\b0x[0-9a-fA-F_]+\b</Rule>
+    <Rule color="NumberLiteral">\b0o[0-7_]+\b</Rule>
+    <Rule color="NumberLiteral">\b0b[01_]+\b</Rule>
+    <Rule color="NumberLiteral">[+-]?\b[0-9][0-9_]*\.[0-9_]*(?:[eE][-+]?[0-9_]+)?\b</Rule>
+    <Rule color="NumberLiteral">[+-]?\b[0-9][0-9_]*[eE][-+]?[0-9_]+\b</Rule>
+    <Rule color="NumberLiteral">[+-]?\b[0-9][0-9_]*\b</Rule>
+
+    <!-- Keys (bare or dotted, before =) -->
+    <Rule color="Keywords">^[ \t]*[\w][\w.-]*(?=\s*=)</Rule>
+  </RuleSet>
+</SyntaxDefinition>

@@ -1,0 +1,140 @@
+<?xml version="1.0"?>
+<SyntaxDefinition name="Rust" extensions=".rs" xmlns="http://icsharpcode.net/sharpdevelop/syntaxdefinition/2008">
+
+  <Color name="Comment" />
+  <Color name="String" />
+  <Color name="Keywords" fontWeight="bold" />
+  <Color name="ReferenceTypeKeywords" />
+  <Color name="NumberLiteral" />
+  <Color name="Preprocessor" />
+  <Color name="MethodCall" />
+  <Color name="TrueFalse" fontWeight="bold" />
+
+  <RuleSet>
+    <!-- Block comments (nested) -->
+    <Span color="Comment" multiline="true">
+      <Begin>/\*</Begin>
+      <End>\*/</End>
+    </Span>
+
+    <!-- Line comments -->
+    <Span color="Comment">
+      <Begin>//</Begin>
+    </Span>
+
+    <!-- Raw strings r"..." r#"..."# -->
+    <Span color="String" multiline="true">
+      <Begin>r#+"</Begin>
+      <End>"#+</End>
+    </Span>
+
+    <Span color="String" multiline="true">
+      <Begin>r"</Begin>
+      <End>"</End>
+    </Span>
+
+    <!-- Double-quoted strings -->
+    <Span color="String">
+      <Begin>"</Begin>
+      <End>"</End>
+      <RuleSet>
+        <Span begin="\\" end="." />
+      </RuleSet>
+    </Span>
+
+    <!-- Character literals -->
+    <Span color="String">
+      <Begin>'\\</Begin>
+      <End>'</End>
+    </Span>
+    <Rule color="String">'[^\\]'</Rule>
+
+    <!-- Attributes #[...] and #![...] -->
+    <Rule color="Preprocessor">\#!?\[[\w:(),= "]*\]</Rule>
+
+    <!-- Lifetimes -->
+    <Rule color="Preprocessor">'[a-zA-Z_]\w*</Rule>
+
+    <!-- Macros (identifier followed by !) -->
+    <Rule color="MethodCall">\b[a-zA-Z_]\w*!</Rule>
+
+    <!-- true/false -->
+    <Keywords color="TrueFalse">
+      <Word>true</Word>
+      <Word>false</Word>
+    </Keywords>
+
+    <!-- Keywords -->
+    <Keywords color="Keywords">
+      <Word>fn</Word>
+      <Word>let</Word>
+      <Word>mut</Word>
+      <Word>const</Word>
+      <Word>static</Word>
+      <Word>struct</Word>
+      <Word>enum</Word>
+      <Word>impl</Word>
+      <Word>trait</Word>
+      <Word>pub</Word>
+      <Word>use</Word>
+      <Word>mod</Word>
+      <Word>match</Word>
+      <Word>if</Word>
+      <Word>else</Word>
+      <Word>loop</Word>
+      <Word>while</Word>
+      <Word>for</Word>
+      <Word>in</Word>
+      <Word>return</Word>
+      <Word>break</Word>
+      <Word>continue</Word>
+      <Word>self</Word>
+      <Word>super</Word>
+      <Word>crate</Word>
+      <Word>extern</Word>
+      <Word>type</Word>
+      <Word>where</Word>
+      <Word>async</Word>
+      <Word>await</Word>
+      <Word>unsafe</Word>
+      <Word>ref</Word>
+      <Word>move</Word>
+      <Word>as</Word>
+      <Word>dyn</Word>
+    </Keywords>
+
+    <!-- Types -->
+    <Keywords color="ReferenceTypeKeywords">
+      <Word>i8</Word>
+      <Word>i16</Word>
+      <Word>i32</Word>
+      <Word>i64</Word>
+      <Word>i128</Word>
+      <Word>u8</Word>
+      <Word>u16</Word>
+      <Word>u32</Word>
+      <Word>u64</Word>
+      <Word>u128</Word>
+      <Word>f32</Word>
+      <Word>f64</Word>
+      <Word>bool</Word>
+      <Word>char</Word>
+      <Word>str</Word>
+      <Word>String</Word>
+      <Word>Vec</Word>
+      <Word>Option</Word>
+      <Word>Result</Word>
+      <Word>Box</Word>
+      <Word>Self</Word>
+      <Word>isize</Word>
+      <Word>usize</Word>
+    </Keywords>
+
+    <!-- Numbers: hex, octal, binary, float, integer -->
+    <Rule color="NumberLiteral">\b0x[0-9a-fA-F_]+(?:i8|i16|i32|i64|i128|u8|u16|u32|u64|u128|isize|usize)?\b</Rule>
+    <Rule color="NumberLiteral">\b0o[0-7_]+(?:i8|i16|i32|i64|i128|u8|u16|u32|u64|u128|isize|usize)?\b</Rule>
+    <Rule color="NumberLiteral">\b0b[01_]+(?:i8|i16|i32|i64|i128|u8|u16|u32|u64|u128|isize|usize)?\b</Rule>
+    <Rule color="NumberLiteral">\b[0-9][0-9_]*\.(?![.a-zA-Z])[0-9_]*(?:[eE][-+]?[0-9_]+)?(?:f32|f64)?\b</Rule>
+    <Rule color="NumberLiteral">\b[0-9][0-9_]*(?:i8|i16|i32|i64|i128|u8|u16|u32|u64|u128|f32|f64|isize|usize)?\b</Rule>
+  </RuleSet>
+</SyntaxDefinition>

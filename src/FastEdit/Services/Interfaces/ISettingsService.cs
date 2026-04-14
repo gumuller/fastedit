@@ -21,4 +21,6 @@ public class SessionFile
     public bool IsBinaryMode { get; set; }
     public string? TempFilePath { get; set; }
     public string? Content { get; set; }
+    public int CursorOffset { get; set; }
+    public double ScrollOffset { get; set; }
 }

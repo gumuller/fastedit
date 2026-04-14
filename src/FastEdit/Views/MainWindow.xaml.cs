@@ -1,6 +1,7 @@
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
+using FastEdit.Infrastructure;
 using FastEdit.ViewModels;
 using FastEdit.Views.Controls;
 using FastEdit.Views.Dialogs;
@@ -13,6 +14,7 @@ public partial class MainWindow : FluentWindow
 {
     private MainViewModel? _viewModel;
     private FindInFilesViewModel? _findInFilesVm;
+    private CommandRegistry? _commandRegistry;
 
     public MainWindow()
     {
@@ -27,11 +29,54 @@ public partial class MainWindow : FluentWindow
         _viewModel.GoToLineRequested += OnGoToLineRequested;
         _viewModel.FindInFilesRequested += OnFindInFilesRequested;
         _viewModel.CompareFilesRequested += OnCompareFilesRequested;
+        _viewModel.CommandPaletteRequested += OnCommandPaletteRequested;
 
         // Setup Find in Files
         _findInFilesVm = new FindInFilesViewModel();
         _findInFilesVm.NavigateToResult += OnNavigateToSearchResult;
         FindInFilesPanel.DataContext = _findInFilesVm;
+
+        BuildCommandRegistry();
+    }
+
+    private void BuildCommandRegistry()
+    {
+        if (_viewModel == null) return;
+        _commandRegistry = new CommandRegistry();
+
+        _commandRegistry.Register("New File", "File", "Ctrl+N", _viewModel.NewFileCommand);
+        _commandRegistry.Register("Open File", "File", "Ctrl+O", _viewModel.OpenFileCommand);
+        _commandRegistry.Register("Open Folder", "File", null, _viewModel.OpenFolderCommand);
+        _commandRegistry.Register("Save", "File", "Ctrl+S", _viewModel.SaveCommand);
+        _commandRegistry.Register("Save As", "File", "Ctrl+Shift+S", _viewModel.SaveAsCommand);
+        _commandRegistry.Register("Close Tab", "File", "Ctrl+W", _viewModel.CloseTabCommand);
+
+        _commandRegistry.Register("Find", "Edit", "Ctrl+F", _viewModel.FindCommand);
+        _commandRegistry.Register("Replace", "Edit", "Ctrl+H", _viewModel.ReplaceCommand);
+        _commandRegistry.Register("Find in Files", "Edit", "Ctrl+Shift+F", _viewModel.FindInFilesCommand);
+        _commandRegistry.Register("Go to Line", "Edit", "Ctrl+G", _viewModel.GoToLineCommand);
+        _commandRegistry.Register("Duplicate Line", "Edit", "Ctrl+Shift+D", _viewModel.DuplicateLineCommand);
+        _commandRegistry.Register("Move Line Up", "Edit", "Alt+Up", _viewModel.MoveLineUpCommand);
+        _commandRegistry.Register("Move Line Down", "Edit", "Alt+Down", _viewModel.MoveLineDownCommand);
+        _commandRegistry.Register("Format Document", "Edit", null, _viewModel.FormatDocumentCommand);
+        _commandRegistry.Register("Minify Document", "Edit", null, _viewModel.MinifyDocumentCommand);
+        _commandRegistry.Register("Toggle Bookmark", "Edit", "Ctrl+F2", _viewModel.ToggleBookmarkCommand);
+        _commandRegistry.Register("Next Bookmark", "Edit", "F2", _viewModel.NextBookmarkCommand);
+        _commandRegistry.Register("Previous Bookmark", "Edit", "Shift+F2", _viewModel.PrevBookmarkCommand);
+
+        _commandRegistry.Register("Toggle Word Wrap", "View", null, _viewModel.ToggleWordWrapCommand);
+        _commandRegistry.Register("Show Whitespace", "View", null, _viewModel.ToggleWhitespaceCommand);
+        _commandRegistry.Register("Toggle Code Folding", "View", null, _viewModel.ToggleFoldingCommand);
+        _commandRegistry.Register("Toggle Minimap", "View", null, _viewModel.ToggleMinimapCommand);
+        _commandRegistry.Register("Toggle Indent Guides", "View", null, _viewModel.ToggleIndentGuidesCommand);
+        _commandRegistry.Register("Zoom In", "View", "Ctrl++", _viewModel.ZoomInCommand);
+        _commandRegistry.Register("Zoom Out", "View", "Ctrl+-", _viewModel.ZoomOutCommand);
+        _commandRegistry.Register("Reset Zoom", "View", "Ctrl+0", _viewModel.ResetZoomCommand);
+        _commandRegistry.Register("Split Editor", "View", "Ctrl+\\", _viewModel.ToggleSplitViewCommand);
+        _commandRegistry.Register("Toggle Terminal", "View", "Ctrl+`", _viewModel.ToggleCommandRunnerCommand);
+        _commandRegistry.Register("Auto-Reload", "View", null, _viewModel.ToggleAutoReloadCommand);
+        _commandRegistry.Register("Compare Files", "View", null, _viewModel.CompareFilesCommand);
+        _commandRegistry.Register("Show Completion", "Edit", "Ctrl+Space", _viewModel.ShowCompletionCommand);
     }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
@@ -39,6 +84,11 @@ public partial class MainWindow : FluentWindow
         if (_viewModel != null)
         {
             await _viewModel.RestoreSessionAsync();
+
+            // Set command runner working directory
+            var folder = _viewModel.FileTree.RootPath;
+            if (!string.IsNullOrEmpty(folder))
+                CommandRunner.SetWorkingDirectory(folder);
         }
     }
 
@@ -50,6 +100,7 @@ public partial class MainWindow : FluentWindow
 
         if (_isClosingConfirmed)
         {
+            SaveEditorState();
             _viewModel.SaveSession();
             return;
         }
@@ -57,6 +108,7 @@ public partial class MainWindow : FluentWindow
         if (!_viewModel.HasUnsavedChanges())
         {
             _isClosingConfirmed = true;
+            SaveEditorState();
             _viewModel.SaveSession();
             return;
         }
@@ -67,9 +119,17 @@ public partial class MainWindow : FluentWindow
         if (canClose)
         {
             _isClosingConfirmed = true;
+            SaveEditorState();
             _viewModel.SaveSession();
             Close();
         }
+    }
+
+    private void SaveEditorState()
+    {
+        // Save cursor/scroll offsets from active editors before session save
+        var editorHost = FindActiveEditorHost();
+        editorHost?.SaveStateToViewModel();
     }
 
     private void Exit_Click(object sender, RoutedEventArgs e)
@@ -80,7 +140,7 @@ public partial class MainWindow : FluentWindow
     private void About_Click(object sender, RoutedEventArgs e)
     {
         System.Windows.MessageBox.Show(
-            "FastEdit v1.0\n\nA fast, lightweight text and hex editor for Windows.\n\nFeatures:\n- Syntax highlighting for 20+ languages\n- Hex editing for binary files\n- 9 built-in themes\n- Virtual scrolling for large files\n- Session restore\n- Find & Replace\n- Recent files\n- Zoom, word wrap, whitespace\n- Line operations",
+            "FastEdit v2.0\n\nA fast, lightweight text and hex editor for Windows.\n\nFeatures:\n- Syntax highlighting for 20+ languages\n- Hex editing for binary files\n- 9 built-in themes\n- Virtual scrolling for large files\n- Session restore with cursor position\n- Find & Replace, Find in Files\n- Command Palette (Ctrl+Shift+P)\n- Auto-complete (Ctrl+Space)\n- Code folding, indent guides\n- Git branch detection\n- Built-in terminal\n- Split editor view\n- File comparison",
             "About FastEdit",
             System.Windows.MessageBoxButton.OK,
             System.Windows.MessageBoxImage.Information);
@@ -103,6 +163,24 @@ public partial class MainWindow : FluentWindow
         {
             var editorHost = FindActiveEditorHost();
             editorHost?.GoToLine(dialog.LineNumber);
+        }
+    }
+
+    // --- Command Palette ---
+    private void OnCommandPaletteRequested()
+    {
+        if (_commandRegistry == null) return;
+
+        var palette = new CommandPaletteWindow(_commandRegistry)
+        {
+            Owner = this
+        };
+
+        if (palette.ShowDialog() == true && palette.SelectedCommand != null)
+        {
+            var cmd = palette.SelectedCommand;
+            if (cmd.Command.CanExecute(cmd.CommandParameter))
+                cmd.Command.Execute(cmd.CommandParameter);
         }
     }
 
@@ -136,6 +214,7 @@ public partial class MainWindow : FluentWindow
                 else if (System.IO.Directory.Exists(file))
                 {
                     _viewModel.FileTree.OpenFolderCommand.Execute(file);
+                    CommandRunner.SetWorkingDirectory(file);
                 }
             }
         }

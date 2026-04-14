@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using FastEdit.Core.FileAnalysis;
@@ -12,6 +13,9 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     private readonly IFileService _fileService;
     private VirtualizedByteBuffer? _byteBuffer;
     private bool _disposed;
+
+    private Encoding _fileEncoding = new UTF8Encoding(false);
+    private bool _hasBom;
 
     [ObservableProperty]
     private string _filePath = string.Empty;
@@ -50,7 +54,17 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private int _bytesPerRow = 16;
 
+    // Session restore state
+    [ObservableProperty]
+    private int _cursorOffset;
+
+    [ObservableProperty]
+    private double _scrollOffset;
+
     public VirtualizedByteBuffer? ByteBuffer => _byteBuffer;
+
+    public Encoding FileEncoding => _fileEncoding;
+    public bool HasBom => _hasBom;
 
     public EditorTabViewModel(IFileService fileService)
     {
@@ -70,10 +84,10 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         var analysis = await detector.AnalyzeFileAsync(filePath);
 
         IsBinaryMode = analysis.IsBinary;
-        Encoding = analysis.DetectedEncoding ?? "UTF-8";
 
         if (IsBinaryMode)
         {
+            Encoding = analysis.DetectedEncoding ?? "Binary";
             _byteBuffer = new VirtualizedByteBuffer(filePath);
             _byteBuffer.ModificationsChanged += (s, e) =>
             {
@@ -82,11 +96,30 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         }
         else
         {
-            Content = await _fileService.ReadAllTextAsync(filePath);
+            var result = await _fileService.ReadFileWithEncodingAsync(filePath);
+            Content = result.Content;
+            _fileEncoding = result.Encoding;
+            _hasBom = result.HasBom;
+            Encoding = GetEncodingDisplayName(result.Encoding, result.HasBom);
             SyntaxLanguage = GetSyntaxLanguage(filePath);
         }
 
         IsModified = false;
+    }
+
+    private static string GetEncodingDisplayName(System.Text.Encoding encoding, bool hasBom)
+    {
+        var name = encoding.WebName.ToUpperInvariant() switch
+        {
+            "UTF-8" => "UTF-8",
+            "UTF-16" => "UTF-16 LE",
+            "UTF-16BE" => "UTF-16 BE",
+            "US-ASCII" => "ASCII",
+            "ISO-8859-1" => "ISO 8859-1",
+            "WINDOWS-1252" => "Windows-1252",
+            _ => encoding.EncodingName
+        };
+        return hasBom ? $"{name} with BOM" : name;
     }
 
     [RelayCommand]
@@ -113,7 +146,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
                 return false; // User cancelled
         }
 
-        await _fileService.WriteAllTextAsync(savePath, Content);
+        await _fileService.WriteFileWithEncodingAsync(savePath, Content, _fileEncoding, _hasBom);
 
         // Update metadata after successful save
         FilePath = savePath;
@@ -147,7 +180,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         }
         else
         {
-            await _fileService.WriteAllTextAsync(savePath, Content);
+            await _fileService.WriteFileWithEncodingAsync(savePath, Content, _fileEncoding, _hasBom);
         }
 
         FilePath = savePath;
@@ -172,7 +205,11 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
             _byteBuffer?.Dispose();
             _byteBuffer = null;
             IsBinaryMode = false;
-            Content = await _fileService.ReadAllTextAsync(FilePath);
+            var result = await _fileService.ReadFileWithEncodingAsync(FilePath);
+            Content = result.Content;
+            _fileEncoding = result.Encoding;
+            _hasBom = result.HasBom;
+            Encoding = GetEncodingDisplayName(result.Encoding, result.HasBom);
             SyntaxLanguage = GetSyntaxLanguage(FilePath);
         }
         else
@@ -199,6 +236,22 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
 
     private static string GetSyntaxLanguage(string filePath)
     {
+        // Check filename first for files without meaningful extensions
+        var fileName = Path.GetFileName(filePath);
+        var fileNameLower = fileName.ToLowerInvariant();
+
+        var nameMatch = fileNameLower switch
+        {
+            "dockerfile" or "containerfile" => "Dockerfile",
+            "makefile" or "gnumakefile" => "Makefile",
+            ".gitignore" or ".gitattributes" or ".gitmodules" => "INI",
+            ".editorconfig" => "INI",
+            ".env" or ".env.local" or ".env.production" => "INI",
+            "cmakelists.txt" => "CMake",
+            _ => (string?)null
+        };
+        if (nameMatch != null) return nameMatch;
+
         var ext = Path.GetExtension(filePath).ToLowerInvariant();
         return ext switch
         {
@@ -214,14 +267,16 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
             ".rb" or ".rake" => "Ruby",
             ".html" or ".htm" => "HTML",
             ".css" or ".scss" or ".less" => "CSS",
-            ".xml" or ".xaml" or ".xsl" or ".xsd" => "XML",
-            ".json" => "JSON",
+            ".xml" or ".xaml" or ".xsl" or ".xsd" or ".csproj" or ".fsproj" or ".vbproj" or ".props" or ".targets" => "XML",
+            ".json" or ".jsonc" => "JSON",
             ".yaml" or ".yml" => "YAML",
-            ".md" => "Markdown",
+            ".md" or ".markdown" => "Markdown",
             ".sql" => "SQL",
-            ".ps1" => "PowerShell",
-            ".sh" or ".bash" => "Shell",
+            ".ps1" or ".psm1" or ".psd1" => "PowerShell",
+            ".sh" or ".bash" or ".zsh" or ".fish" => "Shell",
             ".bat" or ".cmd" => "Batch",
+            ".toml" => "TOML",
+            ".ini" or ".cfg" or ".conf" => "INI",
             _ => string.Empty
         };
     }

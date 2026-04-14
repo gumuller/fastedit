@@ -6,6 +6,7 @@ using FastEdit.Services;
 using FastEdit.Services.Interfaces;
 using FastEdit.Theming;
 using FastEdit.ViewModels;
+using ICSharpCode.AvalonEdit.CodeCompletion;
 using ICSharpCode.AvalonEdit.Folding;
 using ICSharpCode.AvalonEdit.Highlighting;
 using ICSharpCode.AvalonEdit.Search;
@@ -21,9 +22,12 @@ public partial class EditorHost : UserControl
     private System.Windows.Controls.Primitives.ToggleButton? _replaceToggle;
     private FoldingManager? _foldingManager;
     private BracketHighlightRenderer? _bracketRenderer;
+    private IndentGuideRenderer? _indentGuideRenderer;
+    private OccurrenceHighlightRenderer? _occurrenceRenderer;
     private readonly FileWatcherService _fileWatcher = new();
     private readonly List<int> _bookmarks = new();
     private System.Windows.Threading.DispatcherTimer? _foldingTimer;
+    private CompletionWindow? _completionWindow;
 
     public EditorHost()
     {
@@ -50,6 +54,15 @@ public partial class EditorHost : UserControl
         _bracketRenderer = new BracketHighlightRenderer(TextEditor);
         TextEditor.TextArea.TextView.BackgroundRenderers.Add(_bracketRenderer);
         TextEditor.TextArea.Caret.PositionChanged += OnCaretPositionChangedForBrackets;
+
+        // Install indent guide renderer
+        _indentGuideRenderer = new IndentGuideRenderer(TextEditor.TextArea.TextView);
+        TextEditor.TextArea.TextView.BackgroundRenderers.Add(_indentGuideRenderer);
+
+        // Install occurrence highlight renderer
+        _occurrenceRenderer = new OccurrenceHighlightRenderer(TextEditor.TextArea.TextView);
+        TextEditor.TextArea.TextView.BackgroundRenderers.Add(_occurrenceRenderer);
+        TextEditor.TextArea.SelectionChanged += OnSelectionChangedForOccurrences;
 
         // Folding update timer
         _foldingTimer = new System.Windows.Threading.DispatcherTimer
@@ -83,6 +96,8 @@ public partial class EditorHost : UserControl
             mainVm.ToggleBookmarkRequested += OnToggleBookmark;
             mainVm.NextBookmarkRequested += OnNextBookmark;
             mainVm.PrevBookmarkRequested += OnPrevBookmark;
+            mainVm.ShowCompletionRequested += OnShowCompletion;
+            mainVm.ToggleSplitViewRequested += OnToggleSplitView;
             mainVm.PropertyChanged += OnMainVmPropertyChanged;
         }
 
@@ -119,6 +134,9 @@ public partial class EditorHost : UserControl
                 break;
             case nameof(MainViewModel.IsAutoReloadEnabled):
                 UpdateAutoReload(vm.IsAutoReloadEnabled);
+                break;
+            case nameof(MainViewModel.IsIndentGuidesEnabled):
+                UpdateIndentGuides(vm.IsIndentGuidesEnabled);
                 break;
         }
     }
@@ -750,6 +768,107 @@ public partial class EditorHost : UserControl
         }
     }
 
+    // --- Occurrence Highlight ---
+    private void OnSelectionChangedForOccurrences(object? sender, EventArgs e)
+    {
+        if (_occurrenceRenderer == null || !IsActiveEditorHost()) return;
+
+        var selectedText = TextEditor.SelectedText?.Trim();
+        if (!string.IsNullOrEmpty(selectedText) && !selectedText.Contains('\n'))
+        {
+            _occurrenceRenderer.SetHighlightWord(selectedText, TextEditor.Document);
+        }
+        else
+        {
+            _occurrenceRenderer.Clear();
+        }
+    }
+
+    // --- Auto-Complete ---
+    private void OnShowCompletion()
+    {
+        if (!IsActiveEditorHost() || _currentVm == null) return;
+
+        var completions = CompletionHelper.GetCompletions(
+            _currentVm.SyntaxLanguage,
+            TextEditor.Document,
+            TextEditor.CaretOffset);
+
+        if (completions.Count == 0) return;
+
+        _completionWindow = new CompletionWindow(TextEditor.TextArea);
+        foreach (var item in completions)
+            _completionWindow.CompletionList.CompletionData.Add(item);
+
+        _completionWindow.Show();
+        _completionWindow.Closed += (s, e) => _completionWindow = null;
+    }
+
+    // --- Split View ---
+    private void OnToggleSplitView()
+    {
+        if (!IsActiveEditorHost()) return;
+
+        if (SplitEditor != null && SplitEditor.Visibility == Visibility.Visible)
+        {
+            SplitEditor.Visibility = Visibility.Collapsed;
+            SplitSplitter.Visibility = Visibility.Collapsed;
+            SplitRow.Height = new GridLength(0);
+        }
+        else if (SplitEditor != null)
+        {
+            // Share document between editors
+            SplitEditor.Document = TextEditor.Document;
+            SplitEditor.SyntaxHighlighting = TextEditor.SyntaxHighlighting;
+            SplitEditor.FontSize = TextEditor.FontSize;
+            SplitEditor.FontFamily = TextEditor.FontFamily;
+            SplitEditor.ShowLineNumbers = true;
+            SplitEditor.WordWrap = TextEditor.WordWrap;
+            SplitEditor.Visibility = Visibility.Visible;
+            SplitSplitter.Visibility = Visibility.Visible;
+            SplitRow.Height = new GridLength(1, GridUnitType.Star);
+        }
+    }
+
+    // --- Indent Guides ---
+    private void UpdateIndentGuides(bool enabled)
+    {
+        if (_indentGuideRenderer == null) return;
+
+        if (enabled)
+        {
+            if (!TextEditor.TextArea.TextView.BackgroundRenderers.Contains(_indentGuideRenderer))
+                TextEditor.TextArea.TextView.BackgroundRenderers.Add(_indentGuideRenderer);
+        }
+        else
+        {
+            TextEditor.TextArea.TextView.BackgroundRenderers.Remove(_indentGuideRenderer);
+        }
+        TextEditor.TextArea.TextView.InvalidateLayer(_indentGuideRenderer.Layer);
+    }
+
+    // --- Session State Save ---
+    public void SaveStateToViewModel()
+    {
+        if (_currentVm == null) return;
+        _currentVm.CursorOffset = TextEditor.CaretOffset;
+        _currentVm.ScrollOffset = TextEditor.VerticalOffset;
+    }
+
+    public void RestoreStateFromViewModel()
+    {
+        if (_currentVm == null) return;
+
+        if (_currentVm.CursorOffset > 0 && _currentVm.CursorOffset <= TextEditor.Document.TextLength)
+        {
+            TextEditor.CaretOffset = _currentVm.CursorOffset;
+        }
+        if (_currentVm.ScrollOffset > 0)
+        {
+            TextEditor.ScrollToVerticalOffset(_currentVm.ScrollOffset);
+        }
+    }
+
     private static IHighlightingDefinition? GetHighlightingForLanguage(string language)
     {
         if (string.IsNullOrEmpty(language))
@@ -771,6 +890,14 @@ public partial class EditorHost : UserControl
             "SQL" => HighlightingManager.Instance.GetDefinition("TSQL"),
             "PowerShell" => HighlightingManager.Instance.GetDefinition("PowerShell"),
             "Markdown" => HighlightingManager.Instance.GetDefinition("MarkDown"),
+            // Custom .xshd definitions
+            "YAML" => HighlightingManager.Instance.GetDefinition("YAML"),
+            "Shell" => HighlightingManager.Instance.GetDefinition("Bash"),
+            "Dockerfile" => HighlightingManager.Instance.GetDefinition("Dockerfile"),
+            "Rust" => HighlightingManager.Instance.GetDefinition("Rust"),
+            "Go" => HighlightingManager.Instance.GetDefinition("Go"),
+            "TOML" => HighlightingManager.Instance.GetDefinition("TOML"),
+            "INI" => HighlightingManager.Instance.GetDefinition("INI"),
             _ => null
         };
     }

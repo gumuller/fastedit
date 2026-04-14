@@ -1,0 +1,44 @@
+<?xml version="1.0"?>
+<SyntaxDefinition name="INI" extensions=".ini;.cfg;.conf;.properties" xmlns="http://icsharpcode.net/sharpdevelop/syntaxdefinition/2008">
+
+  <Color name="Comment" />
+  <Color name="String" />
+  <Color name="Keywords" />
+  <Color name="NumberLiteral" />
+  <Color name="Preprocessor" />
+
+  <RuleSet>
+    <!-- Comments (; and #) -->
+    <Span color="Comment">
+      <Begin>;</Begin>
+    </Span>
+    <Span color="Comment">
+      <Begin>\#</Begin>
+    </Span>
+
+    <!-- Double-quoted strings -->
+    <Span color="String">
+      <Begin>"</Begin>
+      <End>"</End>
+      <RuleSet>
+        <Span begin="\\" end="." />
+      </RuleSet>
+    </Span>
+
+    <!-- Single-quoted strings -->
+    <Span color="String">
+      <Begin>'</Begin>
+      <End>'</End>
+    </Span>
+
+    <!-- Section headers -->
+    <Rule color="Preprocessor">\[[^\]]*\]</Rule>
+
+    <!-- Numbers -->
+    <Rule color="NumberLiteral">\b0x[0-9a-fA-F]+\b</Rule>
+    <Rule color="NumberLiteral">\b[0-9]+(\.[0-9]+)?\b</Rule>
+
+    <!-- Keys (before =) -->
+    <Rule color="Keywords">^[ \t]*[\w][\w.-]*(?=\s*=)</Rule>
+  </RuleSet>
+</SyntaxDefinition>

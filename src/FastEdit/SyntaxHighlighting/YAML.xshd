@@ -1,0 +1,57 @@
+<?xml version="1.0"?>
+<SyntaxDefinition name="YAML" extensions=".yml;.yaml" xmlns="http://icsharpcode.net/sharpdevelop/syntaxdefinition/2008">
+
+  <Color name="Comment" />
+  <Color name="String" />
+  <Color name="Keywords" fontWeight="bold" />
+  <Color name="NumberLiteral" />
+  <Color name="Preprocessor" />
+
+  <RuleSet>
+    <!-- Comments -->
+    <Span color="Comment">
+      <Begin>\#</Begin>
+    </Span>
+
+    <!-- Double-quoted strings -->
+    <Span color="String">
+      <Begin>"</Begin>
+      <End>"</End>
+      <RuleSet>
+        <Span begin="\\" end="." />
+      </RuleSet>
+    </Span>
+
+    <!-- Single-quoted strings -->
+    <Span color="String">
+      <Begin>'</Begin>
+      <End>'</End>
+    </Span>
+
+    <!-- Anchors and aliases -->
+    <Rule color="Preprocessor">[&amp;\*]\w+</Rule>
+
+    <!-- Tags -->
+    <Rule color="Preprocessor">!![\w./-]+</Rule>
+
+    <!-- Booleans -->
+    <Keywords color="Keywords">
+      <Word>true</Word>
+      <Word>false</Word>
+      <Word>yes</Word>
+      <Word>no</Word>
+      <Word>null</Word>
+      <Word>~</Word>
+    </Keywords>
+
+    <!-- Numbers (integers, floats, hex, octal, special) -->
+    <Rule color="NumberLiteral">\b[-+]?0x[0-9a-fA-F]+\b</Rule>
+    <Rule color="NumberLiteral">\b[-+]?0o[0-7]+\b</Rule>
+    <Rule color="NumberLiteral">\b[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?\b</Rule>
+    <Rule color="NumberLiteral">\b[.](?:inf|Inf|INF)\b</Rule>
+    <Rule color="NumberLiteral">\b[.](?:nan|NaN|NAN)\b</Rule>
+
+    <!-- Keys (word before colon) -->
+    <Rule color="Keywords">^[ \t]*[\w][\w\s./-]*(?=\s*:)</Rule>
+  </RuleSet>
+</SyntaxDefinition>

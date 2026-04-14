@@ -1,0 +1,52 @@
+<ui:FluentWindow x:Class="FastEdit.Views.Dialogs.CommandPaletteWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+        Title="Command Palette"
+        Width="500"
+        SizeToContent="Height"
+        MaxHeight="400"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        ExtendsContentIntoTitleBar="True"
+        WindowBackdropType="Mica"
+        KeyDown="Window_KeyDown">
+
+    <Grid Margin="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <TextBox x:Name="SearchBox"
+                 Grid.Row="0"
+                 FontSize="16"
+                 Margin="0,0,0,4"
+                 TextChanged="SearchBox_TextChanged"/>
+
+        <ListBox x:Name="CommandList"
+                 Grid.Row="1"
+                 MaxHeight="300"
+                 MouseDoubleClick="CommandList_MouseDoubleClick"
+                 KeyDown="CommandList_KeyDown"
+                 BorderThickness="0">
+            <ListBox.ItemTemplate>
+                <DataTemplate>
+                    <Grid Margin="4,2">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Orientation="Horizontal">
+                            <TextBlock Text="{Binding Category}" Foreground="Gray" Margin="0,0,8,0" FontSize="12"/>
+                            <TextBlock Text="{Binding Name}" FontSize="13"/>
+                        </StackPanel>
+                        <TextBlock Grid.Column="1" Text="{Binding ShortcutText}" Foreground="Gray" FontSize="11"
+                                   VerticalAlignment="Center" Margin="16,0,0,0"/>
+                    </Grid>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+    </Grid>
+</ui:FluentWindow>

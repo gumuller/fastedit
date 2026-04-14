@@ -1,0 +1,136 @@
+<?xml version="1.0"?>
+<SyntaxDefinition name="Go" extensions=".go" xmlns="http://icsharpcode.net/sharpdevelop/syntaxdefinition/2008">
+
+  <Color name="Comment" />
+  <Color name="String" />
+  <Color name="Keywords" fontWeight="bold" />
+  <Color name="ReferenceTypeKeywords" />
+  <Color name="NumberLiteral" />
+  <Color name="MethodCall" />
+  <Color name="TrueFalse" fontWeight="bold" />
+
+  <RuleSet>
+    <!-- Block comments -->
+    <Span color="Comment" multiline="true">
+      <Begin>/\*</Begin>
+      <End>\*/</End>
+    </Span>
+
+    <!-- Line comments -->
+    <Span color="Comment">
+      <Begin>//</Begin>
+    </Span>
+
+    <!-- Raw strings (backtick) -->
+    <Span color="String" multiline="true">
+      <Begin>`</Begin>
+      <End>`</End>
+    </Span>
+
+    <!-- Double-quoted strings -->
+    <Span color="String">
+      <Begin>"</Begin>
+      <End>"</End>
+      <RuleSet>
+        <Span begin="\\" end="." />
+      </RuleSet>
+    </Span>
+
+    <!-- Rune literals -->
+    <Span color="String">
+      <Begin>'</Begin>
+      <End>'</End>
+      <RuleSet>
+        <Span begin="\\" end="." />
+      </RuleSet>
+    </Span>
+
+    <!-- Constants -->
+    <Keywords color="TrueFalse">
+      <Word>true</Word>
+      <Word>false</Word>
+      <Word>nil</Word>
+      <Word>iota</Word>
+    </Keywords>
+
+    <!-- Keywords -->
+    <Keywords color="Keywords">
+      <Word>break</Word>
+      <Word>case</Word>
+      <Word>chan</Word>
+      <Word>const</Word>
+      <Word>continue</Word>
+      <Word>default</Word>
+      <Word>defer</Word>
+      <Word>else</Word>
+      <Word>fallthrough</Word>
+      <Word>for</Word>
+      <Word>func</Word>
+      <Word>go</Word>
+      <Word>goto</Word>
+      <Word>if</Word>
+      <Word>import</Word>
+      <Word>interface</Word>
+      <Word>map</Word>
+      <Word>package</Word>
+      <Word>range</Word>
+      <Word>return</Word>
+      <Word>select</Word>
+      <Word>struct</Word>
+      <Word>switch</Word>
+      <Word>type</Word>
+      <Word>var</Word>
+    </Keywords>
+
+    <!-- Types -->
+    <Keywords color="ReferenceTypeKeywords">
+      <Word>bool</Word>
+      <Word>byte</Word>
+      <Word>complex64</Word>
+      <Word>complex128</Word>
+      <Word>error</Word>
+      <Word>float32</Word>
+      <Word>float64</Word>
+      <Word>int</Word>
+      <Word>int8</Word>
+      <Word>int16</Word>
+      <Word>int32</Word>
+      <Word>int64</Word>
+      <Word>rune</Word>
+      <Word>string</Word>
+      <Word>uint</Word>
+      <Word>uint8</Word>
+      <Word>uint16</Word>
+      <Word>uint32</Word>
+      <Word>uint64</Word>
+      <Word>uintptr</Word>
+    </Keywords>
+
+    <!-- Builtins -->
+    <Keywords color="MethodCall">
+      <Word>append</Word>
+      <Word>cap</Word>
+      <Word>close</Word>
+      <Word>complex</Word>
+      <Word>copy</Word>
+      <Word>delete</Word>
+      <Word>imag</Word>
+      <Word>len</Word>
+      <Word>make</Word>
+      <Word>new</Word>
+      <Word>panic</Word>
+      <Word>print</Word>
+      <Word>println</Word>
+      <Word>real</Word>
+      <Word>recover</Word>
+    </Keywords>
+
+    <!-- Numbers: hex, octal, binary, float, integer -->
+    <Rule color="NumberLiteral">\b0x[0-9a-fA-F_]+\b</Rule>
+    <Rule color="NumberLiteral">\b0o[0-7_]+\b</Rule>
+    <Rule color="NumberLiteral">\b0b[01_]+\b</Rule>
+    <Rule color="NumberLiteral">\b[0-9][0-9_]*\.[0-9_]*(?:[eE][-+]?[0-9_]+)?\b</Rule>
+    <Rule color="NumberLiteral">\b[0-9][0-9_]*[eE][-+]?[0-9_]+\b</Rule>
+    <Rule color="NumberLiteral">\b[0-9][0-9_]*\b</Rule>
+  </RuleSet>
+</SyntaxDefinition>

@@ -56,6 +56,15 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private string _lineEnding = "CRLF";
 
+    [ObservableProperty]
+    private bool _isIndentGuidesEnabled = true;
+
+    [ObservableProperty]
+    private bool _isCommandRunnerVisible;
+
+    [ObservableProperty]
+    private string _gitBranch = "";
+
     // Events for editor-specific actions
     public event Action? FindRequested;
     public event Action? ReplaceRequested;
@@ -69,6 +78,9 @@ public partial class MainViewModel : ObservableObject
     public event Action? PrevBookmarkRequested;
     public event Action? FindInFilesRequested;
     public event Action? CompareFilesRequested;
+    public event Action? CommandPaletteRequested;
+    public event Action? ShowCompletionRequested;
+    public event Action? ToggleSplitViewRequested;
 
     public MainViewModel(
         IFileService fileService,
@@ -268,6 +280,29 @@ public partial class MainViewModel : ObservableObject
     private void CompareFiles() => CompareFilesRequested?.Invoke();
 
     [RelayCommand]
+    private void ToggleIndentGuides()
+    {
+        IsIndentGuidesEnabled = !IsIndentGuidesEnabled;
+        StatusText = IsIndentGuidesEnabled ? "Indent Guides: On" : "Indent Guides: Off";
+    }
+
+    [RelayCommand]
+    private void CommandPalette() => CommandPaletteRequested?.Invoke();
+
+    [RelayCommand]
+    private void ShowCompletion() => ShowCompletionRequested?.Invoke();
+
+    [RelayCommand]
+    private void ToggleCommandRunner()
+    {
+        IsCommandRunnerVisible = !IsCommandRunnerVisible;
+        StatusText = IsCommandRunnerVisible ? "Terminal: Visible" : "Terminal: Hidden";
+    }
+
+    [RelayCommand]
+    private void ToggleSplitView() => ToggleSplitViewRequested?.Invoke();
+
+    [RelayCommand]
     private void ConvertLineEndings(string? target)
     {
         if (SelectedTab == null || SelectedTab.IsBinaryMode || string.IsNullOrEmpty(target)) return;
@@ -293,11 +328,13 @@ public partial class MainViewModel : ObservableObject
 
         try
         {
+            System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
             var encoding = System.Text.Encoding.GetEncoding(encodingName);
-            var content = await File.ReadAllTextAsync(SelectedTab.FilePath, encoding);
+            var bytes = await File.ReadAllBytesAsync(SelectedTab.FilePath);
+            var content = encoding.GetString(bytes);
             SelectedTab.Content = content;
-            SelectedTab.Encoding = encodingName;
-            StatusText = $"Re-read with {encodingName}";
+            SelectedTab.Encoding = encoding.EncodingName;
+            StatusText = $"Re-read with {encoding.EncodingName}";
         }
         catch (Exception ex)
         {
@@ -408,10 +445,12 @@ public partial class MainViewModel : ObservableObject
         {
             newValue.PropertyChanged += OnSelectedTabPropertyChanged;
             UpdateStatusForTab(newValue);
+            _ = UpdateGitBranchAsync(newValue.FilePath);
         }
         else
         {
             StatusText = "Ready";
+            GitBranch = "";
         }
     }
 
@@ -528,7 +567,9 @@ public partial class MainViewModel : ObservableObject
             {
                 FilePath = string.IsNullOrEmpty(tab.FilePath) ? tab.FileName : tab.FilePath,
                 IsUntitled = string.IsNullOrEmpty(tab.FilePath),
-                IsBinaryMode = tab.IsBinaryMode
+                IsBinaryMode = tab.IsBinaryMode,
+                CursorOffset = tab.CursorOffset,
+                ScrollOffset = tab.ScrollOffset
             };
 
             if (sessionFile.IsUntitled && !tab.IsBinaryMode)
@@ -551,6 +592,19 @@ public partial class MainViewModel : ObservableObject
         _settingsService.OpenFiles = sessionFiles;
         _settingsService.ActiveTabIndex = SelectedTab != null ? Tabs.IndexOf(SelectedTab) : 0;
         _settingsService.Save();
+    }
+
+    private async Task UpdateGitBranchAsync(string? filePath)
+    {
+        try
+        {
+            var branch = await GitHelper.GetBranchNameAsync(filePath);
+            GitBranch = branch ?? "";
+        }
+        catch
+        {
+            GitBranch = "";
+        }
     }
 
     private void AddToRecentFiles(string filePath)

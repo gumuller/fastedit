@@ -34,7 +34,7 @@
         <KeyBinding Key="F" Modifiers="Control" Command="{Binding FindCommand}"/>
         <KeyBinding Key="H" Modifiers="Control" Command="{Binding ReplaceCommand}"/>
         <KeyBinding Key="G" Modifiers="Control" Command="{Binding GoToLineCommand}"/>
-        <KeyBinding Key="D" Modifiers="Control" Command="{Binding DuplicateLineCommand}"/>
+        <KeyBinding Key="D" Modifiers="Control+Shift" Command="{Binding DuplicateLineCommand}"/>
         <KeyBinding Key="Up" Modifiers="Alt" Command="{Binding MoveLineUpCommand}"/>
         <KeyBinding Key="Down" Modifiers="Alt" Command="{Binding MoveLineDownCommand}"/>
         <KeyBinding Key="OemPlus" Modifiers="Control" Command="{Binding ZoomInCommand}"/>
@@ -44,6 +44,10 @@
         <KeyBinding Key="F2" Modifiers="Control" Command="{Binding ToggleBookmarkCommand}"/>
         <KeyBinding Key="F2" Command="{Binding NextBookmarkCommand}"/>
         <KeyBinding Key="F2" Modifiers="Shift" Command="{Binding PrevBookmarkCommand}"/>
+        <KeyBinding Key="P" Modifiers="Control+Shift" Command="{Binding CommandPaletteCommand}"/>
+        <KeyBinding Key="Space" Modifiers="Control" Command="{Binding ShowCompletionCommand}"/>
+        <KeyBinding Key="OemTilde" Modifiers="Control" Command="{Binding ToggleCommandRunnerCommand}"/>
+        <KeyBinding Key="OemPipe" Modifiers="Control" Command="{Binding ToggleSplitViewCommand}"/>
     </Window.InputBindings>
 
     <Grid>
@@ -51,6 +55,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
@@ -94,7 +99,7 @@
                 <MenuItem Header="Find in Fi_les..." Command="{Binding FindInFilesCommand}" InputGestureText="Ctrl+Shift+F"/>
                 <MenuItem Header="_Go to Line..." Command="{Binding GoToLineCommand}" InputGestureText="Ctrl+G"/>
                 <Separator/>
-                <MenuItem Header="_Duplicate Line" Command="{Binding DuplicateLineCommand}" InputGestureText="Ctrl+D"/>
+                <MenuItem Header="_Duplicate Line" Command="{Binding DuplicateLineCommand}" InputGestureText="Ctrl+Shift+D"/>
                 <MenuItem Header="Move Line _Up" Command="{Binding MoveLineUpCommand}" InputGestureText="Alt+Up"/>
                 <MenuItem Header="Move Line Do_wn" Command="{Binding MoveLineDownCommand}" InputGestureText="Alt+Down"/>
                 <Separator/>
@@ -124,13 +129,18 @@
                 <MenuItem Header="Show _Whitespace" IsCheckable="True" IsChecked="{Binding IsWhitespaceVisible}" Command="{Binding ToggleWhitespaceCommand}"/>
                 <MenuItem Header="Code _Folding" IsCheckable="True" IsChecked="{Binding IsFoldingEnabled}" Command="{Binding ToggleFoldingCommand}"/>
                 <MenuItem Header="_Minimap" IsCheckable="True" IsChecked="{Binding IsMinimapVisible}" Command="{Binding ToggleMinimapCommand}"/>
+                <MenuItem Header="_Indent Guides" IsCheckable="True" IsChecked="{Binding IsIndentGuidesEnabled}" Command="{Binding ToggleIndentGuidesCommand}"/>
                 <Separator/>
                 <MenuItem Header="Zoom _In" Command="{Binding ZoomInCommand}" InputGestureText="Ctrl++"/>
                 <MenuItem Header="Zoom _Out" Command="{Binding ZoomOutCommand}" InputGestureText="Ctrl+-"/>
                 <MenuItem Header="_Reset Zoom" Command="{Binding ResetZoomCommand}" InputGestureText="Ctrl+0"/>
                 <Separator/>
+                <MenuItem Header="Split _Editor" Command="{Binding ToggleSplitViewCommand}" InputGestureText="Ctrl+\"/>
+                <MenuItem Header="_Terminal" Command="{Binding ToggleCommandRunnerCommand}" InputGestureText="Ctrl+`"/>
+                <Separator/>
                 <MenuItem Header="_Auto-Reload (Tail)" IsCheckable="True" IsChecked="{Binding IsAutoReloadEnabled}" Command="{Binding ToggleAutoReloadCommand}"/>
                 <MenuItem Header="Compare _Files..." Command="{Binding CompareFilesCommand}"/>
+                <MenuItem Header="Command _Palette" Command="{Binding CommandPaletteCommand}" InputGestureText="Ctrl+Shift+P"/>
                 <Separator/>
                 <MenuItem Header="_Theme" ItemsSource="{Binding AvailableThemes}">
                     <MenuItem.ItemContainerStyle>
@@ -278,13 +288,23 @@
                                        Visibility="Collapsed"/>
         </Grid>
 
+        <!-- Command Runner Panel -->
+        <controls:CommandRunnerPanel x:Name="CommandRunner"
+                                      Grid.Row="3"
+                                      Height="200"
+                                      Visibility="{Binding IsCommandRunnerVisible, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+
         <!-- Status Bar -->
-        <StatusBar Grid.Row="3" Style="{StaticResource EditorStatusBarStyle}">
+        <StatusBar Grid.Row="4" Style="{StaticResource EditorStatusBarStyle}">
             <StatusBarItem>
                 <TextBlock Text="{Binding StatusText}" Foreground="{DynamicResource StatusBarForegroundBrush}"/>
             </StatusBarItem>
             <StatusBarItem HorizontalAlignment="Right">
                 <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="{Binding GitBranch}" Foreground="{DynamicResource AccentBrush}" Margin="0,0,16,0"
+                               FontSize="11" VerticalAlignment="Center"
+                               Visibility="{Binding GitBranch, Converter={StaticResource NullToCollapsedConverter}}"
+                               ToolTip="Git branch"/>
                     <TextBlock Text="{Binding SelectedTab.SyntaxLanguage}" Foreground="{DynamicResource StatusBarForegroundBrush}" Margin="0,0,16,0"/>
                     <TextBlock Text="{Binding LineEnding}" Foreground="{DynamicResource StatusBarForegroundBrush}" Margin="0,0,16,0"
                                ToolTip="Line ending type"/>
