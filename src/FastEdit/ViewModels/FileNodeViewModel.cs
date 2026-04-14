@@ -24,7 +24,7 @@ public partial class FileNodeViewModel : ObservableObject
     [ObservableProperty]
     private ObservableCollection<FileNodeViewModel> _children = new();
 
-    public string Icon => IsDirectory ? "📁" : "📄";
+    public string Icon => IsDirectory ? "\uE8B7" : "\uE8A5";
 
     public FileNodeViewModel(string path, bool isDirectory)
     {

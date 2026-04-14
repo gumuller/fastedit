@@ -25,10 +25,10 @@
                    Grid.Column="1"
                    Orientation="Vertical"
                    Minimum="0"
-                   Maximum="{Binding TotalRows}"
-                   ViewportSize="{Binding VisibleRows}"
-                   Value="{Binding ScrollPosition, Mode=TwoWay}"
-                   LargeChange="{Binding VisibleRows}"
+                   Maximum="0"
+                   ViewportSize="1"
+                   Value="0"
+                   LargeChange="1"
                    SmallChange="1"
                    ValueChanged="ScrollBar_ValueChanged"/>
     </Grid>

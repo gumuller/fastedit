@@ -13,6 +13,7 @@
                                Background="{DynamicResource EditorBackgroundBrush}"
                                Foreground="{DynamicResource EditorForegroundBrush}"
                                LineNumbersForeground="{DynamicResource EditorLineNumbersForegroundBrush}"
+                               PreviewMouseWheel="TextEditor_PreviewMouseWheel"
                                Visibility="Collapsed">
             <avalonedit:TextEditor.Options>
                 <avalonedit:TextEditorOptions ShowTabs="False"

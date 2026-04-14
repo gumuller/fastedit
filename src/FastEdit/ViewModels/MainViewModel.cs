@@ -31,6 +31,25 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private string _statusText = "Ready";
 
+    [ObservableProperty]
+    private ObservableCollection<string> _recentFiles = new();
+
+    [ObservableProperty]
+    private bool _isWordWrapEnabled;
+
+    [ObservableProperty]
+    private bool _isWhitespaceVisible;
+
+    [ObservableProperty]
+    private double _editorFontSize = 14;
+
+    // Events for editor-specific actions
+    public event Action? FindRequested;
+    public event Action? ReplaceRequested;
+    public event Action<int>? GoToLineRequested;
+    public event Action? DuplicateLineRequested;
+    public event Action<bool>? MoveLineRequested; // true = up
+
     public MainViewModel(
         IFileService fileService,
         IThemeService themeService,
@@ -43,6 +62,14 @@ public partial class MainViewModel : ObservableObject
         _fileTree = fileTree;
         _availableThemes = themeService.AvailableThemes;
         _currentThemeName = themeService.CurrentTheme?.Name ?? "Dark";
+
+        // Restore settings
+        _isWordWrapEnabled = settingsService.WordWrapEnabled;
+        _isWhitespaceVisible = settingsService.ShowWhitespace;
+        _editorFontSize = settingsService.EditorFontSize > 0 ? settingsService.EditorFontSize : 14;
+
+        foreach (var path in settingsService.RecentFiles)
+            _recentFiles.Add(path);
 
         // Wire up file tree events
         FileTree.FileOpenRequested += OnFileOpenRequested;
@@ -75,6 +102,7 @@ public partial class MainViewModel : ObservableObject
             Tabs.Add(tab);
             SelectedTab = tab;
 
+            AddToRecentFiles(filePath);
             StatusText = $"Opened: {Path.GetFileName(filePath)}";
         }
         catch (Exception ex)
@@ -100,12 +128,108 @@ public partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void CloseTab(EditorTabViewModel? tab)
+    private async Task SaveAsAsync()
+    {
+        if (SelectedTab == null) return;
+
+        try
+        {
+            await SelectedTab.SaveAsCommand.ExecuteAsync(null);
+            StatusText = $"Saved: {SelectedTab.FileName}";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Error saving: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private void Find() => FindRequested?.Invoke();
+
+    [RelayCommand]
+    private void Replace() => ReplaceRequested?.Invoke();
+
+    [RelayCommand]
+    private void GoToLine()
+    {
+        if (SelectedTab == null || SelectedTab.IsBinaryMode) return;
+        GoToLineRequested?.Invoke(SelectedTab.Line);
+    }
+
+    [RelayCommand]
+    private void ToggleWordWrap()
+    {
+        IsWordWrapEnabled = !IsWordWrapEnabled;
+        _settingsService.WordWrapEnabled = IsWordWrapEnabled;
+        StatusText = IsWordWrapEnabled ? "Word Wrap: On" : "Word Wrap: Off";
+    }
+
+    [RelayCommand]
+    private void ToggleWhitespace()
+    {
+        IsWhitespaceVisible = !IsWhitespaceVisible;
+        _settingsService.ShowWhitespace = IsWhitespaceVisible;
+        StatusText = IsWhitespaceVisible ? "Whitespace: Visible" : "Whitespace: Hidden";
+    }
+
+    [RelayCommand]
+    private void ZoomIn()
+    {
+        EditorFontSize = Math.Min(EditorFontSize + 2, 72);
+        _settingsService.EditorFontSize = EditorFontSize;
+        StatusText = $"Zoom: {EditorFontSize:0}pt";
+    }
+
+    [RelayCommand]
+    private void ZoomOut()
+    {
+        EditorFontSize = Math.Max(EditorFontSize - 2, 8);
+        _settingsService.EditorFontSize = EditorFontSize;
+        StatusText = $"Zoom: {EditorFontSize:0}pt";
+    }
+
+    [RelayCommand]
+    private void ResetZoom()
+    {
+        EditorFontSize = 14;
+        _settingsService.EditorFontSize = 14;
+        StatusText = "Zoom: Reset";
+    }
+
+    [RelayCommand]
+    private void DuplicateLine() => DuplicateLineRequested?.Invoke();
+
+    [RelayCommand]
+    private void MoveLineUp() => MoveLineRequested?.Invoke(true);
+
+    [RelayCommand]
+    private void MoveLineDown() => MoveLineRequested?.Invoke(false);
+
+    [RelayCommand]
+    private async Task OpenRecentFileAsync(string? filePath)
+    {
+        if (string.IsNullOrEmpty(filePath)) return;
+        if (!File.Exists(filePath))
+        {
+            RecentFiles.Remove(filePath);
+            _settingsService.RecentFiles = RecentFiles.ToList();
+            StatusText = "File not found — removed from recent list";
+            return;
+        }
+        await OpenFileAsync(filePath);
+    }
+
+    [RelayCommand]
+    private async Task CloseTabAsync(EditorTabViewModel? tab)
+    {
+        await CloseTabCoreAsync(tab);
+    }
+
+    public async Task CloseTabCoreAsync(EditorTabViewModel? tab)
     {
         tab ??= SelectedTab;
         if (tab == null) return;
 
-        // Confirm if modified
         if (tab.IsModified)
         {
             var result = System.Windows.MessageBox.Show(
@@ -119,7 +243,10 @@ public partial class MainViewModel : ObservableObject
 
             if (result == System.Windows.MessageBoxResult.Yes)
             {
-                tab.SaveCommand.Execute(null);
+                var saved = await tab.SaveCommand.ExecuteAsync(null)
+                    .ContinueWith(_ => !tab.IsModified);
+                if (!saved)
+                    return; // Save was cancelled or failed
             }
         }
 
@@ -146,6 +273,14 @@ public partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand]
+    private void RefreshThemes()
+    {
+        _themeService.RefreshCustomThemes();
+        AvailableThemes = _themeService.AvailableThemes;
+        StatusText = "Themes refreshed";
+    }
+
+    [RelayCommand]
     private async Task OpenFolderAsync()
     {
         await _fileTree.OpenFolderCommand.ExecuteAsync(null);
@@ -164,18 +299,38 @@ public partial class MainViewModel : ObservableObject
         SelectedTab = tab;
     }
 
-    partial void OnSelectedTabChanged(EditorTabViewModel? value)
+    partial void OnSelectedTabChanged(EditorTabViewModel? oldValue, EditorTabViewModel? newValue)
     {
-        if (value != null)
+        if (oldValue != null)
+            oldValue.PropertyChanged -= OnSelectedTabPropertyChanged;
+
+        if (newValue != null)
         {
-            StatusText = value.IsBinaryMode
-                ? $"Hex Mode - {value.FileSize:N0} bytes"
-                : $"Ln {value.Line}, Col {value.Column} | {value.Encoding}";
+            newValue.PropertyChanged += OnSelectedTabPropertyChanged;
+            UpdateStatusForTab(newValue);
         }
         else
         {
             StatusText = "Ready";
         }
+    }
+
+    private void OnSelectedTabPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (sender is EditorTabViewModel tab &&
+            (e.PropertyName == nameof(EditorTabViewModel.IsBinaryMode) ||
+             e.PropertyName == nameof(EditorTabViewModel.Line) ||
+             e.PropertyName == nameof(EditorTabViewModel.Column)))
+        {
+            UpdateStatusForTab(tab);
+        }
+    }
+
+    private void UpdateStatusForTab(EditorTabViewModel tab)
+    {
+        StatusText = tab.IsBinaryMode
+            ? $"Hex Mode - {tab.FileSize:N0} bytes"
+            : $"Ln {tab.Line}, Col {tab.Column} | {tab.Encoding}";
     }
 
     public async Task RestoreSessionAsync()
@@ -189,30 +344,26 @@ public partial class MainViewModel : ObservableObject
             {
                 if (sessionFile.IsUntitled)
                 {
+                    // Skip untitled binary tabs — can't be meaningfully restored
+                    if (sessionFile.IsBinaryMode) continue;
+
                     string content = string.Empty;
 
-                    // Try to load content from temp file first
                     if (!string.IsNullOrEmpty(sessionFile.TempFilePath) && File.Exists(sessionFile.TempFilePath))
                     {
                         content = await File.ReadAllTextAsync(sessionFile.TempFilePath);
-                        // Clean up temp file after reading
-                        try { File.Delete(sessionFile.TempFilePath); } catch { }
                     }
                     else if (!string.IsNullOrEmpty(sessionFile.Content))
                     {
                         content = sessionFile.Content;
                     }
 
-                    // Only restore if there's actual content
-                    if (!string.IsNullOrEmpty(content))
+                    var tab = new EditorTabViewModel(_fileService)
                     {
-                        var tab = new EditorTabViewModel(_fileService)
-                        {
-                            FileName = Path.GetFileName(sessionFile.FilePath),
-                            Content = content
-                        };
-                        Tabs.Add(tab);
-                    }
+                        FileName = Path.GetFileName(sessionFile.FilePath),
+                        Content = content
+                    };
+                    Tabs.Add(tab);
                 }
                 else if (File.Exists(sessionFile.FilePath))
                 {
@@ -229,12 +380,11 @@ public partial class MainViewModel : ObservableObject
 
         if (Tabs.Count > 0)
         {
-            SelectedTab = Tabs[0];
+            var index = Math.Clamp(_settingsService.ActiveTabIndex, 0, Tabs.Count - 1);
+            SelectedTab = Tabs[index];
         }
 
-        // Clear the stored session and clean up any remaining temp files
-        _settingsService.OpenFiles = new List<SessionFile>();
-        _settingsService.Save();
+        // Clean up temp files only (keep session data until next clean close)
         CleanupTempFiles();
     }
 
@@ -270,12 +420,12 @@ public partial class MainViewModel : ObservableObject
             var sessionFile = new SessionFile
             {
                 FilePath = string.IsNullOrEmpty(tab.FilePath) ? tab.FileName : tab.FilePath,
-                IsUntitled = string.IsNullOrEmpty(tab.FilePath)
+                IsUntitled = string.IsNullOrEmpty(tab.FilePath),
+                IsBinaryMode = tab.IsBinaryMode
             };
 
             if (sessionFile.IsUntitled && !tab.IsBinaryMode)
             {
-                // Save untitled content to temp file
                 var tempPath = Path.Combine(tempDir, $"{Guid.NewGuid():N}_{tab.FileName}.tmp");
                 try
                 {
@@ -284,7 +434,6 @@ public partial class MainViewModel : ObservableObject
                 }
                 catch
                 {
-                    // Store content directly if temp save fails
                     sessionFile.Content = tab.Content;
                 }
             }
@@ -293,7 +442,17 @@ public partial class MainViewModel : ObservableObject
         }
 
         _settingsService.OpenFiles = sessionFiles;
+        _settingsService.ActiveTabIndex = SelectedTab != null ? Tabs.IndexOf(SelectedTab) : 0;
         _settingsService.Save();
+    }
+
+    private void AddToRecentFiles(string filePath)
+    {
+        RecentFiles.Remove(filePath);
+        RecentFiles.Insert(0, filePath);
+        while (RecentFiles.Count > 10)
+            RecentFiles.RemoveAt(RecentFiles.Count - 1);
+        _settingsService.AddRecentFile(filePath);
     }
 
     public bool HasUnsavedChanges()
@@ -301,7 +460,7 @@ public partial class MainViewModel : ObservableObject
         return Tabs.Any(t => t.IsModified);
     }
 
-    public bool ConfirmExit()
+    public async Task<bool> ConfirmExitAsync()
     {
         var unsavedTabs = Tabs.Where(t => t.IsModified).ToList();
         if (unsavedTabs.Count == 0)
@@ -321,7 +480,9 @@ public partial class MainViewModel : ObservableObject
         {
             foreach (var tab in unsavedTabs)
             {
-                tab.SaveCommand.Execute(null);
+                await tab.SaveCommand.ExecuteAsync(null);
+                if (tab.IsModified)
+                    return false; // Save was cancelled or failed
             }
         }
 

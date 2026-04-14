@@ -75,7 +75,7 @@ public class BinaryDetector
                 bufferSize: SampleSize,
                 useAsync: true);
 
-            var buffer = new byte[Math.Min(SampleSize, stream.Length)];
+            var buffer = new byte[(int)Math.Min(SampleSize, stream.Length)];
             var bytesRead = await stream.ReadAsync(buffer.AsMemory());
 
             if (bytesRead == 0)

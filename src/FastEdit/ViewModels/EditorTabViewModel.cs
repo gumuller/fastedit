@@ -90,7 +90,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     }
 
     [RelayCommand]
-    private async Task SaveAsync()
+    private async Task<bool> SaveAsync()
     {
         if (IsBinaryMode)
         {
@@ -98,31 +98,95 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
             {
                 _byteBuffer.Save();
                 IsModified = false;
+                return true;
             }
-            return;
+            return false;
         }
 
-        await _fileService.WriteAllTextAsync(FilePath, Content);
+        var savePath = FilePath;
+
+        // If untitled (no file path), prompt for Save As
+        if (string.IsNullOrEmpty(savePath))
+        {
+            savePath = await _fileService.ShowSaveFileDialogAsync(FileName);
+            if (string.IsNullOrEmpty(savePath))
+                return false; // User cancelled
+        }
+
+        await _fileService.WriteAllTextAsync(savePath, Content);
+
+        // Update metadata after successful save
+        FilePath = savePath;
+        FileName = Path.GetFileName(savePath);
+        SyntaxLanguage = GetSyntaxLanguage(savePath);
         IsModified = false;
+        return true;
     }
 
     [RelayCommand]
-    private void ToggleMode()
+    private async Task<bool> SaveAsAsync()
     {
+        var defaultName = string.IsNullOrEmpty(FilePath) ? FileName : Path.GetFileName(FilePath);
+        var savePath = await _fileService.ShowSaveFileDialogAsync(defaultName);
+        if (string.IsNullOrEmpty(savePath))
+            return false;
+
         if (IsBinaryMode)
         {
-            // Switching from binary to text
-            _byteBuffer?.Dispose();
-            _byteBuffer = null;
-            // Would need to reload as text
+            if (_byteBuffer != null)
+            {
+                _byteBuffer.Save(); // saves to original path
+                // For Save As in binary mode, copy file to new location
+                if (savePath != FilePath)
+                    File.Copy(FilePath, savePath, overwrite: true);
+            }
+            else
+            {
+                return false;
+            }
         }
         else
         {
-            // Switching from text to binary
-            _byteBuffer = new VirtualizedByteBuffer(FilePath);
+            await _fileService.WriteAllTextAsync(savePath, Content);
         }
 
-        IsBinaryMode = !IsBinaryMode;
+        FilePath = savePath;
+        FileName = Path.GetFileName(savePath);
+        SyntaxLanguage = GetSyntaxLanguage(savePath);
+        IsModified = false;
+        return true;
+    }
+
+    [RelayCommand]
+    private async Task ToggleModeAsync()
+    {
+        // Only allow toggle for saved files
+        if (string.IsNullOrEmpty(FilePath)) return;
+
+        // Block toggle when there are unsaved edits
+        if (IsModified) return;
+
+        if (IsBinaryMode)
+        {
+            // Binary → Text: dispose buffer, reload as text
+            _byteBuffer?.Dispose();
+            _byteBuffer = null;
+            IsBinaryMode = false;
+            Content = await _fileService.ReadAllTextAsync(FilePath);
+            SyntaxLanguage = GetSyntaxLanguage(FilePath);
+        }
+        else
+        {
+            // Text → Binary: create byte buffer
+            IsBinaryMode = true;
+            Content = string.Empty;
+            SyntaxLanguage = string.Empty;
+            _byteBuffer = new VirtualizedByteBuffer(FilePath);
+            _byteBuffer.ModificationsChanged += (s, e) =>
+            {
+                IsModified = _byteBuffer.HasModifications;
+            };
+        }
     }
 
     partial void OnContentChanged(string value)

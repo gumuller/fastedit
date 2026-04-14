@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Reflection;
 using System.Text.Json;
 
@@ -7,6 +8,10 @@ public class ThemeLoader
 {
     private readonly List<ThemeDefinition> _themes = new();
     private readonly string _customThemesPath;
+
+    // Built-in themes discovered from embedded resources — used to distinguish
+    // them from custom themes during refresh.
+    private readonly HashSet<string> _builtInNames = new(StringComparer.OrdinalIgnoreCase);
 
     public IReadOnlyList<ThemeDefinition> Themes => _themes.AsReadOnly();
 
@@ -40,22 +45,25 @@ public class ThemeLoader
                 if (theme != null)
                 {
                     _themes.Add(theme);
+                    _builtInNames.Add(theme.Name);
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                // Skip invalid themes
+                Trace.TraceWarning("Failed to load built-in theme '{0}': {1}", resourceName, ex.Message);
             }
         }
 
-        // Ensure we have themes in a predictable order
-        var orderedNames = new[] { "Light", "Dark", "Nord", "RetroGreen" };
+        // Sort by preferred display order; unknown themes sort alphabetically at end
+        var orderedNames = new[] { "Light", "Dark", "Nord", "RetroGreen", "SolarizedLight", "SolarizedDark", "Monokai", "Dracula", "OneDark" };
         _themes.Sort((a, b) =>
         {
-            var indexA = Array.IndexOf(orderedNames, a.Name);
-            var indexB = Array.IndexOf(orderedNames, b.Name);
-            if (indexA == -1) indexA = int.MaxValue;
-            if (indexB == -1) indexB = int.MaxValue;
+            var indexA = Array.FindIndex(orderedNames, n => n.Equals(a.Name, StringComparison.OrdinalIgnoreCase));
+            var indexB = Array.FindIndex(orderedNames, n => n.Equals(b.Name, StringComparison.OrdinalIgnoreCase));
+            if (indexA == -1 && indexB == -1)
+                return string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+            if (indexA == -1) return 1;
+            if (indexB == -1) return -1;
             return indexA.CompareTo(indexB);
         });
     }
@@ -76,16 +84,16 @@ public class ThemeLoader
 
                 if (theme != null)
                 {
-                    // Don't add duplicates
-                    if (!_themes.Any(t => t.Name == theme.Name))
+                    // Case-insensitive duplicate check
+                    if (!_themes.Any(t => t.Name.Equals(theme.Name, StringComparison.OrdinalIgnoreCase)))
                     {
                         _themes.Add(theme);
                     }
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                // Skip invalid themes
+                Trace.TraceWarning("Failed to load custom theme '{0}': {1}", file, ex.Message);
             }
         }
     }
@@ -98,11 +106,8 @@ public class ThemeLoader
 
     public void RefreshCustomThemes()
     {
-        // Remove non-built-in themes
-        _themes.RemoveAll(t =>
-            t.Name != "Light" && t.Name != "Dark" &&
-            t.Name != "Nord" && t.Name != "RetroGreen");
-
+        // Remove all non-built-in themes, then reload
+        _themes.RemoveAll(t => !_builtInNames.Contains(t.Name));
         LoadCustomThemes();
     }
 

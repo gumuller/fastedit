@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Media;
 using FastEdit.Services.Interfaces;
 using FastEdit.Theming;
+using Wpf.Ui.Appearance;
 
 namespace FastEdit.Services;
 
@@ -18,7 +19,6 @@ public class ThemeService : IThemeService
     {
         _themeLoader = new ThemeLoader();
 
-        // Set default theme
         var defaultTheme = _themeLoader.GetTheme("Dark") ?? _themeLoader.Themes.FirstOrDefault();
         if (defaultTheme != null)
         {
@@ -32,8 +32,36 @@ public class ThemeService : IThemeService
         if (theme == null) return;
 
         CurrentTheme = theme;
+        ApplyWpfUiBaseTheme(theme);
         ApplyWpfTheme(theme);
         ThemeChanged?.Invoke(this, theme);
+    }
+
+    /// <summary>
+    /// Syncs WPF UI's base theme (Dark/Light) so Fluent controls match our palette.
+    /// </summary>
+    private static void ApplyWpfUiBaseTheme(ThemeDefinition theme)
+    {
+        var isDark = IsThemeDark(theme);
+        ApplicationThemeManager.Apply(
+            isDark ? ApplicationTheme.Dark : ApplicationTheme.Light,
+            Wpf.Ui.Controls.WindowBackdropType.Mica,
+            updateAccent: false);
+    }
+
+    private static bool IsThemeDark(ThemeDefinition theme)
+    {
+        // Determine by checking window background luminance
+        try
+        {
+            var color = (Color)ColorConverter.ConvertFromString(theme.Colors.WindowBackground);
+            var luminance = 0.299 * color.R + 0.587 * color.G + 0.114 * color.B;
+            return luminance < 128;
+        }
+        catch
+        {
+            return true;
+        }
     }
 
     private void ApplyWpfTheme(ThemeDefinition theme)
@@ -61,6 +89,7 @@ public class ThemeService : IThemeService
         resources["HexAsciiForegroundBrush"] = CreateBrush(colors.HexAsciiForeground);
         resources["HexModifiedBackgroundBrush"] = CreateBrush(colors.HexModifiedBackground);
         resources["HexNullByteForegroundBrush"] = CreateBrush(colors.HexNullByteForeground);
+        resources["HexSelectedForegroundBrush"] = CreateBrush(colors.EditorSelectionForeground);
 
         // Panels
         resources["PanelBackgroundBrush"] = CreateBrush(colors.PanelBackground);

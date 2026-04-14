@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 using FastEdit.Services.Interfaces;
@@ -53,6 +54,57 @@ public class SettingsService : ISettingsService
         set => _settings.OpenFiles = value;
     }
 
+    public int ActiveTabIndex
+    {
+        get => _settings.ActiveTabIndex;
+        set => _settings.ActiveTabIndex = value;
+    }
+
+    public List<string> RecentFiles
+    {
+        get => _settings.RecentFiles;
+        set => _settings.RecentFiles = value;
+    }
+
+    public bool WordWrapEnabled
+    {
+        get => _settings.WordWrapEnabled;
+        set
+        {
+            _settings.WordWrapEnabled = value;
+            Save();
+        }
+    }
+
+    public bool ShowWhitespace
+    {
+        get => _settings.ShowWhitespace;
+        set
+        {
+            _settings.ShowWhitespace = value;
+            Save();
+        }
+    }
+
+    public double EditorFontSize
+    {
+        get => _settings.EditorFontSize;
+        set
+        {
+            _settings.EditorFontSize = Math.Clamp(value, 8, 72);
+            Save();
+        }
+    }
+
+    public void AddRecentFile(string filePath)
+    {
+        _settings.RecentFiles.Remove(filePath);
+        _settings.RecentFiles.Insert(0, filePath);
+        if (_settings.RecentFiles.Count > 10)
+            _settings.RecentFiles.RemoveRange(10, _settings.RecentFiles.Count - 10);
+        Save();
+    }
+
     private AppSettings LoadSettings()
     {
         try
@@ -63,9 +115,9 @@ public class SettingsService : ISettingsService
                 return JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // If settings are corrupted, use defaults
+            Trace.TraceWarning("Failed to load settings: {0}", ex.Message);
         }
         return new AppSettings();
     }
@@ -77,9 +129,9 @@ public class SettingsService : ISettingsService
             var json = JsonSerializer.Serialize(_settings, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(_settingsPath, json);
         }
-        catch
+        catch (Exception ex)
         {
-            // Ignore save errors
+            Trace.TraceWarning("Failed to save settings: {0}", ex.Message);
         }
     }
 
@@ -108,5 +160,10 @@ public class SettingsService : ISettingsService
         public string ThemeName { get; set; } = "Dark";
         public string? LastOpenedFolder { get; set; }
         public List<SessionFile> OpenFiles { get; set; } = new();
+        public int ActiveTabIndex { get; set; }
+        public List<string> RecentFiles { get; set; } = new();
+        public bool WordWrapEnabled { get; set; }
+        public bool ShowWhitespace { get; set; }
+        public double EditorFontSize { get; set; } = 14;
     }
 }

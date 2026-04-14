@@ -5,10 +5,10 @@ namespace FastEdit.Core.HexEngine;
 public class VirtualizedByteBuffer : IDisposable
 {
     private readonly string _filePath;
-    private readonly FileStream _fileStream;
-    private readonly MemoryMappedFile? _memoryMappedFile;
-    private readonly long _fileLength;
-    private readonly bool _useMemoryMapping;
+    private FileStream _fileStream;
+    private MemoryMappedFile? _memoryMappedFile;
+    private long _fileLength;
+    private bool _useMemoryMapping;
     private readonly LruCache<long, byte[]> _pageCache;
     private readonly Dictionary<long, byte> _modifications = new();
     private bool _disposed;
@@ -88,22 +88,56 @@ public class VirtualizedByteBuffer : IDisposable
         if (_modifications.Count == 0)
             return;
 
-        // Close current streams
+        // Write modifications to a temporary approach: close current handles,
+        // write changes, then reopen. Use local variables to ensure failure safety.
         _memoryMappedFile?.Dispose();
         _fileStream.Close();
 
-        // Write modifications
-        using (var writeStream = new FileStream(_filePath, FileMode.Open, FileAccess.Write, FileShare.None))
+        try
         {
-            foreach (var (offset, value) in _modifications.OrderBy(m => m.Key))
+            using (var writeStream = new FileStream(_filePath, FileMode.Open, FileAccess.Write, FileShare.None))
             {
-                writeStream.Position = offset;
-                writeStream.WriteByte(value);
+                foreach (var (offset, value) in _modifications.OrderBy(m => m.Key))
+                {
+                    writeStream.Position = offset;
+                    writeStream.WriteByte(value);
+                }
+            }
+
+            _modifications.Clear();
+            _pageCache.Clear();
+        }
+        finally
+        {
+            // Always reopen the file stream and memory map so the instance remains usable
+            var newStream = new FileStream(
+                _filePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: PageSize,
+                FileOptions.RandomAccess | FileOptions.Asynchronous);
+
+            _fileStream = newStream;
+            _fileLength = _fileStream.Length;
+
+            _useMemoryMapping = _fileLength > 1024 * 1024;
+            if (_useMemoryMapping)
+            {
+                _memoryMappedFile = MemoryMappedFile.CreateFromFile(
+                    _fileStream,
+                    mapName: null,
+                    capacity: 0,
+                    MemoryMappedFileAccess.Read,
+                    HandleInheritability.None,
+                    leaveOpen: true);
+            }
+            else
+            {
+                _memoryMappedFile = null;
             }
         }
 
-        _modifications.Clear();
-        _pageCache.Clear();
         ModificationsChanged?.Invoke(this, EventArgs.Empty);
     }
 

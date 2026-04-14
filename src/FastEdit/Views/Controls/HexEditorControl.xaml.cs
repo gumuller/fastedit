@@ -30,6 +30,7 @@ public partial class HexEditorControl : UserControl
     private Brush? _backgroundBrush;
     private Brush? _selectionBrush;
     private Brush? _modifiedBrush;
+    private Brush? _selectedForegroundBrush;
 
     public HexEditorControl()
     {
@@ -62,6 +63,7 @@ public partial class HexEditorControl : UserControl
         _backgroundBrush = FindBrush("EditorBackgroundBrush");
         _selectionBrush = FindBrush("EditorSelectionBackgroundBrush");
         _modifiedBrush = FindBrush("HexModifiedBackgroundBrush");
+        _selectedForegroundBrush = FindBrush("HexSelectedForegroundBrush");
     }
 
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
@@ -86,6 +88,7 @@ public partial class HexEditorControl : UserControl
         var totalRows = (_viewModel.ByteBuffer.Length + _viewModel.BytesPerRow - 1) / _viewModel.BytesPerRow;
         VerticalScrollBar.Maximum = Math.Max(0, totalRows - _visibleRows);
         VerticalScrollBar.ViewportSize = _visibleRows;
+        VerticalScrollBar.LargeChange = _visibleRows;
     }
 
     private void ScrollBar_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -322,7 +325,7 @@ public partial class HexEditorControl : UserControl
 
                     var brush = b == 0x00 ? _nullBrush! : _bytesBrush!;
                     if (isSelected)
-                        brush = Brushes.White;
+                        brush = _selectedForegroundBrush!;
 
                     var hexByte = CreateFormattedText(b.ToString("X2"), brush, pixelsPerDip);
                     dc.DrawText(hexByte, new Point(x, y));
@@ -359,7 +362,20 @@ public partial class HexEditorControl : UserControl
 
     private Brush FindBrush(string resourceKey)
     {
-        return FindResource(resourceKey) as Brush ?? Brushes.White;
+        try
+        {
+            return FindResource(resourceKey) as Brush ?? Brushes.Transparent;
+        }
+        catch
+        {
+            return Brushes.Transparent;
+        }
+    }
+
+    public void OnThemeChanged()
+    {
+        RefreshBrushes();
+        RenderHex();
     }
 }
 

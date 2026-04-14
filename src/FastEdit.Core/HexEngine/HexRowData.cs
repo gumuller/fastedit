@@ -14,7 +14,7 @@ public class HexRowData
         Offset = offset;
         Bytes = bytes;
         BytesPerRow = bytesPerRow;
-        OffsetText = offset.ToString("X8");
+        OffsetText = offset > uint.MaxValue ? offset.ToString("X16") : offset.ToString("X8");
         HexText = FormatHex(bytes, bytesPerRow);
         AsciiText = FormatAscii(bytes);
     }
