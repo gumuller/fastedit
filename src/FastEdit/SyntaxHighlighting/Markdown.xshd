@@ -1,0 +1,53 @@
+<?xml version="1.0"?>
+<SyntaxDefinition name="MarkDown" extensions=".md;.markdown" xmlns="http://icsharpcode.net/sharpdevelop/syntaxdefinition/2008">
+
+  <Color name="Heading1" foreground="#569CD6" fontWeight="bold" />
+  <Color name="Heading2" foreground="#4EC9B0" fontWeight="bold" />
+  <Color name="Heading3" foreground="#DCDCAA" fontWeight="bold" />
+  <Color name="Heading4" foreground="#C586C0" fontWeight="bold" />
+  <Color name="Bold" fontWeight="bold" />
+  <Color name="Italic" fontStyle="italic" />
+  <Color name="Code" foreground="#CE9178" />
+  <Color name="Link" foreground="#569CD6" />
+  <Color name="Image" foreground="#4EC9B0" />
+  <Color name="BlockQuote" foreground="#6A9955" fontStyle="italic" />
+  <Color name="ListMarker" foreground="#569CD6" fontWeight="bold" />
+  <Color name="HorizontalRule" foreground="#808080" />
+
+  <RuleSet>
+    <!-- Headings: use Span with Begin/End to avoid Rule anchor issues -->
+    <Span color="Heading4" begin="####[^#]" end="$" />
+    <Span color="Heading3" begin="###[^#]" end="$" />
+    <Span color="Heading2" begin="##[^#]" end="$" />
+    <Span color="Heading1" begin="#[^#]" end="$" />
+
+    <!-- Fenced code blocks -->
+    <Span color="Code" multiline="true" begin="```" end="```" />
+
+    <!-- Inline code -->
+    <Span color="Code" begin="`" end="`" />
+
+    <!-- Block quotes -->
+    <Span color="BlockQuote" begin="&gt;\s" end="$" />
+
+    <!-- Images ![alt](url) -->
+    <Rule color="Image">!\[.*?\]\(.*?\)</Rule>
+
+    <!-- Links [text](url) -->
+    <Rule color="Link">\[.*?\]\(.*?\)</Rule>
+
+    <!-- Bold **text** or __text__ -->
+    <Span color="Bold" begin="\*\*" end="\*\*" />
+    <Span color="Bold" begin="__" end="__" />
+
+    <!-- Italic *text* or _text_ -->
+    <Span color="Italic" begin="\*" end="\*" />
+
+    <!-- List markers -->
+    <Rule color="ListMarker">[-\*\+]\s</Rule>
+    <Rule color="ListMarker">\d+\.\s</Rule>
+
+    <!-- Horizontal rules -->
+    <Rule color="HorizontalRule">[-\*_]{3,}</Rule>
+  </RuleSet>
+</SyntaxDefinition>

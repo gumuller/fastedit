@@ -74,7 +74,7 @@
             </Grid.ColumnDefinitions>
 
             <!-- App Icon -->
-            <Image Grid.Column="0" x:Name="AppIcon" Width="16" Height="16" Margin="10,6,6,6"
+            <Image Grid.Column="0" x:Name="AppIcon" Width="24" Height="24" Margin="8,4,6,4"
                    VerticalAlignment="Center" MouseLeftButtonDown="AppIcon_MouseLeftButtonDown"/>
 
             <!-- Tab Strip -->

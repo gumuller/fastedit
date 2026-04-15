@@ -29,13 +29,23 @@ public partial class MainWindow : FluentWindow
             var icoPath = System.IO.Path.Combine(dir, "fastedit.ico");
             if (System.IO.File.Exists(icoPath))
             {
-                var bitmap = new System.Windows.Media.Imaging.BitmapImage();
-                bitmap.BeginInit();
-                bitmap.UriSource = new Uri(icoPath, UriKind.Absolute);
-                bitmap.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
-                bitmap.EndInit();
-                Icon = bitmap;
-                AppIcon.Source = bitmap;
+                // Load icon at desired decode size for crisp rendering
+                var windowIcon = new System.Windows.Media.Imaging.BitmapImage();
+                windowIcon.BeginInit();
+                windowIcon.UriSource = new Uri(icoPath, UriKind.Absolute);
+                windowIcon.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+                windowIcon.EndInit();
+                Icon = windowIcon;
+
+                // Load a separate decode for the title bar at higher resolution
+                var titleIcon = new System.Windows.Media.Imaging.BitmapImage();
+                titleIcon.BeginInit();
+                titleIcon.UriSource = new Uri(icoPath, UriKind.Absolute);
+                titleIcon.DecodePixelWidth = 48;
+                titleIcon.DecodePixelHeight = 48;
+                titleIcon.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+                titleIcon.EndInit();
+                AppIcon.Source = titleIcon;
             }
         }
         catch { /* icon is optional */ }

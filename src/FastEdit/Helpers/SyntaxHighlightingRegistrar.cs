@@ -12,7 +12,7 @@ public static class SyntaxHighlightingRegistrar
 {
     private static readonly string[] CustomDefinitions =
     [
-        "YAML", "Bash", "Dockerfile", "Rust", "Go", "TOML", "INI"
+        "YAML", "Bash", "Dockerfile", "Rust", "Go", "TOML", "INI", "Markdown"
     ];
 
     public static void RegisterAll()
