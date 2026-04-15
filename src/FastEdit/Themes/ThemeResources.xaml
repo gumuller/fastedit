@@ -9,6 +9,7 @@
     <converters:CountToVisibilityConverter x:Key="CountToVisibilityConverter"/>
     <converters:BoolToModeConverter x:Key="BoolToModeConverter"/>
     <converters:NullToCollapsedConverter x:Key="NullToCollapsedConverter"/>
+    <converters:EqualityConverter x:Key="EqualityConverter"/>
 
     <!-- Default Dark Theme Colors (will be overwritten at runtime by ThemeService) -->
 

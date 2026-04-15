@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
 using FastEdit.Infrastructure;
+using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
 using FastEdit.Views.Controls;
 using FastEdit.Views.Dialogs;
@@ -19,6 +20,26 @@ public partial class MainWindow : FluentWindow
     public MainWindow()
     {
         InitializeComponent();
+
+        // Set window icon
+        try
+        {
+            var exePath = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName;
+            var dir = System.IO.Path.GetDirectoryName(exePath) ?? ".";
+            var icoPath = System.IO.Path.Combine(dir, "fastedit.ico");
+            if (System.IO.File.Exists(icoPath))
+            {
+                var bitmap = new System.Windows.Media.Imaging.BitmapImage();
+                bitmap.BeginInit();
+                bitmap.UriSource = new Uri(icoPath, UriKind.Absolute);
+                bitmap.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+                bitmap.EndInit();
+                Icon = bitmap;
+                AppIcon.Source = bitmap;
+            }
+        }
+        catch { /* icon is optional */ }
+
         _viewModel = App.Services.GetRequiredService<MainViewModel>();
         DataContext = _viewModel;
 
@@ -81,6 +102,22 @@ public partial class MainWindow : FluentWindow
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
+        // Restore window position and size
+        var settings = App.Services.GetRequiredService<ISettingsService>();
+        if (!double.IsNaN(settings.WindowLeft) && !double.IsNaN(settings.WindowTop))
+        {
+            Left = settings.WindowLeft;
+            Top = settings.WindowTop;
+        }
+        if (settings.WindowWidth > 0) Width = settings.WindowWidth;
+        if (settings.WindowHeight > 0) Height = settings.WindowHeight;
+        if (settings.WindowMaximized)
+        {
+            WindowState = WindowState.Maximized;
+            MaxRestoreIcon.Text = "\uE923";
+            MaxRestoreButton.ToolTip = "Restore Down";
+        }
+
         if (_viewModel != null)
         {
             await _viewModel.RestoreSessionAsync();
@@ -94,6 +131,19 @@ public partial class MainWindow : FluentWindow
 
     private bool _isClosingConfirmed;
 
+    private void SaveWindowState()
+    {
+        var settings = App.Services.GetRequiredService<ISettingsService>();
+        settings.WindowMaximized = WindowState == WindowState.Maximized;
+        if (WindowState == WindowState.Normal)
+        {
+            settings.WindowLeft = Left;
+            settings.WindowTop = Top;
+            settings.WindowWidth = Width;
+            settings.WindowHeight = Height;
+        }
+    }
+
     private async void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
         if (_viewModel == null) return;
@@ -101,6 +151,7 @@ public partial class MainWindow : FluentWindow
         if (_isClosingConfirmed)
         {
             SaveEditorState();
+            SaveWindowState();
             _viewModel.SaveSession();
             return;
         }
@@ -109,6 +160,7 @@ public partial class MainWindow : FluentWindow
         {
             _isClosingConfirmed = true;
             SaveEditorState();
+            SaveWindowState();
             _viewModel.SaveSession();
             return;
         }
@@ -120,6 +172,7 @@ public partial class MainWindow : FluentWindow
         {
             _isClosingConfirmed = true;
             SaveEditorState();
+            SaveWindowState();
             _viewModel.SaveSession();
             Close();
         }
@@ -285,5 +338,66 @@ public partial class MainWindow : FluentWindow
             if (found != null) return found;
         }
         return null;
+    }
+
+    private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ClickCount == 2)
+        {
+            WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+        }
+        else
+        {
+            DragMove();
+        }
+    }
+
+    private void AppIcon_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        SystemCommands.ShowSystemMenu(this, PointToScreen(new Point(0, TitleBarGrid.ActualHeight)));
+    }
+
+    private void TabHeader_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.Tag is EditorTabViewModel tab && _viewModel != null)
+        {
+            _viewModel.SelectedTab = tab;
+            e.Handled = true;
+        }
+    }
+
+    private void TabClose_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.Tag is EditorTabViewModel tab)
+        {
+            _viewModel?.CloseTabCommand.Execute(tab);
+        }
+    }
+
+    private void MinimizeButton_Click(object sender, RoutedEventArgs e)
+    {
+        WindowState = WindowState.Minimized;
+    }
+
+    private void MaximizeButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (WindowState == WindowState.Maximized)
+        {
+            WindowState = WindowState.Normal;
+            MaxRestoreIcon.Text = "\uE922"; // Maximize icon
+            MaxRestoreButton.ToolTip = "Maximize";
+        }
+        else
+        {
+            WindowState = WindowState.Maximized;
+            MaxRestoreIcon.Text = "\uE923"; // Restore icon
+            MaxRestoreButton.ToolTip = "Restore Down";
+        }
+    }
+
+    private void CloseButton_Click(object sender, RoutedEventArgs e)
+    {
+        Close();
     }
 }

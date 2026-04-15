@@ -19,8 +19,7 @@
         WindowBackdropType="Mica"
         AllowDrop="True"
         Drop="Window_Drop"
-        DragOver="Window_DragOver"
-        Icon="pack://application:,,,/fastedit.ico">
+        DragOver="Window_DragOver">
 
     <ui:FluentWindow.Resources>
         <infra:BindingProxy x:Key="ViewModelProxy" Data="{Binding}"/>
@@ -60,15 +59,102 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- WPF UI TitleBar -->
-        <ui:TitleBar Grid.Row="0"
-                     Title="FastEdit"
-                     ShowMaximize="True"
-                     ShowMinimize="True"
-                     ShowClose="True"/>
+        <!-- Title Bar Row: Icon + Tabs + New Tab + drag area + caption buttons -->
+        <Grid Grid.Row="0" Background="{DynamicResource TabBackgroundBrush}"
+              x:Name="TitleBarGrid" MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- App Icon -->
+            <Image Grid.Column="0" x:Name="AppIcon" Width="16" Height="16" Margin="10,6,6,6"
+                   VerticalAlignment="Center" MouseLeftButtonDown="AppIcon_MouseLeftButtonDown"/>
+
+            <!-- Tab Strip -->
+            <ItemsControl Grid.Column="1" x:Name="TabStrip"
+                          ItemsSource="{Binding Tabs}" VerticalAlignment="Stretch">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Orientation="Horizontal"/>
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Border x:Name="TabBorder"
+                                Background="Transparent"
+                                BorderThickness="0,0,1,0"
+                                BorderBrush="{DynamicResource TabBorderBrush}"
+                                Padding="12,6"
+                                Cursor="Hand"
+                                MouseLeftButtonDown="TabHeader_MouseLeftButtonDown"
+                                Tag="{Binding}">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{Binding FileName}" Margin="0,0,8,0"
+                                           Foreground="{DynamicResource TabForegroundBrush}"
+                                           VerticalAlignment="Center" FontSize="12"/>
+                                <TextBlock Text="●" Visibility="{Binding IsModified, Converter={StaticResource BoolToVisibilityConverter}}"
+                                           Foreground="{DynamicResource AccentBrush}" FontSize="8"
+                                           VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                <Button Content="✕" Tag="{Binding}"
+                                        Click="TabClose_Click"
+                                        Background="Transparent"
+                                        Foreground="{DynamicResource TabForegroundBrush}"
+                                        FontSize="10" Padding="4,0" Margin="0"
+                                        VerticalAlignment="Center" Focusable="False"
+                                        BorderThickness="0" Cursor="Hand"/>
+                            </StackPanel>
+                        </Border>
+                        <DataTemplate.Triggers>
+                            <DataTrigger Value="True">
+                                <DataTrigger.Binding>
+                                    <MultiBinding Converter="{StaticResource EqualityConverter}">
+                                        <Binding/>
+                                        <Binding Path="DataContext.SelectedTab" RelativeSource="{RelativeSource AncestorType=Window}"/>
+                                    </MultiBinding>
+                                </DataTrigger.Binding>
+                                <Setter TargetName="TabBorder" Property="Background" Value="{DynamicResource TabActiveBackgroundBrush}"/>
+                                <Setter TargetName="TabBorder" Property="BorderThickness" Value="0,2,1,0"/>
+                                <Setter TargetName="TabBorder" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                            </DataTrigger>
+                        </DataTemplate.Triggers>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <!-- New Tab Button (inline after tabs) -->
+            <Button Grid.Column="2" Command="{Binding NewFileCommand}"
+                    Background="Transparent" Foreground="{DynamicResource TabForegroundBrush}"
+                    Padding="10,6" Margin="0" VerticalAlignment="Center" Focusable="False"
+                    BorderThickness="0" Cursor="Hand" ToolTip="New Tab (Ctrl+N)">
+                <TextBlock Text="&#xE710;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="12"/>
+            </Button>
+
+            <!-- Window Control Buttons (right-aligned) -->
+            <StackPanel Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Top">
+                <Button Click="MinimizeButton_Click" Background="Transparent" BorderThickness="0"
+                        Foreground="{DynamicResource TabForegroundBrush}" Padding="16,8" Cursor="Hand"
+                        Focusable="False" ToolTip="Minimize">
+                    <TextBlock Text="&#xE921;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="11"/>
+                </Button>
+                <Button x:Name="MaxRestoreButton" Click="MaximizeButton_Click" Background="Transparent" BorderThickness="0"
+                        Foreground="{DynamicResource TabForegroundBrush}" Padding="16,8" Cursor="Hand"
+                        Focusable="False" ToolTip="Maximize">
+                    <TextBlock x:Name="MaxRestoreIcon" Text="&#xE922;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="11"/>
+                </Button>
+                <Button Click="CloseButton_Click" Background="Transparent" BorderThickness="0"
+                        Foreground="{DynamicResource TabForegroundBrush}" Padding="16,8" Cursor="Hand"
+                        Focusable="False" ToolTip="Close">
+                    <TextBlock Text="&#xE8BB;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="11"/>
+                </Button>
+            </StackPanel>
+        </Grid>
 
         <!-- Menu Bar -->
-        <Menu Grid.Row="1">
+        <Menu Grid.Row="1" Margin="0,0,0,0">
             <MenuItem Header="_File">
                 <MenuItem Header="_New" Command="{Binding NewFileCommand}" InputGestureText="Ctrl+N"/>
                 <MenuItem Header="_Open..." Command="{Binding OpenFileCommand}" InputGestureText="Ctrl+O"/>
@@ -225,39 +311,15 @@
 
             <!-- Editor Area -->
             <Grid Grid.Column="2">
-                <!-- Tabs and Editor -->
-                <TabControl ItemsSource="{Binding Tabs}"
-                            SelectedItem="{Binding SelectedTab, Mode=TwoWay}"
-                            Style="{StaticResource EditorTabControlStyle}"
-                            IsSynchronizedWithCurrentItem="True">
-                    <TabControl.ItemContainerStyle>
-                        <Style TargetType="TabItem" BasedOn="{StaticResource EditorTabItemStyle}"/>
-                    </TabControl.ItemContainerStyle>
-                    <TabControl.ItemTemplate>
-                        <DataTemplate>
-                            <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="{Binding FileName}" Margin="0,0,8,0"/>
-                                <TextBlock Text="*" Visibility="{Binding IsModified, Converter={StaticResource BoolToVisibilityConverter}}"/>
-                                <Button Content="✕"
-                                        Command="{Binding DataContext.CloseTabCommand, RelativeSource={RelativeSource AncestorType=TabControl}}"
-                                        CommandParameter="{Binding}"
-                                        Background="Transparent"
-                                        Foreground="{DynamicResource TabForegroundBrush}"
-                                        FontSize="10"
-                                        Padding="4,0"
-                                        Margin="4,0,0,0"
-                                        VerticalAlignment="Center"
-                                        Focusable="False"
-                                        BorderThickness="0"/>
-                            </StackPanel>
-                        </DataTemplate>
-                    </TabControl.ItemTemplate>
-                    <TabControl.ContentTemplate>
+                <!-- Editor Content (tabs are in title bar) -->
+                <ContentControl Content="{Binding SelectedTab}"
+                                Visibility="{Binding SelectedTab, Converter={StaticResource NullToCollapsedConverter}}">
+                    <ContentControl.ContentTemplate>
                         <DataTemplate>
                             <controls:EditorHost DataContext="{Binding}"/>
                         </DataTemplate>
-                    </TabControl.ContentTemplate>
-                </TabControl>
+                    </ContentControl.ContentTemplate>
+                </ContentControl>
 
                 <!-- Empty State -->
                 <Border Background="{DynamicResource EditorBackgroundBrush}"

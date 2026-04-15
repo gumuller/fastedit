@@ -96,6 +96,36 @@ public class SettingsService : ISettingsService
         }
     }
 
+    public double WindowLeft
+    {
+        get => _settings.WindowLeft;
+        set => _settings.WindowLeft = value;
+    }
+
+    public double WindowTop
+    {
+        get => _settings.WindowTop;
+        set => _settings.WindowTop = value;
+    }
+
+    public double WindowWidth
+    {
+        get => _settings.WindowWidth;
+        set => _settings.WindowWidth = value;
+    }
+
+    public double WindowHeight
+    {
+        get => _settings.WindowHeight;
+        set => _settings.WindowHeight = value;
+    }
+
+    public bool WindowMaximized
+    {
+        get => _settings.WindowMaximized;
+        set => _settings.WindowMaximized = value;
+    }
+
     public void AddRecentFile(string filePath)
     {
         _settings.RecentFiles.Remove(filePath);
@@ -165,5 +195,10 @@ public class SettingsService : ISettingsService
         public bool WordWrapEnabled { get; set; }
         public bool ShowWhitespace { get; set; }
         public double EditorFontSize { get; set; } = 14;
+        public double WindowLeft { get; set; } = double.NaN;
+        public double WindowTop { get; set; } = double.NaN;
+        public double WindowWidth { get; set; } = 1100;
+        public double WindowHeight { get; set; } = 700;
+        public bool WindowMaximized { get; set; }
     }
 }
