@@ -1,9 +1,8 @@
 using System.IO;
 using System.Windows;
 using System.Windows.Media;
-using DiffPlex;
-using DiffPlex.DiffBuilder;
 using DiffPlex.DiffBuilder.Model;
+using FastEdit.Services;
 using ICSharpCode.AvalonEdit.Document;
 using ICSharpCode.AvalonEdit.Rendering;
 
@@ -11,6 +10,8 @@ namespace FastEdit.Views.Dialogs;
 
 public partial class CompareFilesWindow : Window
 {
+    private readonly DiffService _diffService = new();
+
     public CompareFilesWindow()
     {
         InitializeComponent();
@@ -41,44 +42,17 @@ public partial class CompareFilesWindow : Window
         LeftLabel.Text = leftName;
         RightLabel.Text = rightName;
 
-        var diffBuilder = new SideBySideDiffBuilder(new Differ());
-        var diffModel = diffBuilder.BuildDiffModel(leftText, rightText);
+        var result = _diffService.ComputeDiff(leftText, rightText);
 
-        // Build display text and collect diff line info
-        var leftLines = new List<string>();
-        var rightLines = new List<string>();
-        var leftDiffLines = new List<(int lineNum, ChangeType type)>();
-        var rightDiffLines = new List<(int lineNum, ChangeType type)>();
+        LeftEditor.Document = new TextDocument(result.LeftText);
+        RightEditor.Document = new TextDocument(result.RightText);
 
-        for (int i = 0; i < diffModel.OldText.Lines.Count; i++)
-        {
-            var line = diffModel.OldText.Lines[i];
-            leftLines.Add(line.Text ?? "");
-            if (line.Type != ChangeType.Unchanged)
-                leftDiffLines.Add((i + 1, line.Type));
-        }
-
-        for (int i = 0; i < diffModel.NewText.Lines.Count; i++)
-        {
-            var line = diffModel.NewText.Lines[i];
-            rightLines.Add(line.Text ?? "");
-            if (line.Type != ChangeType.Unchanged)
-                rightDiffLines.Add((i + 1, line.Type));
-        }
-
-        LeftEditor.Document = new TextDocument(string.Join("\n", leftLines));
-        RightEditor.Document = new TextDocument(string.Join("\n", rightLines));
-
-        // Add diff highlighting
         LeftEditor.TextArea.TextView.BackgroundRenderers.Add(
-            new DiffBackgroundRenderer(leftDiffLines));
+            new DiffBackgroundRenderer(result.LeftDiffLines));
         RightEditor.TextArea.TextView.BackgroundRenderers.Add(
-            new DiffBackgroundRenderer(rightDiffLines));
+            new DiffBackgroundRenderer(result.RightDiffLines));
 
-        int changes = leftDiffLines.Count(d => d.type != ChangeType.Unchanged)
-                    + rightDiffLines.Count(d => d.type != ChangeType.Unchanged);
-
-        DiffStatus.Text = $"{changes} difference(s) found";
+        DiffStatus.Text = $"{result.ChangeCount} difference(s) found";
 
         // Sync scrolling
         LeftEditor.ScrollToHome();
@@ -118,9 +92,9 @@ internal class DiffBackgroundRenderer : IBackgroundRenderer
         ImaginaryBrush.Freeze();
     }
 
-    public DiffBackgroundRenderer(List<(int lineNum, ChangeType type)> diffLines)
+    public DiffBackgroundRenderer(IReadOnlyList<(int LineNum, ChangeType Type)> diffLines)
     {
-        _diffLines = diffLines.ToDictionary(d => d.lineNum, d => d.type);
+        _diffLines = diffLines.ToDictionary(d => d.LineNum, d => d.Type);
     }
 
     public KnownLayer Layer => KnownLayer.Background;
