@@ -76,7 +76,7 @@ public partial class App : Application
         var themeService = Services.GetRequiredService<IThemeService>();
         themeService.ApplyTheme(settingsService.ThemeName);
 
-        // Show main window
+        // Start main window
         var mainWindow = Services.GetRequiredService<MainWindow>();
         mainWindow.Show();
 
@@ -89,7 +89,6 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
-        // Mark clean shutdown and stop auto-save
         var autoSave = Services.GetService<AutoSaveService>();
         autoSave?.Stop();
         autoSave?.MarkCleanShutdown();

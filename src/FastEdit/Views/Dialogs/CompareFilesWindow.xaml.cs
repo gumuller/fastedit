@@ -1,6 +1,7 @@
 using System.IO;
 using System.Windows;
 using System.Windows.Media;
+using System.Windows.Threading;
 using DiffPlex.DiffBuilder.Model;
 using FastEdit.Services;
 using ICSharpCode.AvalonEdit.Document;
@@ -11,6 +12,7 @@ namespace FastEdit.Views.Dialogs;
 public partial class CompareFilesWindow : Window
 {
     private readonly DiffService _diffService = new();
+    private bool _isSyncingScroll;
 
     public CompareFilesWindow()
     {
@@ -54,19 +56,26 @@ public partial class CompareFilesWindow : Window
 
         DiffStatus.Text = $"{result.ChangeCount} difference(s) found";
 
-        // Sync scrolling
+        // Sync scrolling — flag is cleared via Dispatcher so it persists through
+        // the async layout pass that fires the cascading ScrollOffsetChanged event.
         LeftEditor.ScrollToHome();
         RightEditor.ScrollToHome();
 
         LeftEditor.TextArea.TextView.ScrollOffsetChanged += (s, e) =>
         {
+            if (_isSyncingScroll) return;
+            _isSyncingScroll = true;
             RightEditor.ScrollToVerticalOffset(LeftEditor.TextArea.TextView.VerticalOffset);
             RightEditor.ScrollToHorizontalOffset(LeftEditor.TextArea.TextView.HorizontalOffset);
+            Dispatcher.BeginInvoke(() => _isSyncingScroll = false, DispatcherPriority.Background);
         };
         RightEditor.TextArea.TextView.ScrollOffsetChanged += (s, e) =>
         {
+            if (_isSyncingScroll) return;
+            _isSyncingScroll = true;
             LeftEditor.ScrollToVerticalOffset(RightEditor.TextArea.TextView.VerticalOffset);
             LeftEditor.ScrollToHorizontalOffset(RightEditor.TextArea.TextView.HorizontalOffset);
+            Dispatcher.BeginInvoke(() => _isSyncingScroll = false, DispatcherPriority.Background);
         };
     }
 }
