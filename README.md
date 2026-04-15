@@ -5,6 +5,7 @@ A fast, lightweight text and hex editor for Windows, built with WPF (.NET 8), Av
 ![.NET 8](https://img.shields.io/badge/.NET-8.0-blue)
 ![WPF](https://img.shields.io/badge/WPF-Fluent%20Design-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
+[![CI](https://github.com/gumuller/fastedit/actions/workflows/ci.yml/badge.svg)](https://github.com/gumuller/fastedit/actions/workflows/ci.yml)
 
 ## Features
 
@@ -93,7 +94,7 @@ dotnet build
 # Run
 dotnet run --project src/FastEdit
 
-# Run tests (153 tests)
+# Run tests (281 tests)
 dotnet test
 ```
 
@@ -117,7 +118,7 @@ FastEdit.sln
 │   ├── FastEdit.Core/         # Core engine (hex editor, binary detection)
 │   └── FastEdit.Theming/      # Theme definitions and loader
 └── tests/
-    └── FastEdit.Tests/        # 153 unit tests
+    └── FastEdit.Tests/        # 281 unit tests
 ```
 
 ## Custom Themes
