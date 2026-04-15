@@ -16,6 +16,8 @@ public partial class MainViewModel : ObservableObject
     private readonly IDialogService _dialogService;
     private readonly IFileSystemService _fileSystemService;
     private readonly IEditorTabFactory _tabFactory;
+    private readonly IWorkspaceService _workspaceService;
+    private bool _isInitializing = true;
 
     [ObservableProperty]
     private ObservableCollection<EditorTabViewModel> _tabs = new();
@@ -84,6 +86,13 @@ public partial class MainViewModel : ObservableObject
     public event Action? CommandPaletteRequested;
     public event Action? ShowCompletionRequested;
     public event Action? ToggleSplitViewRequested;
+    public event Action<string>? TextToolRequested;
+    public event Action? PrintRequested;
+    public event Action? SelectNextOccurrenceRequested;
+    public event Action? SelectAllOccurrencesRequested;
+    public event Action? MacroStartRecordingRequested;
+    public event Action? MacroStopRecordingRequested;
+    public event Action<int>? MacroPlaybackRequested;
 
     public MainViewModel(
         IFileService fileService,
@@ -92,6 +101,7 @@ public partial class MainViewModel : ObservableObject
         IDialogService dialogService,
         IFileSystemService fileSystemService,
         IEditorTabFactory tabFactory,
+        IWorkspaceService workspaceService,
         FileTreeViewModel fileTree)
     {
         _fileService = fileService;
@@ -100,6 +110,7 @@ public partial class MainViewModel : ObservableObject
         _dialogService = dialogService;
         _fileSystemService = fileSystemService;
         _tabFactory = tabFactory;
+        _workspaceService = workspaceService;
         _fileTree = fileTree;
         _availableThemes = themeService.AvailableThemes;
         _currentThemeName = themeService.CurrentTheme?.Name ?? "Dark";
@@ -114,6 +125,8 @@ public partial class MainViewModel : ObservableObject
 
         // Wire up file tree events
         FileTree.FileOpenRequested += OnFileOpenRequested;
+
+        _isInitializing = false;
     }
 
     private async void OnFileOpenRequested(object? sender, string filePath)
@@ -191,6 +204,27 @@ public partial class MainViewModel : ObservableObject
     private void Replace() => ReplaceRequested?.Invoke();
 
     [RelayCommand]
+    private void Print() => PrintRequested?.Invoke();
+
+    [RelayCommand]
+    private void SelectNextOccurrence() => SelectNextOccurrenceRequested?.Invoke();
+
+    [RelayCommand]
+    private void SelectAllOccurrences() => SelectAllOccurrencesRequested?.Invoke();
+
+    [RelayCommand]
+    private void MacroStartRecording() => MacroStartRecordingRequested?.Invoke();
+
+    [RelayCommand]
+    private void MacroStopRecording() => MacroStopRecordingRequested?.Invoke();
+
+    [RelayCommand]
+    private void MacroPlayback() => MacroPlaybackRequested?.Invoke(1);
+
+    [RelayCommand]
+    private void MacroPlaybackMultiple() => MacroPlaybackRequested?.Invoke(0); // 0 = prompt for count
+
+    [RelayCommand]
     private void GoToLine()
     {
         if (SelectedTab == null || SelectedTab.IsBinaryMode) return;
@@ -198,19 +232,23 @@ public partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void ToggleWordWrap()
+    private void ToggleWordWrap() => IsWordWrapEnabled = !IsWordWrapEnabled;
+
+    partial void OnIsWordWrapEnabledChanged(bool value)
     {
-        IsWordWrapEnabled = !IsWordWrapEnabled;
-        _settingsService.WordWrapEnabled = IsWordWrapEnabled;
-        StatusText = IsWordWrapEnabled ? "Word Wrap: On" : "Word Wrap: Off";
+        if (_isInitializing) return;
+        _settingsService.WordWrapEnabled = value;
+        StatusText = value ? "Word Wrap: On" : "Word Wrap: Off";
     }
 
     [RelayCommand]
-    private void ToggleWhitespace()
+    private void ToggleWhitespace() => IsWhitespaceVisible = !IsWhitespaceVisible;
+
+    partial void OnIsWhitespaceVisibleChanged(bool value)
     {
-        IsWhitespaceVisible = !IsWhitespaceVisible;
-        _settingsService.ShowWhitespace = IsWhitespaceVisible;
-        StatusText = IsWhitespaceVisible ? "Whitespace: Visible" : "Whitespace: Hidden";
+        if (_isInitializing) return;
+        _settingsService.ShowWhitespace = value;
+        StatusText = value ? "Whitespace: Visible" : "Whitespace: Hidden";
     }
 
     [RelayCommand]
@@ -252,25 +290,53 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void MinifyDocument() => MinifyDocumentRequested?.Invoke();
 
+    // Text tools — each invokes TextToolRequested with the operation name
+    [RelayCommand] private void TextToUpperCase() => TextToolRequested?.Invoke("UpperCase");
+    [RelayCommand] private void TextToLowerCase() => TextToolRequested?.Invoke("LowerCase");
+    [RelayCommand] private void TextToTitleCase() => TextToolRequested?.Invoke("TitleCase");
+    [RelayCommand] private void TextInvertCase() => TextToolRequested?.Invoke("InvertCase");
+    [RelayCommand] private void TextRemoveDuplicateLines() => TextToolRequested?.Invoke("RemoveDuplicateLines");
+    [RelayCommand] private void TextSortLinesAsc() => TextToolRequested?.Invoke("SortLinesAsc");
+    [RelayCommand] private void TextSortLinesDesc() => TextToolRequested?.Invoke("SortLinesDesc");
+    [RelayCommand] private void TextTrimTrailing() => TextToolRequested?.Invoke("TrimTrailing");
+    [RelayCommand] private void TextTrimLeading() => TextToolRequested?.Invoke("TrimLeading");
+    [RelayCommand] private void TextTrimAll() => TextToolRequested?.Invoke("TrimAll");
+    [RelayCommand] private void TextTabsToSpaces() => TextToolRequested?.Invoke("TabsToSpaces");
+    [RelayCommand] private void TextSpacesToTabs() => TextToolRequested?.Invoke("SpacesToTabs");
+    [RelayCommand] private void TextBase64Encode() => TextToolRequested?.Invoke("Base64Encode");
+    [RelayCommand] private void TextBase64Decode() => TextToolRequested?.Invoke("Base64Decode");
+    [RelayCommand] private void TextUrlEncode() => TextToolRequested?.Invoke("UrlEncode");
+    [RelayCommand] private void TextUrlDecode() => TextToolRequested?.Invoke("UrlDecode");
+    [RelayCommand] private void TextChecksumMd5() => TextToolRequested?.Invoke("MD5");
+    [RelayCommand] private void TextChecksumSha1() => TextToolRequested?.Invoke("SHA1");
+    [RelayCommand] private void TextChecksumSha256() => TextToolRequested?.Invoke("SHA256");
+    [RelayCommand] private void TextChecksumSha512() => TextToolRequested?.Invoke("SHA512");
+
     [RelayCommand]
-    private void ToggleFolding()
+    private void ToggleFolding() => IsFoldingEnabled = !IsFoldingEnabled;
+
+    partial void OnIsFoldingEnabledChanged(bool value)
     {
-        IsFoldingEnabled = !IsFoldingEnabled;
-        StatusText = IsFoldingEnabled ? "Code Folding: On" : "Code Folding: Off";
+        if (_isInitializing) return;
+        StatusText = value ? "Code Folding: On" : "Code Folding: Off";
     }
 
     [RelayCommand]
-    private void ToggleMinimap()
+    private void ToggleMinimap() => IsMinimapVisible = !IsMinimapVisible;
+
+    partial void OnIsMinimapVisibleChanged(bool value)
     {
-        IsMinimapVisible = !IsMinimapVisible;
-        StatusText = IsMinimapVisible ? "Minimap: Visible" : "Minimap: Hidden";
+        if (_isInitializing) return;
+        StatusText = value ? "Minimap: Visible" : "Minimap: Hidden";
     }
 
     [RelayCommand]
-    private void ToggleAutoReload()
+    private void ToggleAutoReload() => IsAutoReloadEnabled = !IsAutoReloadEnabled;
+
+    partial void OnIsAutoReloadEnabledChanged(bool value)
     {
-        IsAutoReloadEnabled = !IsAutoReloadEnabled;
-        StatusText = IsAutoReloadEnabled ? "Auto-Reload: On" : "Auto-Reload: Off";
+        if (_isInitializing) return;
+        StatusText = value ? "Auto-Reload: On" : "Auto-Reload: Off";
     }
 
     [RelayCommand]
@@ -289,10 +355,12 @@ public partial class MainViewModel : ObservableObject
     private void CompareFiles() => CompareFilesRequested?.Invoke();
 
     [RelayCommand]
-    private void ToggleIndentGuides()
+    private void ToggleIndentGuides() => IsIndentGuidesEnabled = !IsIndentGuidesEnabled;
+
+    partial void OnIsIndentGuidesEnabledChanged(bool value)
     {
-        IsIndentGuidesEnabled = !IsIndentGuidesEnabled;
-        StatusText = IsIndentGuidesEnabled ? "Indent Guides: On" : "Indent Guides: Off";
+        if (_isInitializing) return;
+        StatusText = value ? "Indent Guides: On" : "Indent Guides: Off";
     }
 
     [RelayCommand]
@@ -302,10 +370,12 @@ public partial class MainViewModel : ObservableObject
     private void ShowCompletion() => ShowCompletionRequested?.Invoke();
 
     [RelayCommand]
-    private void ToggleCommandRunner()
+    private void ToggleCommandRunner() => IsCommandRunnerVisible = !IsCommandRunnerVisible;
+
+    partial void OnIsCommandRunnerVisibleChanged(bool value)
     {
-        IsCommandRunnerVisible = !IsCommandRunnerVisible;
-        StatusText = IsCommandRunnerVisible ? "Terminal: Visible" : "Terminal: Hidden";
+        if (_isInitializing) return;
+        StatusText = value ? "Terminal: Visible" : "Terminal: Hidden";
     }
 
     [RelayCommand]
@@ -430,6 +500,126 @@ public partial class MainViewModel : ObservableObject
     private void OpenFolder()
     {
         FileTree.OpenFolderCommand.Execute(null);
+    }
+
+    [RelayCommand]
+    private void AddFolder()
+    {
+        var folder = _dialogService.ShowFolderBrowserDialog();
+        if (!string.IsNullOrEmpty(folder))
+            FileTree.AddRootFolder(folder);
+    }
+
+    [RelayCommand]
+    private void SaveSessionAs()
+    {
+        var name = _dialogService.ShowInputDialog("Save Session As", "Session name:");
+        if (string.IsNullOrWhiteSpace(name)) return;
+
+        var session = BuildSessionData();
+        session.Name = name;
+        _workspaceService.SaveNamedSession(name, session);
+        StatusText = $"Session saved: {name}";
+    }
+
+    [RelayCommand]
+    private void LoadSession(string? name)
+    {
+        if (string.IsNullOrEmpty(name)) return;
+        var session = _workspaceService.LoadNamedSession(name);
+        if (session == null)
+        {
+            StatusText = $"Session not found: {name}";
+            return;
+        }
+
+        RestoreFromSessionData(session);
+        StatusText = $"Session loaded: {name}";
+    }
+
+    [RelayCommand]
+    private void SaveWorkspace()
+    {
+        var path = _dialogService.ShowSaveFileDialog("FastEdit Workspace|*.fastedit-workspace");
+        if (string.IsNullOrEmpty(path)) return;
+
+        var workspace = new WorkspaceData
+        {
+            Name = Path.GetFileNameWithoutExtension(path),
+            RootFolders = FileTree.RootPaths.ToList()
+        };
+        _workspaceService.SaveWorkspace(path, workspace);
+        StatusText = $"Workspace saved: {workspace.Name}";
+    }
+
+    [RelayCommand]
+    private void OpenWorkspace()
+    {
+        var path = _dialogService.ShowOpenFileDialog("FastEdit Workspace|*.fastedit-workspace");
+        if (string.IsNullOrEmpty(path)) return;
+
+        var workspace = _workspaceService.LoadWorkspace(path);
+        if (workspace == null)
+        {
+            StatusText = "Failed to load workspace";
+            return;
+        }
+
+        FileTree.SetMultipleRoots(workspace.RootFolders);
+        StatusText = $"Workspace loaded: {workspace.Name} ({workspace.RootFolders.Count} folders)";
+    }
+
+    private SessionData BuildSessionData()
+    {
+        var session = new SessionData();
+        foreach (var tab in Tabs)
+        {
+            session.Files.Add(new SessionFileEntry
+            {
+                FilePath = string.IsNullOrEmpty(tab.FilePath) ? tab.FileName : tab.FilePath,
+                IsUntitled = string.IsNullOrEmpty(tab.FilePath),
+                Content = string.IsNullOrEmpty(tab.FilePath) ? tab.Content : null,
+                CursorOffset = tab.CursorOffset,
+                ScrollOffset = tab.ScrollOffset
+            });
+        }
+        session.ActiveTabIndex = SelectedTab != null ? Tabs.IndexOf(SelectedTab) : 0;
+        return session;
+    }
+
+    private void RestoreFromSessionData(SessionData session)
+    {
+        // Close all current tabs
+        foreach (var tab in Tabs.ToList())
+            tab.Dispose();
+        Tabs.Clear();
+
+        // Open session files
+        foreach (var entry in session.Files)
+        {
+            try
+            {
+                if (entry.IsUntitled)
+                {
+                    var tab = _tabFactory.CreateUntitled(entry.Content);
+                    tab.FileName = Path.GetFileName(entry.FilePath);
+                    Tabs.Add(tab);
+                }
+                else if (_fileSystemService.FileExists(entry.FilePath))
+                {
+                    var tab = _tabFactory.Create();
+                    tab.LoadFileAsync(entry.FilePath).GetAwaiter().GetResult();
+                    Tabs.Add(tab);
+                }
+            }
+            catch { }
+        }
+
+        if (Tabs.Count > 0)
+        {
+            var index = Math.Clamp(session.ActiveTabIndex, 0, Tabs.Count - 1);
+            SelectedTab = Tabs[index];
+        }
     }
 
     [RelayCommand]
@@ -651,5 +841,44 @@ public partial class MainViewModel : ObservableObject
         }
 
         return true;
+    }
+
+    public IEnumerable<AutoSaveEntry> GetAutoSaveEntries()
+    {
+        foreach (var tab in Tabs)
+        {
+            if (!tab.IsModified && !string.IsNullOrEmpty(tab.FilePath)) continue;
+
+            var id = string.IsNullOrEmpty(tab.FilePath)
+                ? $"untitled-{Tabs.IndexOf(tab)}"
+                : Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(tab.FilePath)).ToLowerInvariant()[..16];
+
+            yield return new AutoSaveEntry(
+                id,
+                tab.FileName,
+                tab.FilePath,
+                tab.Content ?? "",
+                string.IsNullOrEmpty(tab.FilePath),
+                tab.CursorOffset,
+                tab.ScrollOffset);
+        }
+    }
+
+    public EditorTabViewModel? RecoverTab(AutoSaveEntry entry)
+    {
+        try
+        {
+            var tab = _tabFactory.CreateUntitled(entry.Content);
+            tab.FileName = entry.FileName;
+            if (!entry.IsUntitled && !string.IsNullOrEmpty(entry.FilePath))
+                tab.FilePath = entry.FilePath;
+            tab.CursorOffset = entry.CursorOffset;
+            tab.ScrollOffset = entry.ScrollOffset;
+            return tab;
+        }
+        catch
+        {
+            return null;
+        }
     }
 }

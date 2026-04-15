@@ -43,6 +43,11 @@ public partial class App : Application
                 services.AddSingleton<IFileService, FileService>();
                 services.AddSingleton<IFileSystemService, FileSystemService>();
                 services.AddSingleton<IDialogService, DialogService>();
+                services.AddSingleton<ITextToolsService, TextToolsService>();
+                services.AddSingleton<AutoSaveService>();
+                services.AddSingleton<IAutoSaveService>(sp => sp.GetRequiredService<AutoSaveService>());
+                services.AddSingleton<IWorkspaceService, WorkspaceService>();
+                services.AddSingleton<IMacroService, MacroService>();
                 services.AddSingleton<IDispatcherService, WpfDispatcherService>();
                 services.AddSingleton<IProcessService, ProcessService>();
                 services.AddTransient<IFileWatcherService, FileWatcherService>();
@@ -74,10 +79,21 @@ public partial class App : Application
         // Show main window
         var mainWindow = Services.GetRequiredService<MainWindow>();
         mainWindow.Show();
+
+        // Start auto-save service
+        var autoSave = Services.GetRequiredService<AutoSaveService>();
+        var mainVm = Services.GetRequiredService<MainViewModel>();
+        autoSave.SetEntryProvider(() => mainVm.GetAutoSaveEntries());
+        autoSave.Start();
     }
 
     protected override void OnExit(ExitEventArgs e)
     {
+        // Mark clean shutdown and stop auto-save
+        var autoSave = Services.GetService<AutoSaveService>();
+        autoSave?.Stop();
+        autoSave?.MarkCleanShutdown();
+
         _host?.Dispose();
         base.OnExit(e);
     }

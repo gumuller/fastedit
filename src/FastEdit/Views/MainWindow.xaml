@@ -48,6 +48,9 @@
         <KeyBinding Key="Space" Modifiers="Control" Command="{Binding ShowCompletionCommand}"/>
         <KeyBinding Key="OemTilde" Modifiers="Control" Command="{Binding ToggleCommandRunnerCommand}"/>
         <KeyBinding Key="OemPipe" Modifiers="Control" Command="{Binding ToggleSplitViewCommand}"/>
+        <KeyBinding Key="P" Modifiers="Control" Command="{Binding PrintCommand}"/>
+        <KeyBinding Key="D" Modifiers="Control" Command="{Binding SelectNextOccurrenceCommand}"/>
+        <KeyBinding Key="L" Modifiers="Control+Shift" Command="{Binding SelectAllOccurrencesCommand}"/>
     </Window.InputBindings>
 
     <Grid>
@@ -159,9 +162,17 @@
                 <MenuItem Header="_New" Command="{Binding NewFileCommand}" InputGestureText="Ctrl+N"/>
                 <MenuItem Header="_Open..." Command="{Binding OpenFileCommand}" InputGestureText="Ctrl+O"/>
                 <MenuItem Header="Open _Folder..." Command="{Binding OpenFolderCommand}"/>
+                <MenuItem Header="Add F_older to Workspace..." Command="{Binding AddFolderCommand}"/>
+                <Separator/>
+                <MenuItem Header="Open _Workspace..." Command="{Binding OpenWorkspaceCommand}"/>
+                <MenuItem Header="Save Wor_kspace As..." Command="{Binding SaveWorkspaceCommand}"/>
+                <Separator/>
+                <MenuItem Header="Save Sessio_n As..." Command="{Binding SaveSessionAsCommand}"/>
                 <Separator/>
                 <MenuItem Header="_Save" Command="{Binding SaveCommand}" InputGestureText="Ctrl+S"/>
                 <MenuItem Header="Save _As..." Command="{Binding SaveAsCommand}" InputGestureText="Ctrl+Shift+S"/>
+                <Separator/>
+                <MenuItem Header="_Print..." Command="{Binding PrintCommand}" InputGestureText="Ctrl+P"/>
                 <Separator/>
                 <MenuItem Header="_Recent Files" ItemsSource="{Binding RecentFiles}">
                     <MenuItem.ItemContainerStyle>
@@ -185,6 +196,15 @@
                 <MenuItem Header="Find and _Replace..." Command="{Binding ReplaceCommand}" InputGestureText="Ctrl+H"/>
                 <MenuItem Header="Find in Fi_les..." Command="{Binding FindInFilesCommand}" InputGestureText="Ctrl+Shift+F"/>
                 <MenuItem Header="_Go to Line..." Command="{Binding GoToLineCommand}" InputGestureText="Ctrl+G"/>
+                <MenuItem Header="Select _Next Occurrence" Command="{Binding SelectNextOccurrenceCommand}" InputGestureText="Ctrl+D"/>
+                <MenuItem Header="Select _All Occurrences" Command="{Binding SelectAllOccurrencesCommand}" InputGestureText="Ctrl+Shift+L"/>
+                <Separator/>
+                <MenuItem Header="Macros">
+                    <MenuItem Header="Start _Recording" Command="{Binding MacroStartRecordingCommand}"/>
+                    <MenuItem Header="S_top Recording" Command="{Binding MacroStopRecordingCommand}"/>
+                    <MenuItem Header="_Playback" Command="{Binding MacroPlaybackCommand}"/>
+                    <MenuItem Header="Playback _Multiple..." Command="{Binding MacroPlaybackMultipleCommand}"/>
+                </MenuItem>
                 <Separator/>
                 <MenuItem Header="_Duplicate Line" Command="{Binding DuplicateLineCommand}" InputGestureText="Ctrl+Shift+D"/>
                 <MenuItem Header="Move Line _Up" Command="{Binding MoveLineUpCommand}" InputGestureText="Alt+Up"/>
@@ -192,6 +212,39 @@
                 <Separator/>
                 <MenuItem Header="_Format Document" Command="{Binding FormatDocumentCommand}" InputGestureText="JSON/XML"/>
                 <MenuItem Header="Mi_nify Document" Command="{Binding MinifyDocumentCommand}"/>
+                <Separator/>
+                <MenuItem Header="_Text Tools">
+                    <MenuItem Header="Case">
+                        <MenuItem Header="UPPERCASE" Command="{Binding TextToUpperCaseCommand}"/>
+                        <MenuItem Header="lowercase" Command="{Binding TextToLowerCaseCommand}"/>
+                        <MenuItem Header="Title Case" Command="{Binding TextToTitleCaseCommand}"/>
+                        <MenuItem Header="iNVERT cASE" Command="{Binding TextInvertCaseCommand}"/>
+                    </MenuItem>
+                    <MenuItem Header="Lines">
+                        <MenuItem Header="Remove Duplicate Lines" Command="{Binding TextRemoveDuplicateLinesCommand}"/>
+                        <MenuItem Header="Sort Lines (A→Z)" Command="{Binding TextSortLinesAscCommand}"/>
+                        <MenuItem Header="Sort Lines (Z→A)" Command="{Binding TextSortLinesDescCommand}"/>
+                        <MenuItem Header="Trim Trailing Whitespace" Command="{Binding TextTrimTrailingCommand}"/>
+                        <MenuItem Header="Trim Leading Whitespace" Command="{Binding TextTrimLeadingCommand}"/>
+                        <MenuItem Header="Trim All Whitespace" Command="{Binding TextTrimAllCommand}"/>
+                    </MenuItem>
+                    <MenuItem Header="Indentation">
+                        <MenuItem Header="Tabs → Spaces" Command="{Binding TextTabsToSpacesCommand}"/>
+                        <MenuItem Header="Spaces → Tabs" Command="{Binding TextSpacesToTabsCommand}"/>
+                    </MenuItem>
+                    <MenuItem Header="Encode/Decode">
+                        <MenuItem Header="Base64 Encode" Command="{Binding TextBase64EncodeCommand}"/>
+                        <MenuItem Header="Base64 Decode" Command="{Binding TextBase64DecodeCommand}"/>
+                        <MenuItem Header="URL Encode" Command="{Binding TextUrlEncodeCommand}"/>
+                        <MenuItem Header="URL Decode" Command="{Binding TextUrlDecodeCommand}"/>
+                    </MenuItem>
+                    <MenuItem Header="Checksums">
+                        <MenuItem Header="MD5" Command="{Binding TextChecksumMd5Command}"/>
+                        <MenuItem Header="SHA-1" Command="{Binding TextChecksumSha1Command}"/>
+                        <MenuItem Header="SHA-256" Command="{Binding TextChecksumSha256Command}"/>
+                        <MenuItem Header="SHA-512" Command="{Binding TextChecksumSha512Command}"/>
+                    </MenuItem>
+                </MenuItem>
                 <Separator/>
                 <MenuItem Header="Toggle _Bookmark" Command="{Binding ToggleBookmarkCommand}" InputGestureText="Ctrl+F2"/>
                 <MenuItem Header="Next Boo_kmark" Command="{Binding NextBookmarkCommand}" InputGestureText="F2"/>
@@ -212,11 +265,11 @@
                 </MenuItem>
             </MenuItem>
             <MenuItem Header="_View">
-                <MenuItem Header="_Word Wrap" IsCheckable="True" IsChecked="{Binding IsWordWrapEnabled}" Command="{Binding ToggleWordWrapCommand}"/>
-                <MenuItem Header="Show _Whitespace" IsCheckable="True" IsChecked="{Binding IsWhitespaceVisible}" Command="{Binding ToggleWhitespaceCommand}"/>
-                <MenuItem Header="Code _Folding" IsCheckable="True" IsChecked="{Binding IsFoldingEnabled}" Command="{Binding ToggleFoldingCommand}"/>
-                <MenuItem Header="_Minimap" IsCheckable="True" IsChecked="{Binding IsMinimapVisible}" Command="{Binding ToggleMinimapCommand}"/>
-                <MenuItem Header="_Indent Guides" IsCheckable="True" IsChecked="{Binding IsIndentGuidesEnabled}" Command="{Binding ToggleIndentGuidesCommand}"/>
+                <MenuItem Header="_Word Wrap" IsCheckable="True" IsChecked="{Binding IsWordWrapEnabled, Mode=TwoWay}"/>
+                <MenuItem Header="Show _Whitespace" IsCheckable="True" IsChecked="{Binding IsWhitespaceVisible, Mode=TwoWay}"/>
+                <MenuItem Header="Code _Folding" IsCheckable="True" IsChecked="{Binding IsFoldingEnabled, Mode=TwoWay}"/>
+                <MenuItem Header="_Minimap" IsCheckable="True" IsChecked="{Binding IsMinimapVisible, Mode=TwoWay}"/>
+                <MenuItem Header="_Indent Guides" IsCheckable="True" IsChecked="{Binding IsIndentGuidesEnabled, Mode=TwoWay}"/>
                 <Separator/>
                 <MenuItem Header="Zoom _In" Command="{Binding ZoomInCommand}" InputGestureText="Ctrl++"/>
                 <MenuItem Header="Zoom _Out" Command="{Binding ZoomOutCommand}" InputGestureText="Ctrl+-"/>
@@ -225,7 +278,7 @@
                 <MenuItem Header="Split _Editor" Command="{Binding ToggleSplitViewCommand}" InputGestureText="Ctrl+\"/>
                 <MenuItem Header="_Terminal" Command="{Binding ToggleCommandRunnerCommand}" InputGestureText="Ctrl+`"/>
                 <Separator/>
-                <MenuItem Header="_Auto-Reload (Tail)" IsCheckable="True" IsChecked="{Binding IsAutoReloadEnabled}" Command="{Binding ToggleAutoReloadCommand}"/>
+                <MenuItem Header="_Auto-Reload (Tail)" IsCheckable="True" IsChecked="{Binding IsAutoReloadEnabled, Mode=TwoWay}"/>
                 <MenuItem Header="Compare _Files..." Command="{Binding CompareFilesCommand}"/>
                 <MenuItem Header="Command _Palette" Command="{Binding CommandPaletteCommand}" InputGestureText="Ctrl+Shift+P"/>
                 <Separator/>

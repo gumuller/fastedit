@@ -98,6 +98,13 @@ public partial class EditorHost : UserControl
             mainVm.PrevBookmarkRequested += OnPrevBookmark;
             mainVm.ShowCompletionRequested += OnShowCompletion;
             mainVm.ToggleSplitViewRequested += OnToggleSplitView;
+            mainVm.TextToolRequested += OnTextToolRequested;
+            mainVm.PrintRequested += OnPrintRequested;
+            mainVm.SelectNextOccurrenceRequested += OnSelectNextOccurrence;
+            mainVm.SelectAllOccurrencesRequested += OnSelectAllOccurrences;
+            mainVm.MacroStartRecordingRequested += OnMacroStartRecording;
+            mainVm.MacroStopRecordingRequested += OnMacroStopRecording;
+            mainVm.MacroPlaybackRequested += OnMacroPlayback;
             mainVm.PropertyChanged += OnMainVmPropertyChanged;
         }
 
@@ -374,6 +381,279 @@ public partial class EditorHost : UserControl
             return;
         }
         TextEditor.Document.Text = output.result;
+    }
+
+    // --- Text Tools ---
+    private void OnTextToolRequested(string operation)
+    {
+        if (!IsActiveEditorHost() || _currentVm?.IsBinaryMode == true) return;
+
+        var textTools = App.Services.GetService<ITextToolsService>();
+        if (textTools == null) return;
+
+        var mainVm = App.Services.GetService<MainViewModel>();
+        bool hasSelection = TextEditor.SelectionLength > 0;
+        string input = hasSelection ? TextEditor.SelectedText : TextEditor.Text;
+
+        // Checksums are non-mutating — show result in status bar
+        bool isChecksum = operation is "MD5" or "SHA1" or "SHA256" or "SHA512";
+
+        TextToolResult result = operation switch
+        {
+            "UpperCase" => textTools.ToUpperCase(input),
+            "LowerCase" => textTools.ToLowerCase(input),
+            "TitleCase" => textTools.ToTitleCase(input),
+            "InvertCase" => textTools.InvertCase(input),
+            "RemoveDuplicateLines" => textTools.RemoveDuplicateLines(input),
+            "SortLinesAsc" => textTools.SortLinesAscending(input),
+            "SortLinesDesc" => textTools.SortLinesDescending(input),
+            "TrimTrailing" => textTools.TrimTrailingWhitespace(input),
+            "TrimLeading" => textTools.TrimLeadingWhitespace(input),
+            "TrimAll" => textTools.TrimAllWhitespace(input),
+            "TabsToSpaces" => textTools.TabsToSpaces(input),
+            "SpacesToTabs" => textTools.SpacesToTabs(input),
+            "Base64Encode" => textTools.Base64Encode(input),
+            "Base64Decode" => textTools.Base64Decode(input),
+            "UrlEncode" => textTools.UrlEncode(input),
+            "UrlDecode" => textTools.UrlDecode(input),
+            "MD5" => textTools.ComputeMd5(input),
+            "SHA1" => textTools.ComputeSha1(input),
+            "SHA256" => textTools.ComputeSha256(input),
+            "SHA512" => textTools.ComputeSha512(input),
+            _ => TextToolResult.Fail($"Unknown text tool: {operation}")
+        };
+
+        if (!result.Success)
+        {
+            if (mainVm != null) mainVm.StatusText = result.Message ?? "Text tool failed";
+            return;
+        }
+
+        if (isChecksum)
+        {
+            if (mainVm != null) mainVm.StatusText = result.Message ?? result.Text;
+        }
+        else if (hasSelection)
+        {
+            TextEditor.Document.Replace(TextEditor.SelectionStart, TextEditor.SelectionLength, result.Text);
+        }
+        else
+        {
+            TextEditor.Document.Text = result.Text;
+        }
+
+        if (!isChecksum && mainVm != null && result.Message != null)
+            mainVm.StatusText = result.Message;
+    }
+
+    // --- Print ---
+    private void OnPrintRequested()
+    {
+        if (!IsActiveEditorHost()) return;
+
+        var printDialog = new System.Windows.Controls.PrintDialog();
+        if (printDialog.ShowDialog() != true) return;
+
+        var flowDoc = new System.Windows.Documents.FlowDocument(
+            new System.Windows.Documents.Paragraph(
+                new System.Windows.Documents.Run(TextEditor.Text)));
+        flowDoc.FontFamily = TextEditor.FontFamily;
+        flowDoc.FontSize = TextEditor.FontSize;
+        flowDoc.PagePadding = new Thickness(50);
+        flowDoc.ColumnWidth = double.PositiveInfinity;
+
+        var title = _currentVm?.FileName ?? "Untitled";
+        printDialog.PrintDocument(
+            ((System.Windows.Documents.IDocumentPaginatorSource)flowDoc).DocumentPaginator,
+            $"FastEdit - {title}");
+
+        var mainVm = App.Services.GetService<MainViewModel>();
+        if (mainVm != null) mainVm.StatusText = $"Printed: {title}";
+    }
+
+    // --- Occurrence Selection ---
+    private int _lastSelectNextOffset = -1;
+
+    private void OnSelectNextOccurrence()
+    {
+        if (!IsActiveEditorHost() || _currentVm?.IsBinaryMode == true) return;
+
+        var selectedText = TextEditor.SelectedText;
+        if (string.IsNullOrEmpty(selectedText))
+        {
+            // Select current word
+            var offset = TextEditor.CaretOffset;
+            var doc = TextEditor.Document;
+            int start = offset, end = offset;
+            while (start > 0 && IsWordChar(doc.GetCharAt(start - 1))) start--;
+            while (end < doc.TextLength && IsWordChar(doc.GetCharAt(end))) end++;
+            if (start < end)
+            {
+                TextEditor.Select(start, end - start);
+                _lastSelectNextOffset = start;
+            }
+            return;
+        }
+
+        // Find next occurrence after current selection
+        var searchFrom = _lastSelectNextOffset >= 0
+            ? TextEditor.SelectionStart + TextEditor.SelectionLength
+            : TextEditor.SelectionStart + TextEditor.SelectionLength;
+
+        var text = TextEditor.Text;
+        var nextIndex = text.IndexOf(selectedText, searchFrom, StringComparison.Ordinal);
+
+        // Wrap around if not found
+        if (nextIndex < 0)
+            nextIndex = text.IndexOf(selectedText, 0, StringComparison.Ordinal);
+
+        if (nextIndex >= 0 && nextIndex != TextEditor.SelectionStart)
+        {
+            TextEditor.Select(nextIndex, selectedText.Length);
+            TextEditor.ScrollTo(TextEditor.Document.GetLineByOffset(nextIndex).LineNumber, 0);
+            _lastSelectNextOffset = nextIndex;
+
+            var mainVm = App.Services.GetService<MainViewModel>();
+            if (mainVm != null) mainVm.StatusText = $"Selected occurrence at offset {nextIndex}";
+        }
+    }
+
+    private void OnSelectAllOccurrences()
+    {
+        if (!IsActiveEditorHost() || _currentVm?.IsBinaryMode == true) return;
+
+        var selectedText = TextEditor.SelectedText;
+        if (string.IsNullOrEmpty(selectedText))
+        {
+            // Select current word first
+            OnSelectNextOccurrence();
+            selectedText = TextEditor.SelectedText;
+            if (string.IsNullOrEmpty(selectedText)) return;
+        }
+
+        // Count all occurrences
+        var text = TextEditor.Text;
+        int count = 0;
+        int index = 0;
+        while ((index = text.IndexOf(selectedText, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += selectedText.Length;
+        }
+
+        var mainVm = App.Services.GetService<MainViewModel>();
+        if (mainVm != null)
+            mainVm.StatusText = $"Found {count} occurrences of \"{(selectedText.Length > 30 ? selectedText[..27] + "..." : selectedText)}\"";
+
+        // Since AvalonEdit doesn't support true multi-cursor,
+        // highlight all occurrences and open Find/Replace pre-filled for batch operations
+        _occurrenceRenderer?.SetHighlightWord(selectedText, TextEditor.Document);
+    }
+
+    private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_';
+
+    // --- Macro Recording/Playback ---
+    private void OnMacroStartRecording()
+    {
+        if (!IsActiveEditorHost()) return;
+        var macroService = App.Services.GetService<IMacroService>();
+        if (macroService == null) return;
+
+        macroService.StartRecording();
+
+        // Hook into text input for recording
+        TextEditor.TextArea.TextEntering += OnMacroTextEntering;
+
+        var mainVm = App.Services.GetService<MainViewModel>();
+        if (mainVm != null) mainVm.StatusText = "🔴 Recording macro...";
+    }
+
+    private void OnMacroStopRecording()
+    {
+        if (!IsActiveEditorHost()) return;
+        var macroService = App.Services.GetService<IMacroService>();
+        if (macroService == null) return;
+
+        macroService.StopRecording();
+        TextEditor.TextArea.TextEntering -= OnMacroTextEntering;
+
+        var mainVm = App.Services.GetService<MainViewModel>();
+        if (mainVm != null)
+            mainVm.StatusText = $"Macro recorded: {macroService.RecordedStepCount} step(s)";
+    }
+
+    private void OnMacroTextEntering(object? sender, System.Windows.Input.TextCompositionEventArgs e)
+    {
+        var macroService = App.Services.GetService<IMacroService>();
+        if (macroService?.IsRecording == true && !string.IsNullOrEmpty(e.Text))
+        {
+            macroService.RecordStep(new MacroStep(MacroAction.TypeText, e.Text));
+        }
+    }
+
+    private void OnMacroPlayback(int count)
+    {
+        if (!IsActiveEditorHost()) return;
+        var macroService = App.Services.GetService<IMacroService>();
+        if (macroService == null || !macroService.HasMacro) return;
+
+        if (count == 0)
+        {
+            // Prompt for count
+            var dialogService = App.Services.GetService<IDialogService>();
+            var input = dialogService?.ShowInputDialog("Playback Macro", "Number of times to play:", "1");
+            if (string.IsNullOrEmpty(input) || !int.TryParse(input, out count) || count <= 0) return;
+        }
+
+        var steps = macroService.GetRecordedSteps();
+        var textTools = App.Services.GetService<ITextToolsService>();
+
+        for (int i = 0; i < count; i++)
+        {
+            foreach (var step in steps)
+            {
+                ExecuteMacroStep(step, textTools);
+            }
+        }
+
+        var mainVm = App.Services.GetService<MainViewModel>();
+        if (mainVm != null)
+            mainVm.StatusText = $"Macro played {count} time(s)";
+    }
+
+    private void ExecuteMacroStep(MacroStep step, ITextToolsService? textTools)
+    {
+        switch (step.Action)
+        {
+            case MacroAction.TypeText:
+                if (step.Parameter != null)
+                    TextEditor.Document.Insert(TextEditor.CaretOffset, step.Parameter);
+                break;
+            case MacroAction.DeleteBackward:
+                if (TextEditor.CaretOffset > 0)
+                    TextEditor.Document.Remove(TextEditor.CaretOffset - 1, 1);
+                break;
+            case MacroAction.DeleteForward:
+                if (TextEditor.CaretOffset < TextEditor.Document.TextLength)
+                    TextEditor.Document.Remove(TextEditor.CaretOffset, 1);
+                break;
+            case MacroAction.NewLine:
+                TextEditor.Document.Insert(TextEditor.CaretOffset, Environment.NewLine);
+                break;
+            case MacroAction.DuplicateLine:
+                OnDuplicateLineRequested();
+                break;
+            case MacroAction.MoveLineUp:
+                OnMoveLineRequested(true);
+                break;
+            case MacroAction.MoveLineDown:
+                OnMoveLineRequested(false);
+                break;
+            case MacroAction.TextTool:
+                if (step.Parameter != null)
+                    OnTextToolRequested(step.Parameter);
+                break;
+        }
     }
 
     // --- Code Folding ---

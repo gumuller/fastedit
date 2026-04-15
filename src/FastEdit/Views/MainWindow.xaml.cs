@@ -68,8 +68,19 @@ public partial class MainWindow : FluentWindow
         _commandRegistry.Register("New File", "File", "Ctrl+N", _viewModel.NewFileCommand);
         _commandRegistry.Register("Open File", "File", "Ctrl+O", _viewModel.OpenFileCommand);
         _commandRegistry.Register("Open Folder", "File", null, _viewModel.OpenFolderCommand);
+        _commandRegistry.Register("Add Folder to Workspace", "File", null, _viewModel.AddFolderCommand);
+        _commandRegistry.Register("Open Workspace", "File", null, _viewModel.OpenWorkspaceCommand);
+        _commandRegistry.Register("Save Workspace As", "File", null, _viewModel.SaveWorkspaceCommand);
+        _commandRegistry.Register("Save Session As", "File", null, _viewModel.SaveSessionAsCommand);
         _commandRegistry.Register("Save", "File", "Ctrl+S", _viewModel.SaveCommand);
         _commandRegistry.Register("Save As", "File", "Ctrl+Shift+S", _viewModel.SaveAsCommand);
+        _commandRegistry.Register("Print", "File", "Ctrl+P", _viewModel.PrintCommand);
+        _commandRegistry.Register("Select Next Occurrence", "Edit", "Ctrl+D", _viewModel.SelectNextOccurrenceCommand);
+        _commandRegistry.Register("Select All Occurrences", "Edit", "Ctrl+Shift+L", _viewModel.SelectAllOccurrencesCommand);
+        _commandRegistry.Register("Start Macro Recording", "Edit", null, _viewModel.MacroStartRecordingCommand);
+        _commandRegistry.Register("Stop Macro Recording", "Edit", null, _viewModel.MacroStopRecordingCommand);
+        _commandRegistry.Register("Playback Macro", "Edit", null, _viewModel.MacroPlaybackCommand);
+        _commandRegistry.Register("Playback Macro Multiple", "Edit", null, _viewModel.MacroPlaybackMultipleCommand);
         _commandRegistry.Register("Close Tab", "File", "Ctrl+W", _viewModel.CloseTabCommand);
 
         _commandRegistry.Register("Find", "Edit", "Ctrl+F", _viewModel.FindCommand);
@@ -98,6 +109,28 @@ public partial class MainWindow : FluentWindow
         _commandRegistry.Register("Auto-Reload", "View", null, _viewModel.ToggleAutoReloadCommand);
         _commandRegistry.Register("Compare Files", "View", null, _viewModel.CompareFilesCommand);
         _commandRegistry.Register("Show Completion", "Edit", "Ctrl+Space", _viewModel.ShowCompletionCommand);
+
+        // Text Tools
+        _commandRegistry.Register("UPPERCASE", "Text Tools", null, _viewModel.TextToUpperCaseCommand);
+        _commandRegistry.Register("lowercase", "Text Tools", null, _viewModel.TextToLowerCaseCommand);
+        _commandRegistry.Register("Title Case", "Text Tools", null, _viewModel.TextToTitleCaseCommand);
+        _commandRegistry.Register("Invert Case", "Text Tools", null, _viewModel.TextInvertCaseCommand);
+        _commandRegistry.Register("Remove Duplicate Lines", "Text Tools", null, _viewModel.TextRemoveDuplicateLinesCommand);
+        _commandRegistry.Register("Sort Lines (A→Z)", "Text Tools", null, _viewModel.TextSortLinesAscCommand);
+        _commandRegistry.Register("Sort Lines (Z→A)", "Text Tools", null, _viewModel.TextSortLinesDescCommand);
+        _commandRegistry.Register("Trim Trailing Whitespace", "Text Tools", null, _viewModel.TextTrimTrailingCommand);
+        _commandRegistry.Register("Trim Leading Whitespace", "Text Tools", null, _viewModel.TextTrimLeadingCommand);
+        _commandRegistry.Register("Trim All Whitespace", "Text Tools", null, _viewModel.TextTrimAllCommand);
+        _commandRegistry.Register("Tabs → Spaces", "Text Tools", null, _viewModel.TextTabsToSpacesCommand);
+        _commandRegistry.Register("Spaces → Tabs", "Text Tools", null, _viewModel.TextSpacesToTabsCommand);
+        _commandRegistry.Register("Base64 Encode", "Text Tools", null, _viewModel.TextBase64EncodeCommand);
+        _commandRegistry.Register("Base64 Decode", "Text Tools", null, _viewModel.TextBase64DecodeCommand);
+        _commandRegistry.Register("URL Encode", "Text Tools", null, _viewModel.TextUrlEncodeCommand);
+        _commandRegistry.Register("URL Decode", "Text Tools", null, _viewModel.TextUrlDecodeCommand);
+        _commandRegistry.Register("Checksum: MD5", "Text Tools", null, _viewModel.TextChecksumMd5Command);
+        _commandRegistry.Register("Checksum: SHA-1", "Text Tools", null, _viewModel.TextChecksumSha1Command);
+        _commandRegistry.Register("Checksum: SHA-256", "Text Tools", null, _viewModel.TextChecksumSha256Command);
+        _commandRegistry.Register("Checksum: SHA-512", "Text Tools", null, _viewModel.TextChecksumSha512Command);
     }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
@@ -120,6 +153,31 @@ public partial class MainWindow : FluentWindow
 
         if (_viewModel != null)
         {
+            // Check for crash recovery first
+            var autoSave = App.Services.GetService<IAutoSaveService>();
+            if (autoSave != null && autoSave.HasRecoveryFiles())
+            {
+                var dialogService = App.Services.GetRequiredService<IDialogService>();
+                var result = dialogService.ShowMessage(
+                    "FastEdit was not shut down cleanly. Would you like to recover unsaved files?",
+                    "Crash Recovery",
+                    DialogButtons.YesNo,
+                    DialogIcon.Warning);
+
+                if (result == Services.Interfaces.DialogResult.Yes)
+                {
+                    var entries = autoSave.GetRecoveryEntries();
+                    foreach (var entry in entries)
+                    {
+                        var tab = _viewModel.RecoverTab(entry);
+                        if (tab != null) _viewModel.Tabs.Add(tab);
+                    }
+                    if (_viewModel.Tabs.Count > 0)
+                        _viewModel.SelectedTab = _viewModel.Tabs[0];
+                }
+                autoSave.ClearRecoveryFiles();
+            }
+
             await _viewModel.RestoreSessionAsync();
 
             // Set command runner working directory

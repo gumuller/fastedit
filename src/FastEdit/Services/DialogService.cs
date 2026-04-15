@@ -69,4 +69,46 @@ public class DialogService : IDialogService
         if (initialDirectory != null) dialog.InitialDirectory = initialDirectory;
         return dialog.ShowDialog() == true ? dialog.FileNames : Array.Empty<string>();
     }
+
+    public string? ShowInputDialog(string title, string prompt, string? defaultValue = null)
+    {
+        // Simple WPF input dialog
+        var win = new Window
+        {
+            Title = title,
+            Width = 400,
+            Height = 160,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            ResizeMode = ResizeMode.NoResize,
+            Owner = Application.Current.MainWindow
+        };
+
+        var panel = new System.Windows.Controls.StackPanel { Margin = new Thickness(15) };
+        panel.Children.Add(new System.Windows.Controls.TextBlock { Text = prompt, Margin = new Thickness(0, 0, 0, 8) });
+        var textBox = new System.Windows.Controls.TextBox { Text = defaultValue ?? "" };
+        panel.Children.Add(textBox);
+
+        var buttonPanel = new System.Windows.Controls.StackPanel
+        {
+            Orientation = System.Windows.Controls.Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 10, 0, 0)
+        };
+
+        var okButton = new System.Windows.Controls.Button { Content = "OK", Width = 75, Margin = new Thickness(0, 0, 8, 0), IsDefault = true };
+        var cancelButton = new System.Windows.Controls.Button { Content = "Cancel", Width = 75, IsCancel = true };
+
+        okButton.Click += (s, e) => { win.DialogResult = true; win.Close(); };
+        cancelButton.Click += (s, e) => { win.DialogResult = false; win.Close(); };
+
+        buttonPanel.Children.Add(okButton);
+        buttonPanel.Children.Add(cancelButton);
+        panel.Children.Add(buttonPanel);
+        win.Content = panel;
+
+        textBox.SelectAll();
+        textBox.Focus();
+
+        return win.ShowDialog() == true ? textBox.Text : null;
+    }
 }

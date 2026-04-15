@@ -24,12 +24,21 @@ A fast, lightweight text and hex editor for Windows, built with WPF (.NET 8), Av
 - **Code Folding** — collapse/expand code blocks (brace-based, XML, and indent-based for Python)
 - **Bracket/Brace Matching** — automatic highlighting of matching pairs
 - **Occurrence Highlighting** — select a word to highlight all occurrences
+- **Select Next/All Occurrences** (Ctrl+D / Ctrl+Shift+L) — jump through matches
 - **Indent Guides** — visual indentation level lines
 - **Bookmarks** — toggle (Ctrl+F2), navigate next/prev (F2 / Shift+F2)
 - **Line Operations** — duplicate line (Ctrl+Shift+D), move line up/down (Alt+↑/↓)
 - **Split Editor** (Ctrl+\\) — view the same file in two panes
 - **Rectangular Selection** — Alt+drag for column editing
 - **Undo/Redo** (Ctrl+Z / Ctrl+Y)
+
+### Text Tools
+- **Case Transformations** — UPPERCASE, lowercase, Title Case, Invert Case
+- **Line Tools** — remove duplicates, sort ascending/descending, trim whitespace
+- **Indentation Conversion** — tabs ↔ spaces
+- **Encode/Decode** — Base64, URL encoding
+- **Checksums** — MD5, SHA-1, SHA-256, SHA-512 (shown in status bar)
+- **Macro Recording/Playback** — record editor actions and replay N times
 
 ### Debugging & File Analysis
 - **Built-in Terminal** (Ctrl+\`) — run commands without leaving the editor
@@ -55,7 +64,11 @@ A fast, lightweight text and hex editor for Windows, built with WPF (.NET 8), Av
 - **Drag & Drop** files and folders
 - **Recent Files** menu (last 10)
 - **Save As** (Ctrl+Shift+S)
+- **Print** (Ctrl+P) — print current document
 - **Session Restore** — reopens your tabs with cursor positions on restart
+- **Named Sessions** — save/load multiple session profiles
+- **Auto-Save & Crash Recovery** — periodic backup with recovery on unclean shutdown
+- **Workspaces** — multi-root folder projects with `.fastedit-workspace` files
 
 ## Keyboard Shortcuts
 
@@ -80,6 +93,9 @@ A fast, lightweight text and hex editor for Windows, built with WPF (.NET 8), Av
 | Toggle Terminal | Ctrl+\` |
 | Zoom In/Out | Ctrl+Plus/Minus |
 | Reset Zoom | Ctrl+0 |
+| Print | Ctrl+P |
+| Select Next Occurrence | Ctrl+D |
+| Select All Occurrences | Ctrl+Shift+L |
 
 ## Building
 
@@ -94,7 +110,7 @@ dotnet build
 # Run
 dotnet run --project src/FastEdit
 
-# Run tests (281 tests)
+# Run tests (349 tests)
 dotnet test
 ```
 
@@ -118,7 +134,7 @@ FastEdit.sln
 │   ├── FastEdit.Core/         # Core engine (hex editor, binary detection)
 │   └── FastEdit.Theming/      # Theme definitions and loader
 └── tests/
-    └── FastEdit.Tests/        # 281 unit tests
+    └── FastEdit.Tests/        # 349 unit tests
 ```
 
 ## Custom Themes

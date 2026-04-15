@@ -17,6 +17,7 @@ public class MainViewModelTests
     private readonly Mock<IDialogService> _dialogService = new();
     private readonly Mock<IFileSystemService> _fileSystemService = new();
     private readonly Mock<IEditorTabFactory> _tabFactory = new();
+    private readonly Mock<IWorkspaceService> _workspaceService = new();
     private readonly FileTreeViewModel _fileTree;
     private readonly MainViewModel _sut;
 
@@ -45,6 +46,7 @@ public class MainViewModelTests
             _dialogService.Object,
             _fileSystemService.Object,
             _tabFactory.Object,
+            _workspaceService.Object,
             _fileTree);
     }
 

@@ -22,6 +22,10 @@ public partial class FileTreeViewModel : ObservableObject
     [ObservableProperty]
     private string? _rootPath;
 
+    private readonly List<string> _rootPaths = new();
+
+    public IReadOnlyList<string> RootPaths => _rootPaths;
+
     public event EventHandler<string>? FileOpenRequested;
 
     public FileTreeViewModel(
@@ -64,9 +68,36 @@ public partial class FileTreeViewModel : ObservableObject
 
         RootPath = path;
         _settingsService.LastOpenedFolder = path;
+        _rootPaths.Clear();
+        _rootPaths.Add(path);
 
         RootNodes.Clear();
         RootNodes.Add(new FileNodeViewModel(path, true, _fileSystemService) { IsExpanded = true });
+    }
+
+    public void AddRootFolder(string path)
+    {
+        if (!_fileSystemService.DirectoryExists(path)) return;
+        if (_rootPaths.Contains(path)) return;
+
+        _rootPaths.Add(path);
+        if (RootPath == null) RootPath = path;
+        RootNodes.Add(new FileNodeViewModel(path, true, _fileSystemService) { IsExpanded = true });
+    }
+
+    public void SetMultipleRoots(IEnumerable<string> paths)
+    {
+        RootNodes.Clear();
+        _rootPaths.Clear();
+
+        foreach (var path in paths)
+        {
+            if (!_fileSystemService.DirectoryExists(path)) continue;
+            _rootPaths.Add(path);
+            RootNodes.Add(new FileNodeViewModel(path, true, _fileSystemService) { IsExpanded = true });
+        }
+
+        RootPath = _rootPaths.FirstOrDefault();
     }
 
     [RelayCommand]

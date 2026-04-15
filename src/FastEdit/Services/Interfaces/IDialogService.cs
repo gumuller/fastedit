@@ -16,6 +16,9 @@ public interface IDialogService
 
     /// <summary>Show multiple file open dialog. Returns selected file paths or empty array if cancelled.</summary>
     string[] ShowOpenFilesDialog(string? filter = null, string? initialDirectory = null);
+
+    /// <summary>Show a simple input dialog. Returns entered text or null if cancelled.</summary>
+    string? ShowInputDialog(string title, string prompt, string? defaultValue = null);
 }
 
 public enum DialogResult
