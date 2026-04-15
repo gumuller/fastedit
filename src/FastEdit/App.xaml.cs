@@ -37,15 +37,24 @@ public partial class App : Application
         _host = Host.CreateDefaultBuilder()
             .ConfigureServices((context, services) =>
             {
-                // Services
+                // Core services
                 services.AddSingleton<ISettingsService, SettingsService>();
                 services.AddSingleton<IThemeService, ThemeService>();
                 services.AddSingleton<IFileService, FileService>();
+                services.AddSingleton<IFileSystemService, FileSystemService>();
+                services.AddSingleton<IDialogService, DialogService>();
+                services.AddSingleton<IDispatcherService, WpfDispatcherService>();
+                services.AddSingleton<IProcessService, ProcessService>();
+                services.AddTransient<IFileWatcherService, FileWatcherService>();
+
+                // Factories
+                services.AddSingleton<IEditorTabFactory, EditorTabFactory>();
 
                 // ViewModels
                 services.AddSingleton<MainViewModel>();
                 services.AddSingleton<FileTreeViewModel>();
                 services.AddTransient<EditorTabViewModel>();
+                services.AddTransient<FindInFilesViewModel>();
 
                 // Views
                 services.AddSingleton<MainWindow>();

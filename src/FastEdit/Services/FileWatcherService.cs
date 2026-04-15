@@ -1,11 +1,12 @@
 using System.IO;
+using FastEdit.Services.Interfaces;
 
 namespace FastEdit.Services;
 
 /// <summary>
 /// Watches a file for changes and notifies when content is appended (log tailing).
 /// </summary>
-public class FileWatcherService : IDisposable
+public class FileWatcherService : IFileWatcherService
 {
     private FileSystemWatcher? _watcher;
     private string? _watchedPath;

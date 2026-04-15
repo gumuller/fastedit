@@ -53,7 +53,7 @@ public partial class MainWindow : FluentWindow
         _viewModel.CommandPaletteRequested += OnCommandPaletteRequested;
 
         // Setup Find in Files
-        _findInFilesVm = new FindInFilesViewModel();
+        _findInFilesVm = App.Services.GetRequiredService<FindInFilesViewModel>();
         _findInFilesVm.NavigateToResult += OnNavigateToSearchResult;
         FindInFilesPanel.DataContext = _findInFilesVm;
 

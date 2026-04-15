@@ -11,6 +11,8 @@ namespace FastEdit.ViewModels;
 public partial class EditorTabViewModel : ObservableObject, IDisposable
 {
     private readonly IFileService _fileService;
+    private readonly IFileSystemService _fileSystemService;
+    private readonly IDialogService _dialogService;
     private VirtualizedByteBuffer? _byteBuffer;
     private bool _disposed;
 
@@ -66,9 +68,11 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     public Encoding FileEncoding => _fileEncoding;
     public bool HasBom => _hasBom;
 
-    public EditorTabViewModel(IFileService fileService)
+    public EditorTabViewModel(IFileService fileService, IFileSystemService fileSystemService, IDialogService dialogService)
     {
         _fileService = fileService;
+        _fileSystemService = fileSystemService;
+        _dialogService = dialogService;
     }
 
     public async Task LoadFileAsync(string filePath)
@@ -141,7 +145,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         // If untitled (no file path), prompt for Save As
         if (string.IsNullOrEmpty(savePath))
         {
-            savePath = await _fileService.ShowSaveFileDialogAsync(FileName);
+            savePath = _dialogService.ShowSaveFileDialog(defaultFileName: FileName);
             if (string.IsNullOrEmpty(savePath))
                 return false; // User cancelled
         }
@@ -160,7 +164,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     private async Task<bool> SaveAsAsync()
     {
         var defaultName = string.IsNullOrEmpty(FilePath) ? FileName : Path.GetFileName(FilePath);
-        var savePath = await _fileService.ShowSaveFileDialogAsync(defaultName);
+        var savePath = _dialogService.ShowSaveFileDialog(defaultFileName: defaultName);
         if (string.IsNullOrEmpty(savePath))
             return false;
 
@@ -171,7 +175,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
                 _byteBuffer.Save(); // saves to original path
                 // For Save As in binary mode, copy file to new location
                 if (savePath != FilePath)
-                    File.Copy(FilePath, savePath, overwrite: true);
+                    _fileSystemService.CopyFile(FilePath, savePath, overwrite: true);
             }
             else
             {

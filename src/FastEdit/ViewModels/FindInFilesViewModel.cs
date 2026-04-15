@@ -3,11 +3,21 @@ using System.IO;
 using System.Text.RegularExpressions;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using FastEdit.Services.Interfaces;
 
 namespace FastEdit.ViewModels;
 
 public partial class FindInFilesViewModel : ObservableObject
 {
+    private readonly IFileSystemService _fileSystemService;
+    private readonly IDispatcherService _dispatcherService;
+
+    public FindInFilesViewModel(IFileSystemService fileSystemService, IDispatcherService dispatcherService)
+    {
+        _fileSystemService = fileSystemService;
+        _dispatcherService = dispatcherService;
+    }
+
     [ObservableProperty]
     private string _searchPattern = string.Empty;
 
@@ -39,7 +49,7 @@ public partial class FindInFilesViewModel : ObservableObject
         if (string.IsNullOrEmpty(SearchPattern) || string.IsNullOrEmpty(FolderPath))
             return;
 
-        if (!Directory.Exists(FolderPath)) return;
+        if (!_fileSystemService.DirectoryExists(FolderPath)) return;
 
         IsSearching = true;
         Results.Clear();
@@ -69,7 +79,7 @@ public partial class FindInFilesViewModel : ObservableObject
                 {
                     try
                     {
-                        files.AddRange(Directory.EnumerateFiles(FolderPath, filter, SearchOption.AllDirectories));
+                        files.AddRange(_fileSystemService.EnumerateFiles(FolderPath, filter, recursive: true));
                     }
                     catch { /* skip inaccessible */ }
                 }
@@ -84,7 +94,7 @@ public partial class FindInFilesViewModel : ObservableObject
                     try
                     {
                         // Skip binary files (check first 8KB)
-                        using var checkStream = File.OpenRead(file);
+                        using var checkStream = _fileSystemService.OpenRead(file);
                         var buffer = new byte[Math.Min(8192, checkStream.Length)];
                         int bytesRead = checkStream.Read(buffer, 0, buffer.Length);
                         if (IsBinary(buffer, bytesRead)) continue;
@@ -93,7 +103,7 @@ public partial class FindInFilesViewModel : ObservableObject
 
                     try
                     {
-                        var lines = File.ReadLines(file).ToList();
+                        var lines = _fileSystemService.ReadLines(file).ToList();
                         for (int i = 0; i < lines.Count; i++)
                         {
                             bool isMatch;
@@ -115,14 +125,14 @@ public partial class FindInFilesViewModel : ObservableObject
                                     FileName = Path.GetFileName(file)
                                 };
 
-                                App.Current.Dispatcher.Invoke(() => Results.Add(result));
+                                _dispatcherService.Invoke(() => Results.Add(result));
                             }
                         }
                     }
                     catch { /* skip unreadable */ }
                 }
 
-                App.Current.Dispatcher.Invoke(() =>
+                _dispatcherService.Invoke(() =>
                     StatusText = $"Found {matchCount} match(es) in {files.Count} file(s)");
             });
         }

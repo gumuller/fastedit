@@ -13,6 +13,9 @@ public partial class MainViewModel : ObservableObject
     private readonly IFileService _fileService;
     private readonly IThemeService _themeService;
     private readonly ISettingsService _settingsService;
+    private readonly IDialogService _dialogService;
+    private readonly IFileSystemService _fileSystemService;
+    private readonly IEditorTabFactory _tabFactory;
 
     [ObservableProperty]
     private ObservableCollection<EditorTabViewModel> _tabs = new();
@@ -86,11 +89,17 @@ public partial class MainViewModel : ObservableObject
         IFileService fileService,
         IThemeService themeService,
         ISettingsService settingsService,
+        IDialogService dialogService,
+        IFileSystemService fileSystemService,
+        IEditorTabFactory tabFactory,
         FileTreeViewModel fileTree)
     {
         _fileService = fileService;
         _themeService = themeService;
         _settingsService = settingsService;
+        _dialogService = dialogService;
+        _fileSystemService = fileSystemService;
+        _tabFactory = tabFactory;
         _fileTree = fileTree;
         _availableThemes = themeService.AvailableThemes;
         _currentThemeName = themeService.CurrentTheme?.Name ?? "Dark";
@@ -115,7 +124,7 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private async Task OpenFileAsync(string? filePath = null)
     {
-        filePath ??= await _fileService.ShowOpenFileDialogAsync();
+        filePath ??= _dialogService.ShowOpenFileDialog();
         if (string.IsNullOrEmpty(filePath)) return;
 
         // Check if already open
@@ -128,7 +137,7 @@ public partial class MainViewModel : ObservableObject
 
         try
         {
-            var tab = new EditorTabViewModel(_fileService);
+            var tab = _tabFactory.Create();
             await tab.LoadFileAsync(filePath);
 
             Tabs.Add(tab);
@@ -330,7 +339,7 @@ public partial class MainViewModel : ObservableObject
         {
             System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
             var encoding = System.Text.Encoding.GetEncoding(encodingName);
-            var bytes = await File.ReadAllBytesAsync(SelectedTab.FilePath);
+            var bytes = await _fileSystemService.ReadAllBytesAsync(SelectedTab.FilePath);
             var content = encoding.GetString(bytes);
             SelectedTab.Content = content;
             SelectedTab.Encoding = encoding.EncodingName;
@@ -346,7 +355,7 @@ public partial class MainViewModel : ObservableObject
     private async Task OpenRecentFileAsync(string? filePath)
     {
         if (string.IsNullOrEmpty(filePath)) return;
-        if (!File.Exists(filePath))
+        if (!_fileSystemService.FileExists(filePath))
         {
             RecentFiles.Remove(filePath);
             _settingsService.RecentFiles = RecentFiles.ToList();
@@ -369,16 +378,16 @@ public partial class MainViewModel : ObservableObject
 
         if (tab.IsModified)
         {
-            var result = System.Windows.MessageBox.Show(
+            var result = _dialogService.ShowMessage(
                 $"Do you want to save changes to '{tab.FileName}'?",
                 "FastEdit - Unsaved Changes",
-                System.Windows.MessageBoxButton.YesNoCancel,
-                System.Windows.MessageBoxImage.Warning);
+                DialogButtons.YesNoCancel,
+                DialogIcon.Warning);
 
-            if (result == System.Windows.MessageBoxResult.Cancel)
+            if (result == Services.Interfaces.DialogResult.Cancel)
                 return;
 
-            if (result == System.Windows.MessageBoxResult.Yes)
+            if (result == Services.Interfaces.DialogResult.Yes)
             {
                 var saved = await tab.SaveCommand.ExecuteAsync(null)
                     .ContinueWith(_ => !tab.IsModified);
@@ -418,19 +427,16 @@ public partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private async Task OpenFolderAsync()
+    private void OpenFolder()
     {
-        await _fileTree.OpenFolderCommand.ExecuteAsync(null);
+        FileTree.OpenFolderCommand.Execute(null);
     }
 
     [RelayCommand]
     private void NewFile()
     {
-        var tab = new EditorTabViewModel(_fileService)
-        {
-            FileName = $"Untitled-{Tabs.Count + 1}",
-            Content = string.Empty
-        };
+        var tab = _tabFactory.CreateUntitled();
+        tab.FileName = $"Untitled-{Tabs.Count + 1}";
 
         Tabs.Add(tab);
         SelectedTab = tab;
@@ -495,25 +501,22 @@ public partial class MainViewModel : ObservableObject
 
                     string content = string.Empty;
 
-                    if (!string.IsNullOrEmpty(sessionFile.TempFilePath) && File.Exists(sessionFile.TempFilePath))
+                    if (!string.IsNullOrEmpty(sessionFile.TempFilePath) && _fileSystemService.FileExists(sessionFile.TempFilePath))
                     {
-                        content = await File.ReadAllTextAsync(sessionFile.TempFilePath);
+                        content = await _fileSystemService.ReadAllTextAsync(sessionFile.TempFilePath);
                     }
                     else if (!string.IsNullOrEmpty(sessionFile.Content))
                     {
                         content = sessionFile.Content;
                     }
 
-                    var tab = new EditorTabViewModel(_fileService)
-                    {
-                        FileName = Path.GetFileName(sessionFile.FilePath),
-                        Content = content
-                    };
+                    var tab = _tabFactory.CreateUntitled(content);
+                    tab.FileName = Path.GetFileName(sessionFile.FilePath);
                     Tabs.Add(tab);
                 }
-                else if (File.Exists(sessionFile.FilePath))
+                else if (_fileSystemService.FileExists(sessionFile.FilePath))
                 {
-                    var tab = new EditorTabViewModel(_fileService);
+                    var tab = _tabFactory.Create();
                     await tab.LoadFileAsync(sessionFile.FilePath);
                     Tabs.Add(tab);
                 }
@@ -540,13 +543,13 @@ public partial class MainViewModel : ObservableObject
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "FastEdit", "Temp");
 
-        if (Directory.Exists(tempDir))
+        if (_fileSystemService.DirectoryExists(tempDir))
         {
             try
             {
-                foreach (var file in Directory.GetFiles(tempDir, "*.tmp"))
+                foreach (var file in _fileSystemService.GetFiles(tempDir, "*.tmp"))
                 {
-                    try { File.Delete(file); } catch { }
+                    try { _fileSystemService.DeleteFile(file); } catch { }
                 }
             }
             catch { }
@@ -559,7 +562,7 @@ public partial class MainViewModel : ObservableObject
         var tempDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "FastEdit", "Temp");
-        Directory.CreateDirectory(tempDir);
+        _fileSystemService.CreateDirectory(tempDir);
 
         foreach (var tab in Tabs)
         {
@@ -577,7 +580,7 @@ public partial class MainViewModel : ObservableObject
                 var tempPath = Path.Combine(tempDir, $"{Guid.NewGuid():N}_{tab.FileName}.tmp");
                 try
                 {
-                    File.WriteAllText(tempPath, tab.Content);
+                    _fileSystemService.WriteAllText(tempPath, tab.Content);
                     sessionFile.TempFilePath = tempPath;
                 }
                 catch
@@ -628,16 +631,16 @@ public partial class MainViewModel : ObservableObject
             return true;
 
         var fileNames = string.Join(", ", unsavedTabs.Select(t => t.FileName));
-        var result = System.Windows.MessageBox.Show(
+        var result = _dialogService.ShowMessage(
             $"Do you want to save changes to the following files?\n\n{fileNames}",
             "FastEdit - Unsaved Changes",
-            System.Windows.MessageBoxButton.YesNoCancel,
-            System.Windows.MessageBoxImage.Warning);
+            DialogButtons.YesNoCancel,
+            DialogIcon.Warning);
 
-        if (result == System.Windows.MessageBoxResult.Cancel)
+        if (result == Services.Interfaces.DialogResult.Cancel)
             return false;
 
-        if (result == System.Windows.MessageBoxResult.Yes)
+        if (result == Services.Interfaces.DialogResult.Yes)
         {
             foreach (var tab in unsavedTabs)
             {

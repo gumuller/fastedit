@@ -10,6 +10,8 @@ public partial class FileTreeViewModel : ObservableObject
 {
     private readonly IFileService _fileService;
     private readonly ISettingsService _settingsService;
+    private readonly IDialogService _dialogService;
+    private readonly IFileSystemService _fileSystemService;
 
     [ObservableProperty]
     private ObservableCollection<FileNodeViewModel> _rootNodes = new();
@@ -22,14 +24,19 @@ public partial class FileTreeViewModel : ObservableObject
 
     public event EventHandler<string>? FileOpenRequested;
 
-    public FileTreeViewModel(IFileService fileService, ISettingsService settingsService)
+    public FileTreeViewModel(
+        IFileService fileService,
+        ISettingsService settingsService,
+        IDialogService dialogService,
+        IFileSystemService fileSystemService)
     {
         _fileService = fileService;
         _settingsService = settingsService;
+        _dialogService = dialogService;
+        _fileSystemService = fileSystemService;
 
-        // Load last opened folder or default to user's home directory
         var lastFolder = settingsService.LastOpenedFolder;
-        if (!string.IsNullOrEmpty(lastFolder) && Directory.Exists(lastFolder))
+        if (!string.IsNullOrEmpty(lastFolder) && _fileSystemService.DirectoryExists(lastFolder))
         {
             SetRootFolder(lastFolder);
         }
@@ -41,9 +48,9 @@ public partial class FileTreeViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private async Task OpenFolderAsync()
+    private void OpenFolder()
     {
-        var folder = await _fileService.ShowOpenFolderDialogAsync();
+        var folder = _dialogService.ShowFolderBrowserDialog();
         if (!string.IsNullOrEmpty(folder))
         {
             SetRootFolder(folder);
@@ -53,13 +60,13 @@ public partial class FileTreeViewModel : ObservableObject
     [RelayCommand]
     private void SetRootFolder(string path)
     {
-        if (!Directory.Exists(path)) return;
+        if (!_fileSystemService.DirectoryExists(path)) return;
 
         RootPath = path;
         _settingsService.LastOpenedFolder = path;
 
         RootNodes.Clear();
-        RootNodes.Add(new FileNodeViewModel(path, true) { IsExpanded = true });
+        RootNodes.Add(new FileNodeViewModel(path, true, _fileSystemService) { IsExpanded = true });
     }
 
     [RelayCommand]

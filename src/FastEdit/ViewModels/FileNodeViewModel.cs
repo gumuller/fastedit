@@ -1,11 +1,14 @@
 using System.Collections.ObjectModel;
 using System.IO;
 using CommunityToolkit.Mvvm.ComponentModel;
+using FastEdit.Services.Interfaces;
 
 namespace FastEdit.ViewModels;
 
 public partial class FileNodeViewModel : ObservableObject
 {
+    private readonly IFileSystemService? _fileSystemService;
+
     [ObservableProperty]
     private string _name = string.Empty;
 
@@ -26,19 +29,19 @@ public partial class FileNodeViewModel : ObservableObject
 
     public string Icon => IsDirectory ? "\uE8B7" : "\uE8A5";
 
-    public FileNodeViewModel(string path, bool isDirectory)
+    public FileNodeViewModel(string path, bool isDirectory, IFileSystemService? fileSystemService = null)
     {
+        _fileSystemService = fileSystemService;
         FullPath = path;
         Name = Path.GetFileName(path);
         if (string.IsNullOrEmpty(Name))
-            Name = path; // For root drives
+            Name = path;
 
         IsDirectory = isDirectory;
 
         if (isDirectory)
         {
-            // Add dummy child for expand arrow
-            Children.Add(new FileNodeViewModel("", false) { Name = "Loading..." });
+            Children.Add(new FileNodeViewModel("", false, fileSystemService) { Name = "Loading..." });
         }
     }
 
@@ -50,8 +53,7 @@ public partial class FileNodeViewModel : ObservableObject
 
         try
         {
-            // Add directories first
-            var directories = Directory.GetDirectories(FullPath)
+            var directories = (_fileSystemService?.GetDirectories(FullPath) ?? Directory.GetDirectories(FullPath))
                 .OrderBy(d => Path.GetFileName(d), StringComparer.OrdinalIgnoreCase);
 
             foreach (var dir in directories)
@@ -59,20 +61,17 @@ public partial class FileNodeViewModel : ObservableObject
                 try
                 {
                     var name = Path.GetFileName(dir);
-                    // Skip hidden/system folders
                     if (name.StartsWith('.') || name.StartsWith('$'))
                         continue;
 
-                    Children.Add(new FileNodeViewModel(dir, true));
+                    Children.Add(new FileNodeViewModel(dir, true, _fileSystemService));
                 }
                 catch
                 {
-                    // Skip inaccessible directories
                 }
             }
 
-            // Then add files
-            var files = Directory.GetFiles(FullPath)
+            var files = (_fileSystemService?.GetFiles(FullPath) ?? Directory.GetFiles(FullPath))
                 .OrderBy(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase);
 
             foreach (var file in files)
@@ -83,17 +82,15 @@ public partial class FileNodeViewModel : ObservableObject
                     if (name.StartsWith('.'))
                         continue;
 
-                    Children.Add(new FileNodeViewModel(file, false));
+                    Children.Add(new FileNodeViewModel(file, false, _fileSystemService));
                 }
                 catch
                 {
-                    // Skip inaccessible files
                 }
             }
         }
         catch
         {
-            // Handle access denied etc
         }
 
         IsLoaded = true;
