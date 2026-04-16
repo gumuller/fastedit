@@ -261,8 +261,10 @@ public partial class MainWindow : FluentWindow
 
     private void About_Click(object sender, RoutedEventArgs e)
     {
+        var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+        var versionStr = version != null ? $"{version.Major}.{version.Minor}.{version.Build}" : "1.0.0";
         System.Windows.MessageBox.Show(
-            "FastEdit v2.0\n\nA fast, lightweight text and hex editor for Windows.\n\nFeatures:\n- Syntax highlighting for 20+ languages\n- Hex editing for binary files\n- 9 built-in themes\n- Virtual scrolling for large files\n- Session restore with cursor position\n- Find & Replace, Find in Files\n- Command Palette (Ctrl+Shift+P)\n- Auto-complete (Ctrl+Space)\n- Code folding, indent guides\n- Git branch detection\n- Built-in terminal\n- Split editor view\n- File comparison",
+            $"FastEdit v{versionStr}\n\nA fast, lightweight text and hex editor for Windows.\n\nFeatures:\n- Syntax highlighting for 20+ languages\n- Hex editing for binary files\n- 9 built-in themes\n- Virtual scrolling for large files\n- Session restore with cursor position\n- Find & Replace, Find in Files\n- Command Palette (Ctrl+Shift+P)\n- Auto-complete (Ctrl+Space)\n- Code folding, indent guides\n- Git branch detection\n- Built-in terminal\n- Split editor view\n- File comparison",
             "About FastEdit",
             System.Windows.MessageBoxButton.OK,
             System.Windows.MessageBoxImage.Information);
