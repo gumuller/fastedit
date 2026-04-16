@@ -7,51 +7,114 @@
              MouseLeftButtonDown="HexCanvas_MouseDown">
 
     <Grid>
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-        </Grid.RowDefinitions>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*"/>
             <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
 
-        <!-- Hex Search Bar -->
-        <Border x:Name="HexSearchBar" Grid.Row="0" Grid.ColumnSpan="2"
-                Background="{DynamicResource PanelBackgroundBrush}"
-                BorderBrush="{DynamicResource PanelBorderBrush}"
-                BorderThickness="0,0,0,1"
-                Padding="8,4"
-                Visibility="Collapsed">
-            <StackPanel Orientation="Horizontal">
-                <TextBlock Text="Find:" VerticalAlignment="Center" Margin="0,0,6,0"
-                           Foreground="{DynamicResource WindowForegroundBrush}"/>
-                <TextBox x:Name="HexSearchBox" Width="200" Height="26"
-                         VerticalContentAlignment="Center"
-                         KeyDown="HexSearchBox_KeyDown"
-                         FontFamily="Cascadia Code, Consolas"
-                         ToolTip="Enter hex bytes (e.g. FF 00 AB) or text in quotes (e.g. &quot;hello&quot;)"/>
-                <Button Content="Find Next" Click="HexSearchNext_Click" Padding="8,4" Margin="6,0,0,0" Height="26"/>
-                <Button Content="Find Prev" Click="HexSearchPrev_Click" Padding="8,4" Margin="4,0,0,0" Height="26"/>
-                <TextBlock x:Name="HexSearchStatus" VerticalAlignment="Center" Margin="8,0,0,0"
-                           Foreground="{DynamicResource TabForegroundBrush}" FontSize="11"/>
-                <Button Content="✕" Click="HexSearchClose_Click" Background="Transparent"
-                        BorderThickness="0" Padding="6,2" Margin="8,0,0,0" Height="26"
-                        Foreground="{DynamicResource TabForegroundBrush}" Cursor="Hand"/>
-            </StackPanel>
-        </Border>
-
         <!-- Hex Content Canvas -->
         <Canvas x:Name="HexCanvas"
-                Grid.Row="1" Grid.Column="0"
+                Grid.Column="0"
                 ClipToBounds="True"
                 Focusable="True"
                 MouseWheel="HexCanvas_MouseWheel"
                 MouseLeftButtonDown="HexCanvas_MouseDown"/>
 
+        <!-- Hex Search Panel (floating overlay, matches text editor search style) -->
+        <Border x:Name="HexSearchBar"
+                Grid.Column="0"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Top"
+                Background="{DynamicResource PanelBackgroundBrush}"
+                BorderBrush="{DynamicResource PanelBorderBrush}"
+                BorderThickness="1"
+                CornerRadius="6"
+                Padding="8"
+                Margin="0,8,24,0"
+                Visibility="Collapsed">
+            <StackPanel Orientation="Vertical">
+                <!-- Search Row -->
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="6"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="4"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="4"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="4"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Search TextBox -->
+                    <TextBox x:Name="HexSearchBox" Grid.Column="0"
+                             Style="{StaticResource FastEditSearchTextBoxStyle}"
+                             MinWidth="220"
+                             KeyDown="HexSearchBox_KeyDown"
+                             FontFamily="Cascadia Code, Consolas"
+                             ToolTip="Hex bytes (FF 00 AB) or quoted text (&quot;hello&quot;)"/>
+
+                    <!-- Search Mode Indicator -->
+                    <Border Grid.Column="2"
+                            Background="{DynamicResource EditorBackgroundBrush}"
+                            CornerRadius="4" Padding="6,4"
+                            VerticalAlignment="Center"
+                            ToolTip="Search supports hex bytes or quoted ASCII text">
+                        <TextBlock x:Name="SearchModeText" Text="HEX"
+                                   Foreground="{DynamicResource AccentBrush}"
+                                   FontSize="10" FontWeight="SemiBold"/>
+                    </Border>
+
+                    <!-- Find Previous -->
+                    <Button Grid.Column="4"
+                            Style="{StaticResource FastEditSearchButtonStyle}"
+                            Click="HexSearchPrev_Click"
+                            ToolTip="Find Previous (Shift+Enter)">
+                        <Path Data="M 8 1 L 3 6 L 8 11"
+                              Stroke="{DynamicResource WindowForegroundBrush}"
+                              StrokeThickness="1.8"
+                              StrokeStartLineCap="Round"
+                              StrokeEndLineCap="Round"/>
+                    </Button>
+
+                    <!-- Find Next -->
+                    <Button Grid.Column="6"
+                            Style="{StaticResource FastEditSearchButtonStyle}"
+                            Click="HexSearchNext_Click"
+                            ToolTip="Find Next (Enter)">
+                        <Path Data="M 3 1 L 8 6 L 3 11"
+                              Stroke="{DynamicResource WindowForegroundBrush}"
+                              StrokeThickness="1.8"
+                              StrokeStartLineCap="Round"
+                              StrokeEndLineCap="Round"/>
+                    </Button>
+
+                    <!-- Close -->
+                    <Button Grid.Column="8"
+                            Style="{StaticResource FastEditSearchButtonStyle}"
+                            Width="24" Height="24"
+                            Click="HexSearchClose_Click"
+                            ToolTip="Close (Escape)">
+                        <Path Data="M 2 2 L 10 10 M 10 2 L 2 10"
+                              Stroke="{DynamicResource WindowForegroundBrush}"
+                              StrokeThickness="1.8"
+                              StrokeStartLineCap="Round"
+                              StrokeEndLineCap="Round"/>
+                    </Button>
+                </Grid>
+
+                <!-- Match Count -->
+                <TextBlock x:Name="HexSearchStatus"
+                           Margin="0,4,0,0"
+                           Foreground="{DynamicResource TabForegroundBrush}"
+                           FontSize="11"/>
+            </StackPanel>
+        </Border>
+
         <!-- Vertical ScrollBar -->
         <ScrollBar x:Name="VerticalScrollBar"
-                   Grid.Row="1" Grid.Column="1"
+                   Grid.Column="1"
                    Orientation="Vertical"
                    Minimum="0"
                    Maximum="0"

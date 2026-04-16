@@ -421,16 +421,33 @@ public partial class HexEditorControl : UserControl
         HexSearchBar.Visibility = Visibility.Visible;
         HexSearchBox.Focus();
         HexSearchBox.SelectAll();
+        HexSearchBox.TextChanged += HexSearchBox_TextChanged;
+        UpdateSearchModeIndicator();
     }
 
     public void HideSearch()
     {
         HexSearchBar.Visibility = Visibility.Collapsed;
+        HexSearchBox.TextChanged -= HexSearchBox_TextChanged;
         _searchResults.Clear();
         _searchResultIndex = -1;
         _searchPatternLength = 0;
         HexSearchStatus.Text = "";
         RenderHex();
+    }
+
+    private void HexSearchBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    {
+        UpdateSearchModeIndicator();
+    }
+
+    private void UpdateSearchModeIndicator()
+    {
+        var text = HexSearchBox.Text.Trim();
+        if (text.StartsWith('"') && text.EndsWith('"') && text.Length >= 2)
+            SearchModeText.Text = "TEXT";
+        else
+            SearchModeText.Text = "HEX";
     }
 
     private void HexSearchBox_KeyDown(object sender, KeyEventArgs e)
