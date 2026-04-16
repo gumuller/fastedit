@@ -16,9 +16,14 @@
             <!-- Header -->
             <Border Grid.Row="0" Background="{DynamicResource MenuBackgroundBrush}" Padding="8,4">
                 <Grid>
-                    <TextBlock Text="Terminal" FontWeight="SemiBold" FontSize="12"
-                               Foreground="{DynamicResource EditorForegroundBrush}"
-                               VerticalAlignment="Center"/>
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="Terminal" FontWeight="SemiBold" FontSize="12"
+                                   Foreground="{DynamicResource EditorForegroundBrush}"/>
+                        <TextBlock Text=" — " FontSize="11"
+                                   Foreground="{DynamicResource EditorForegroundBrush}" Opacity="0.5"/>
+                        <TextBlock x:Name="ShellTypeLabel" Text="PowerShell" FontSize="11"
+                                   Foreground="{DynamicResource AccentBrush}"/>
+                    </StackPanel>
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                         <Button x:Name="ClearButton" Content="Clear" Click="Clear_Click"
                                 Background="Transparent" BorderThickness="0" Padding="8,2"
@@ -47,27 +52,31 @@
                          Foreground="{DynamicResource EditorForegroundBrush}"
                          TextWrapping="Wrap"
                          AcceptsReturn="True"
-                         VerticalScrollBarVisibility="Disabled"/>
+                         VerticalScrollBarVisibility="Disabled"
+                         Padding="8,4"/>
             </ScrollViewer>
 
             <!-- Input -->
-            <Grid Grid.Row="2">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="*"/>
-                </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0" Text="❯ " FontFamily="Cascadia Code,Consolas"
-                           FontSize="12" Padding="8,6,0,6" VerticalAlignment="Center"
-                           Foreground="{DynamicResource AccentBrush}"/>
-                <TextBox x:Name="InputBox" Grid.Column="1"
-                         FontFamily="Cascadia Code,Consolas,Courier New"
-                         FontSize="12"
-                         BorderThickness="0"
-                         Background="{DynamicResource EditorBackgroundBrush}"
-                         Foreground="{DynamicResource EditorForegroundBrush}"
-                         Padding="0,6"
-                         KeyDown="InputBox_KeyDown"/>
-            </Grid>
+            <Border Grid.Row="2" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock x:Name="PromptLabel" Grid.Column="0"
+                               FontFamily="Cascadia Code,Consolas"
+                               FontSize="12" Padding="8,6,4,6" VerticalAlignment="Center"
+                               Foreground="{DynamicResource AccentBrush}"/>
+                    <TextBox x:Name="InputBox" Grid.Column="1"
+                             FontFamily="Cascadia Code,Consolas,Courier New"
+                             FontSize="12"
+                             BorderThickness="0"
+                             Background="{DynamicResource EditorBackgroundBrush}"
+                             Foreground="{DynamicResource EditorForegroundBrush}"
+                             Padding="0,6"
+                             KeyDown="InputBox_KeyDown"/>
+                </Grid>
+            </Border>
         </Grid>
     </Border>
 </UserControl>

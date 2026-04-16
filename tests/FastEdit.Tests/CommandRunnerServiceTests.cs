@@ -11,44 +11,44 @@ public class CommandRunnerServiceTests
     // --- History ---
 
     [Fact]
-    public async Task ExecuteCommand_AddsToHistory()
+    public void ExecuteCommand_AddsToHistory()
     {
         var sut = CreateSut();
-        var output = new List<string>();
-        sut.OutputReceived += s => output.Add(s);
-
-        await sut.ExecuteCommandAsync("echo hello");
+        sut.ExecuteCommand("echo hello");
 
         Assert.Single(sut.History);
         Assert.Equal("echo hello", sut.History[0]);
+        sut.Dispose();
     }
 
     [Fact]
-    public async Task History_NavigateUp_ReturnsPrevious()
+    public void History_NavigateUp_ReturnsPrevious()
     {
         var sut = CreateSut();
-        await sut.ExecuteCommandAsync("echo first");
-        await sut.ExecuteCommandAsync("echo second");
+        sut.ExecuteCommand("echo first");
+        sut.ExecuteCommand("echo second");
 
         var prev = sut.GetPreviousHistoryItem();
         Assert.Equal("echo second", prev);
 
         prev = sut.GetPreviousHistoryItem();
         Assert.Equal("echo first", prev);
+        sut.Dispose();
     }
 
     [Fact]
-    public async Task History_NavigateDown_ReturnsNext()
+    public void History_NavigateDown_ReturnsNext()
     {
         var sut = CreateSut();
-        await sut.ExecuteCommandAsync("echo first");
-        await sut.ExecuteCommandAsync("echo second");
+        sut.ExecuteCommand("echo first");
+        sut.ExecuteCommand("echo second");
 
         sut.GetPreviousHistoryItem(); // "echo second"
         sut.GetPreviousHistoryItem(); // "echo first"
 
         var next = sut.GetNextHistoryItem();
         Assert.Equal("echo second", next);
+        sut.Dispose();
     }
 
     [Fact]
@@ -59,13 +59,14 @@ public class CommandRunnerServiceTests
     }
 
     [Fact]
-    public async Task History_NavigateDown_AtEnd_ReturnsEmpty()
+    public void History_NavigateDown_AtEnd_ReturnsEmpty()
     {
         var sut = CreateSut();
-        await sut.ExecuteCommandAsync("echo test");
+        sut.ExecuteCommand("echo test");
 
         var next = sut.GetNextHistoryItem();
         Assert.Equal(string.Empty, next);
+        sut.Dispose();
     }
 
     // --- Working Directory ---
@@ -74,7 +75,7 @@ public class CommandRunnerServiceTests
     public void SetWorkingDirectory_ValidPath_ReturnsTrue()
     {
         var sut = CreateSut();
-        var tempDir = Path.GetTempPath();
+        var tempDir = Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar);
 
         Assert.True(sut.SetWorkingDirectory(tempDir));
         Assert.Equal(tempDir, sut.WorkingDirectory);
@@ -97,67 +98,57 @@ public class CommandRunnerServiceTests
         Assert.False(sut.SetWorkingDirectory(null));
     }
 
-    // --- CD Command ---
-
     [Fact]
-    public async Task CdCommand_ChangesWorkingDirectory()
+    public void SetWorkingDirectory_FilePath_UsesDirectory()
     {
         var sut = CreateSut();
-        var tempDir = Path.GetTempPath();
-        sut.SetWorkingDirectory(tempDir);
+        var tempFile = Path.GetTempFileName();
+        try
+        {
+            Assert.True(sut.SetWorkingDirectory(tempFile));
+            Assert.Equal(Path.GetDirectoryName(tempFile), sut.WorkingDirectory);
+        }
+        finally
+        {
+            File.Delete(tempFile);
+        }
+    }
 
-        var output = new List<string>();
-        sut.OutputReceived += s => output.Add(s);
+    // --- Shell Lifecycle ---
 
-        await sut.ExecuteCommandAsync($"cd {tempDir}");
+    [Fact]
+    public void StartShell_StartsProcess()
+    {
+        var sut = CreateSut();
+        sut.StartShell();
 
-        Assert.Contains(output, s => s.Contains("Changed to:"));
+        Assert.True(sut.IsRunning);
+        sut.Dispose();
     }
 
     [Fact]
-    public async Task CdCommand_InvalidDir_ShowsError()
+    public void StartShell_WithDirectory_SetsWorkingDirectory()
     {
         var sut = CreateSut();
-        var output = new List<string>();
-        sut.OutputReceived += s => output.Add(s);
+        var tempDir = Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar);
+        sut.StartShell(tempDir);
 
-        await sut.ExecuteCommandAsync("cd C:\\NonExistent12345");
-
-        Assert.Contains(output, s => s.Contains("not found"));
-    }
-
-    // --- Command Execution ---
-
-    [Fact]
-    public async Task ExecuteCommand_CapturesOutput()
-    {
-        var sut = CreateSut();
-        var output = new List<string>();
-        sut.OutputReceived += s => output.Add(s);
-
-        await sut.ExecuteCommandAsync("echo hello world");
-
-        Assert.Contains(output, s => s.Contains("hello world"));
+        Assert.True(sut.IsRunning);
+        Assert.Equal(tempDir, sut.WorkingDirectory);
+        sut.Dispose();
     }
 
     [Fact]
-    public async Task ExecuteCommand_EmptyCommand_ReturnsFalse()
+    public void StopCurrentProcess_RestartShell()
     {
         var sut = CreateSut();
-        var result = await sut.ExecuteCommandAsync("  ");
-        Assert.False(result);
-    }
+        sut.StartShell();
+        Assert.True(sut.IsRunning);
 
-    [Fact]
-    public async Task ExecuteCommand_FiresCommandCompleted()
-    {
-        var sut = CreateSut();
-        bool completed = false;
-        sut.CommandCompleted += () => completed = true;
-
-        await sut.ExecuteCommandAsync("echo test");
-
-        Assert.True(completed);
+        sut.StopCurrentProcess();
+        // Should have restarted
+        Assert.True(sut.IsRunning);
+        sut.Dispose();
     }
 
     // --- StripAnsiCodes ---
@@ -185,5 +176,17 @@ public class CommandRunnerServiceTests
         var sut = CreateSut();
         sut.Dispose();
         sut.Dispose();
+    }
+
+    [Fact]
+    public void Dispose_StopsRunningShell()
+    {
+        var sut = CreateSut();
+        sut.StartShell();
+        Assert.True(sut.IsRunning);
+
+        sut.Dispose();
+        // After dispose, IsRunning should be false (process killed or disposed)
+        Assert.False(sut.IsRunning);
     }
 }

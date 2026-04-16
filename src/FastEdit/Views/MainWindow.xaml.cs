@@ -431,7 +431,57 @@ public partial class MainWindow : FluentWindow
         if (sender is FrameworkElement fe && fe.Tag is EditorTabViewModel tab && _viewModel != null)
         {
             _viewModel.SelectedTab = tab;
+            _dragStartPoint = e.GetPosition(null);
+            _dragSourceTab = tab;
             e.Handled = true;
+        }
+    }
+
+    private Point? _dragStartPoint;
+    private EditorTabViewModel? _dragSourceTab;
+
+    private void TabHeader_MouseMove(object sender, MouseEventArgs e)
+    {
+        if (e.LeftButton != MouseButtonState.Pressed || _dragStartPoint == null || _dragSourceTab == null)
+            return;
+
+        var pos = e.GetPosition(null);
+        var diff = pos - _dragStartPoint.Value;
+
+        if (Math.Abs(diff.X) > SystemParameters.MinimumHorizontalDragDistance ||
+            Math.Abs(diff.Y) > SystemParameters.MinimumVerticalDragDistance)
+        {
+            var data = new DataObject("TabItem", _dragSourceTab);
+            DragDrop.DoDragDrop((DependencyObject)sender, data, DragDropEffects.Move);
+            _dragStartPoint = null;
+            _dragSourceTab = null;
+        }
+    }
+
+    private void TabHeader_DragOver(object sender, DragEventArgs e)
+    {
+        if (e.Data.GetDataPresent("TabItem"))
+            e.Effects = DragDropEffects.Move;
+        else
+            e.Effects = DragDropEffects.None;
+        e.Handled = true;
+    }
+
+    private void TabHeader_Drop(object sender, DragEventArgs e)
+    {
+        if (_viewModel == null || !e.Data.GetDataPresent("TabItem")) return;
+
+        var sourceTab = e.Data.GetData("TabItem") as EditorTabViewModel;
+        var targetTab = (sender as FrameworkElement)?.Tag as EditorTabViewModel;
+
+        if (sourceTab == null || targetTab == null || sourceTab == targetTab) return;
+
+        var sourceIndex = _viewModel.Tabs.IndexOf(sourceTab);
+        var targetIndex = _viewModel.Tabs.IndexOf(targetTab);
+
+        if (sourceIndex >= 0 && targetIndex >= 0)
+        {
+            _viewModel.Tabs.Move(sourceIndex, targetIndex);
         }
     }
 
