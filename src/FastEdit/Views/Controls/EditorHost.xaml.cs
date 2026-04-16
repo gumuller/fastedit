@@ -40,6 +40,11 @@ public partial class EditorHost : UserControl
     private CompletionWindow? _completionWindow;
     private System.Windows.Threading.DispatcherTimer? _breadcrumbTimer;
     private CaretStyleAdorner? _caretAdorner;
+    private FilterBackgroundRenderer? _filterRenderer;
+    private FilterDimTransformer? _filterDimTransformer;
+    private ILineFilterService? _lineFilterService;
+    private Dictionary<int, Models.LineFilterResult> _filterCache = new();
+    private bool _isFilterFoldingActive;
 
     public EditorHost()
     {
@@ -86,6 +91,14 @@ public partial class EditorHost : UserControl
         _occurrenceRenderer = new OccurrenceHighlightRenderer(TextEditor.TextArea.TextView);
         TextEditor.TextArea.TextView.BackgroundRenderers.Add(_occurrenceRenderer);
         TextEditor.TextArea.SelectionChanged += OnSelectionChangedForOccurrences;
+
+        // Install filter renderers
+        _lineFilterService = App.Services.GetRequiredService<ILineFilterService>();
+        _filterRenderer = new FilterBackgroundRenderer(TextEditor.TextArea.TextView);
+        TextEditor.TextArea.TextView.BackgroundRenderers.Add(_filterRenderer);
+        _filterDimTransformer = new FilterDimTransformer();
+        TextEditor.TextArea.TextView.LineTransformers.Add(_filterDimTransformer);
+        _lineFilterService.FiltersChanged += OnLineFiltersChanged;
 
         // Folding update timer
         _foldingTimer = new System.Windows.Threading.DispatcherTimer
@@ -720,8 +733,139 @@ public partial class EditorHost : UserControl
 
     private void UpdateFoldings()
     {
+        if (_isFilterFoldingActive) return;
         if (_foldingManager == null || _currentVm == null) return;
         FoldingHelper.Update(_foldingManager, _currentVm.SyntaxLanguage, TextEditor.Document);
+    }
+
+    // --- Line Filters ---
+    private void OnLineFiltersChanged()
+    {
+        Dispatcher.Invoke(() =>
+        {
+            RecomputeFilterCache();
+            ApplyFilterFolding();
+        });
+    }
+
+    private void RecomputeFilterCache()
+    {
+        _filterCache.Clear();
+
+        if (_lineFilterService == null || !_lineFilterService.HasActiveFilters)
+        {
+            _filterRenderer?.UpdateResults(_filterCache);
+            _filterDimTransformer?.UpdateResults(_filterCache, false);
+            TextEditor.TextArea.TextView.Redraw();
+            UpdateFilterMatchCount();
+            return;
+        }
+
+        var doc = TextEditor.Document;
+        if (doc == null) return;
+
+        for (int i = 1; i <= doc.LineCount; i++)
+        {
+            var line = doc.GetLineByNumber(i);
+            var text = doc.GetText(line.Offset, line.Length);
+            var result = _lineFilterService.EvaluateLine(text);
+            if (result != Models.LineFilterResult.NoMatch)
+                _filterCache[i] = result;
+        }
+
+        _filterRenderer?.UpdateResults(_filterCache);
+        _filterDimTransformer?.UpdateResults(_filterCache, true);
+        TextEditor.TextArea.TextView.Redraw();
+        UpdateFilterMatchCount();
+    }
+
+    private void ApplyFilterFolding()
+    {
+        if (_lineFilterService == null) return;
+
+        if (_lineFilterService.ShowOnlyFilteredLines && _lineFilterService.HasActiveFilters)
+        {
+            // Enter filter folding mode: stop code folding, fold non-matching lines
+            _isFilterFoldingActive = true;
+            _foldingTimer?.Stop();
+
+            if (_foldingManager == null)
+                _foldingManager = FoldingHelper.Install(TextEditor, _currentVm?.SyntaxLanguage ?? "Text");
+
+            var doc = TextEditor.Document;
+            if (doc == null) return;
+
+            var folds = new List<ICSharpCode.AvalonEdit.Folding.NewFolding>();
+            int foldStart = -1;
+            int foldStartLine = -1;
+
+            for (int i = 1; i <= doc.LineCount; i++)
+            {
+                bool isVisible = _filterCache.TryGetValue(i, out var result) && result.IsVisible;
+
+                if (!isVisible)
+                {
+                    if (foldStart < 0)
+                    {
+                        foldStart = doc.GetLineByNumber(i).Offset;
+                        foldStartLine = i;
+                    }
+                }
+                else if (foldStart >= 0)
+                {
+                    var prevLine = doc.GetLineByNumber(i - 1);
+                    int hiddenCount = i - foldStartLine;
+                    folds.Add(new ICSharpCode.AvalonEdit.Folding.NewFolding(foldStart, prevLine.EndOffset)
+                    {
+                        Name = $"[{hiddenCount} hidden line{(hiddenCount > 1 ? "s" : "")}]",
+                        DefaultClosed = true
+                    });
+                    foldStart = -1;
+                }
+            }
+
+            // Close final fold if document ends with non-matching lines
+            if (foldStart >= 0)
+            {
+                var lastLine = doc.GetLineByNumber(doc.LineCount);
+                int hiddenCount = doc.LineCount - foldStartLine + 1;
+                folds.Add(new ICSharpCode.AvalonEdit.Folding.NewFolding(foldStart, lastLine.EndOffset)
+                {
+                    Name = $"[{hiddenCount} hidden line{(hiddenCount > 1 ? "s" : "")}]",
+                    DefaultClosed = true
+                });
+            }
+
+            folds.Sort((a, b) => a.StartOffset.CompareTo(b.StartOffset));
+            _foldingManager.UpdateFoldings(folds, -1);
+        }
+        else if (_isFilterFoldingActive)
+        {
+            // Exit filter folding mode: restore code folding
+            _isFilterFoldingActive = false;
+            UninstallFolding();
+
+            if (_currentVm != null && !_currentVm.IsBinaryMode)
+            {
+                InstallFolding();
+                UpdateFoldings();
+            }
+            _foldingTimer?.Start();
+        }
+    }
+
+    private void UpdateFilterMatchCount()
+    {
+        // Find the FilterPanel in the visual tree and update match count
+        var mainWindow = Window.GetWindow(this) as MainWindow;
+        if (mainWindow == null) return;
+
+        var filterPanel = mainWindow.FindName("LineFilterPanel") as FilterPanel;
+        if (filterPanel == null) return;
+
+        int matched = _filterCache.Count(kv => kv.Value.IsVisible);
+        int total = TextEditor.Document?.LineCount ?? 0;
+        filterPanel.UpdateMatchCount(matched, total);
     }
 
     // --- Bracket Matching ---
@@ -1093,6 +1237,14 @@ public partial class EditorHost : UserControl
         if (_currentVm != null && !_currentVm.IsBinaryMode)
         {
             _currentVm.Content = TextEditor.Text;
+
+            // Refresh filter cache if filters are active
+            if (_lineFilterService?.HasActiveFilters == true)
+            {
+                RecomputeFilterCache();
+                if (_isFilterFoldingActive)
+                    ApplyFilterFolding();
+            }
         }
     }
 

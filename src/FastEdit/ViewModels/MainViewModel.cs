@@ -85,6 +85,9 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private bool _isSideBySideMode;
 
+    [ObservableProperty]
+    private bool _isFilterPanelVisible;
+
     // Events for editor-specific actions
     public event Action? FindRequested;
     public event Action? ReplaceRequested;
@@ -109,6 +112,7 @@ public partial class MainViewModel : ObservableObject
     public event Action? MacroStartRecordingRequested;
     public event Action? MacroStopRecordingRequested;
     public event Action<int>? MacroPlaybackRequested;
+    public event Action? ToggleFilterPanelRequested;
 
     public MainViewModel(
         IFileService fileService,
@@ -405,6 +409,13 @@ public partial class MainViewModel : ObservableObject
 
     [RelayCommand]
     private void ToggleExplorer() => IsExplorerVisible = !IsExplorerVisible;
+
+    [RelayCommand]
+    private void ToggleFilterPanel()
+    {
+        IsFilterPanelVisible = !IsFilterPanelVisible;
+        ToggleFilterPanelRequested?.Invoke();
+    }
 
     partial void OnIsCommandRunnerVisibleChanged(bool value)
     {

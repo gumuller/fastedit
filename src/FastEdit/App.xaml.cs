@@ -54,6 +54,7 @@ public partial class App : Application
                 services.AddSingleton<IUpdateService, UpdateService>();
                 services.AddSingleton<IGitService, GitService>();
                 services.AddSingleton<IKeyBindingService, KeyBindingService>();
+                services.AddSingleton<ILineFilterService, LineFilterService>();
 
                 // Factories
                 services.AddSingleton<IEditorTabFactory, EditorTabFactory>();

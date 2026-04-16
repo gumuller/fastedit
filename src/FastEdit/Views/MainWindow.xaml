@@ -295,6 +295,8 @@
                 <MenuItem Header="_Terminal" Command="{Binding ToggleCommandRunnerCommand}" InputGestureText="Ctrl+`"/>
                 <MenuItem Header="_Zen Mode" IsCheckable="True" IsChecked="{Binding IsZenMode, Mode=TwoWay}" InputGestureText="F11"/>
                 <MenuItem Header="Toggle _Explorer" IsCheckable="True" IsChecked="{Binding IsExplorerVisible, Mode=TwoWay}" InputGestureText="Ctrl+B"/>
+                <MenuItem Header="Line _Filters" IsCheckable="True" IsChecked="{Binding IsFilterPanelVisible, Mode=TwoWay}" InputGestureText="Ctrl+L"
+                          Command="{Binding ToggleFilterPanelCommand}"/>
                 <Separator/>
                 <MenuItem Header="_Auto-Reload (Tail)" IsCheckable="True" IsChecked="{Binding IsAutoReloadEnabled, Mode=TwoWay}"/>
                 <MenuItem Header="Compare _Files..." Command="{Binding CompareFilesCommand}"/>
@@ -327,6 +329,7 @@
 
             <Grid.RowDefinitions>
                 <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
@@ -468,6 +471,12 @@
                                        Grid.Row="1" Grid.ColumnSpan="3"
                                        Height="250"
                                        Visibility="Collapsed"/>
+
+            <!-- Line Filter Panel -->
+            <controls:FilterPanel x:Name="LineFilterPanel"
+                                  Grid.Row="2" Grid.ColumnSpan="3"
+                                  Height="200"
+                                  Visibility="Collapsed"/>
         </Grid>
 
         <!-- Terminal Splitter -->

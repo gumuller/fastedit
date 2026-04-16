@@ -39,7 +39,8 @@ public class KeyBindingService : IKeyBindingService
         ["SelectAllOccurrences"] = "Ctrl+Shift+L",
         ["Settings"] = "Ctrl+,",
         ["ZenMode"] = "F11",
-        ["ToggleExplorer"] = "Ctrl+B"
+        ["ToggleExplorer"] = "Ctrl+B",
+        ["ToggleFilterPanel"] = "Ctrl+L"
     };
 
     public KeyBindingService()

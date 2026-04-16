@@ -77,6 +77,14 @@ public partial class MainWindow : FluentWindow
         _findInFilesVm.NavigateToResult += OnNavigateToSearchResult;
         FindInFilesPanel.DataContext = _findInFilesVm;
 
+        // Setup Line Filter Panel
+        _viewModel.ToggleFilterPanelRequested += OnToggleFilterPanel;
+        LineFilterPanel.CloseRequested += () =>
+        {
+            if (_viewModel != null) _viewModel.IsFilterPanelVisible = false;
+            LineFilterPanel.Visibility = Visibility.Collapsed;
+        };
+
         BuildCommandRegistry();
     }
 
@@ -285,6 +293,13 @@ public partial class MainWindow : FluentWindow
             _viewModel.IsExplorerVisible = !_viewModel.IsExplorerVisible;
     }
 
+    private void OnToggleFilterPanel()
+    {
+        LineFilterPanel.Visibility = _viewModel?.IsFilterPanelVisible == true
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
     private void OnOpenSettingsRequested()
     {
         ShowSettingsDialog();
@@ -345,6 +360,7 @@ public partial class MainWindow : FluentWindow
             ["Settings"] = _viewModel.OpenSettingsCommand,
             ["ZenMode"] = _viewModel.ToggleZenModeCommand,
             ["ToggleExplorer"] = _viewModel.ToggleExplorerCommand,
+            ["ToggleFilterPanel"] = _viewModel.ToggleFilterPanelCommand,
         };
 
         foreach (var kvp in bindings)
