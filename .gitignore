@@ -61,3 +61,4 @@ nul
 
 # Deploy output
 deploy/output/
+publish/
