@@ -71,6 +71,9 @@ public partial class MainViewModel : ObservableObject
     private bool _isCommandRunnerVisible;
 
     [ObservableProperty]
+    private bool _isExplorerVisible = true;
+
+    [ObservableProperty]
     private bool _isZenMode;
 
     [ObservableProperty]
@@ -399,6 +402,9 @@ public partial class MainViewModel : ObservableObject
 
     [RelayCommand]
     private void ToggleZenMode() => IsZenMode = !IsZenMode;
+
+    [RelayCommand]
+    private void ToggleExplorer() => IsExplorerVisible = !IsExplorerVisible;
 
     partial void OnIsCommandRunnerVisibleChanged(bool value)
     {

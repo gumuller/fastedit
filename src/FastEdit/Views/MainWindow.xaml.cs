@@ -23,6 +23,7 @@ public partial class MainWindow : FluentWindow
     private WindowState _preZenWindowState;
     private WindowStyle _preZenWindowStyle;
     private GridLength _preZenFileTreeWidth;
+    private GridLength _savedExplorerWidth = new GridLength(250);
 
     public MainWindow()
     {
@@ -127,6 +128,7 @@ public partial class MainWindow : FluentWindow
         _commandRegistry.Register("Side-by-Side View", "View", null, _viewModel.ToggleSideBySideCommand);
         _commandRegistry.Register("Toggle Terminal", "View", "Ctrl+`", _viewModel.ToggleCommandRunnerCommand);
         _commandRegistry.Register("Zen Mode", "View", "F11", _viewModel.ToggleZenModeCommand);
+        _commandRegistry.Register("Toggle Explorer", "View", "Ctrl+B", _viewModel.ToggleExplorerCommand);
         _commandRegistry.Register("Auto-Reload", "View", null, _viewModel.ToggleAutoReloadCommand);
         _commandRegistry.Register("Compare Files", "View", null, _viewModel.CompareFilesCommand);
         _commandRegistry.Register("Show Completion", "Edit", "Ctrl+Space", _viewModel.ShowCompletionCommand);
@@ -335,6 +337,8 @@ public partial class MainWindow : FluentWindow
             ["SelectNextOccurrence"] = _viewModel.SelectNextOccurrenceCommand,
             ["SelectAllOccurrences"] = _viewModel.SelectAllOccurrencesCommand,
             ["Settings"] = _viewModel.OpenSettingsCommand,
+            ["ZenMode"] = _viewModel.ToggleZenModeCommand,
+            ["ToggleExplorer"] = _viewModel.ToggleExplorerCommand,
         };
 
         foreach (var kvp in bindings)
@@ -543,6 +547,10 @@ public partial class MainWindow : FluentWindow
         {
             UpdateSideBySideColumns();
         }
+        else if (e.PropertyName == nameof(MainViewModel.IsExplorerVisible))
+        {
+            ToggleExplorerPanel(_viewModel!.IsExplorerVisible);
+        }
     }
 
     private void UpdateSideBySideColumns()
@@ -567,9 +575,7 @@ public partial class MainWindow : FluentWindow
     {
         _preZenWindowState = WindowState;
         _preZenWindowStyle = WindowStyle;
-        _preZenFileTreeWidth = FileTreePanel.ActualWidth > 0
-            ? new GridLength(FileTreePanel.ActualWidth) 
-            : new GridLength(250);
+        _preZenFileTreeWidth = FileTreeColumn.Width;
 
         // Hide chrome
         MenuBar.Visibility = Visibility.Collapsed;
@@ -577,6 +583,9 @@ public partial class MainWindow : FluentWindow
         TreeSplitter.Visibility = Visibility.Collapsed;
         MainStatusBar.Visibility = Visibility.Collapsed;
         TitleBarGrid.Visibility = Visibility.Collapsed;
+        FileTreeColumn.Width = new GridLength(0);
+        FileTreeColumn.MinWidth = 0;
+        FileTreeColumn.MaxWidth = 0;
 
         // Hide terminal if visible
         if (_viewModel!.IsCommandRunnerVisible)
@@ -595,10 +604,32 @@ public partial class MainWindow : FluentWindow
         TreeSplitter.Visibility = Visibility.Visible;
         MainStatusBar.Visibility = Visibility.Visible;
         TitleBarGrid.Visibility = Visibility.Visible;
+        FileTreeColumn.Width = _preZenFileTreeWidth;
+        FileTreeColumn.MinWidth = 0;
+        FileTreeColumn.MaxWidth = 400;
 
         // Restore window state
         WindowStyle = _preZenWindowStyle;
         WindowState = _preZenWindowState;
+    }
+
+    private void ToggleExplorerPanel(bool visible)
+    {
+        if (visible)
+        {
+            FileTreePanel.Visibility = Visibility.Visible;
+            TreeSplitter.Visibility = Visibility.Visible;
+            FileTreeColumn.Width = _savedExplorerWidth;
+            FileTreeColumn.MaxWidth = 400;
+        }
+        else
+        {
+            _savedExplorerWidth = FileTreeColumn.Width;
+            FileTreePanel.Visibility = Visibility.Collapsed;
+            TreeSplitter.Visibility = Visibility.Collapsed;
+            FileTreeColumn.Width = new GridLength(0);
+            FileTreeColumn.MaxWidth = 0;
+        }
     }
 
     private void MainWindow_PreviewKeyDown(object sender, KeyEventArgs e)

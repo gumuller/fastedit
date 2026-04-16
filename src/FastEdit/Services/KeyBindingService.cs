@@ -37,7 +37,9 @@ public class KeyBindingService : IKeyBindingService
         ["Print"] = "Ctrl+P",
         ["SelectNextOccurrence"] = "Ctrl+D",
         ["SelectAllOccurrences"] = "Ctrl+Shift+L",
-        ["Settings"] = "Ctrl+,"
+        ["Settings"] = "Ctrl+,",
+        ["ZenMode"] = "F11",
+        ["ToggleExplorer"] = "Ctrl+B"
     };
 
     public KeyBindingService()

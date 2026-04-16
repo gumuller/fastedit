@@ -292,6 +292,7 @@
                 <MenuItem Header="Side-by-Side _View" Command="{Binding ToggleSideBySideCommand}"/>
                 <MenuItem Header="_Terminal" Command="{Binding ToggleCommandRunnerCommand}" InputGestureText="Ctrl+`"/>
                 <MenuItem Header="_Zen Mode" IsCheckable="True" IsChecked="{Binding IsZenMode, Mode=TwoWay}" InputGestureText="F11"/>
+                <MenuItem Header="Toggle _Explorer" IsCheckable="True" IsChecked="{Binding IsExplorerVisible, Mode=TwoWay}" InputGestureText="Ctrl+B"/>
                 <Separator/>
                 <MenuItem Header="_Auto-Reload (Tail)" IsCheckable="True" IsChecked="{Binding IsAutoReloadEnabled, Mode=TwoWay}"/>
                 <MenuItem Header="Compare _Files..." Command="{Binding CompareFilesCommand}"/>
@@ -317,7 +318,7 @@
         <!-- Main Content -->
         <Grid Grid.Row="2">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="250" MinWidth="150" MaxWidth="400"/>
+                <ColumnDefinition x:Name="FileTreeColumn" Width="250" MinWidth="0" MaxWidth="400"/>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
