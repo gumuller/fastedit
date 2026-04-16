@@ -198,6 +198,8 @@
                 <Separator/>
                 <MenuItem Header="_Close Tab" Command="{Binding CloseTabCommand}" InputGestureText="Ctrl+W"/>
                 <Separator/>
+                <MenuItem Header="_Settings..." Click="Settings_Click" InputGestureText="Ctrl+,"/>
+                <Separator/>
                 <MenuItem Header="E_xit" Click="Exit_Click"/>
             </MenuItem>
             <MenuItem Header="_Edit">
@@ -311,8 +313,6 @@
                 <MenuItem Header="_Refresh Themes" Command="{Binding RefreshThemesCommand}"/>
             </MenuItem>
             <MenuItem Header="_Help">
-                <MenuItem Header="_Settings..." Click="Settings_Click" InputGestureText="Ctrl+,"/>
-                <Separator/>
                 <MenuItem Header="_About" Click="About_Click"/>
             </MenuItem>
         </Menu>

@@ -4,7 +4,7 @@
         xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
         Title="Settings"
         Width="520"
-        Height="620"
+        Height="680"
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize"
         ShowInTaskbar="False"
@@ -21,22 +21,19 @@
             <!-- Editor + Appearance + General -->
             <TabItem Header="General">
                 <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="8">
-                    <StackPanel Margin="4">
+                    <StackPanel Margin="8">
                         <!-- Editor Section -->
-                        <TextBlock Text="Editor" FontWeight="SemiBold" FontSize="16" Margin="0,0,0,8"/>
+                        <TextBlock Text="Editor" FontWeight="SemiBold" FontSize="16" Margin="0,0,0,12"
+                                   Foreground="{DynamicResource WindowForegroundBrush}"/>
 
-                        <Grid Margin="0,0,0,6">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="160"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Text="Font size" VerticalAlignment="Center"/>
-                            <StackPanel Grid.Column="1" Orientation="Horizontal">
-                                <Button Content="-" Width="28" Height="28" Click="FontSizeDown_Click" Margin="0,0,4,0"/>
-                                <TextBox x:Name="FontSizeBox" Width="50" TextAlignment="Center" VerticalContentAlignment="Center" Height="28"/>
-                                <Button Content="+" Width="28" Height="28" Click="FontSizeUp_Click" Margin="4,0,0,0"/>
-                            </StackPanel>
-                        </Grid>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                            <TextBlock Text="Font size" Width="170" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource WindowForegroundBrush}"/>
+                            <Button Content="−" Width="28" Height="28" Click="FontSizeDown_Click" Margin="0,0,4,0"/>
+                            <TextBox x:Name="FontSizeBox" Width="50" TextAlignment="Center"
+                                     VerticalContentAlignment="Center" Height="28"/>
+                            <Button Content="+" Width="28" Height="28" Click="FontSizeUp_Click" Margin="4,0,0,0"/>
+                        </StackPanel>
 
                         <CheckBox x:Name="WordWrapCheck" Content="Word wrap" Margin="0,4"/>
                         <CheckBox x:Name="ShowWhitespaceCheck" Content="Show whitespace" Margin="0,4"/>
@@ -45,64 +42,54 @@
                         <CheckBox x:Name="MinimapCheck" Content="Show minimap" Margin="0,4"/>
                         <CheckBox x:Name="AutoReloadCheck" Content="Auto-reload files" Margin="0,4"/>
 
-                        <Grid Margin="0,6,0,6">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="160"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Text="Tab size" VerticalAlignment="Center"/>
-                            <ComboBox x:Name="TabSizeCombo" Width="80" HorizontalAlignment="Left">
+                        <StackPanel Orientation="Horizontal" Margin="0,8,0,8">
+                            <TextBlock Text="Tab size" Width="170" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource WindowForegroundBrush}"/>
+                            <ComboBox x:Name="TabSizeCombo" Width="80">
                                 <ComboBoxItem Content="2" Tag="2"/>
                                 <ComboBoxItem Content="4" Tag="4"/>
                                 <ComboBoxItem Content="8" Tag="8"/>
                             </ComboBox>
-                        </Grid>
+                        </StackPanel>
 
                         <CheckBox x:Name="UseTabsCheck" Content="Use tabs (instead of spaces)" Margin="0,4"/>
 
-                        <Grid Margin="0,6,0,6">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="160"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Text="Cursor style" VerticalAlignment="Center"/>
-                            <ComboBox x:Name="CursorStyleCombo" Width="160" HorizontalAlignment="Left">
+                        <StackPanel Orientation="Horizontal" Margin="0,8,0,8">
+                            <TextBlock Text="Cursor style" Width="170" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource WindowForegroundBrush}"/>
+                            <ComboBox x:Name="CursorStyleCombo" Width="160">
                                 <ComboBoxItem Content="Line" Tag="Line"/>
                                 <ComboBoxItem Content="Line Thin" Tag="LineThin"/>
                                 <ComboBoxItem Content="Block" Tag="Block"/>
                                 <ComboBoxItem Content="Underscore" Tag="Underscore"/>
                             </ComboBox>
-                        </Grid>
+                        </StackPanel>
 
                         <!-- Appearance Section -->
                         <Separator Margin="0,12"/>
-                        <TextBlock Text="Appearance" FontWeight="SemiBold" FontSize="16" Margin="0,8,0,8"/>
+                        <TextBlock Text="Appearance" FontWeight="SemiBold" FontSize="16" Margin="0,12,0,12"
+                                   Foreground="{DynamicResource WindowForegroundBrush}"/>
 
-                        <Grid Margin="0,0,0,6">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="160"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Text="Theme" VerticalAlignment="Center"/>
-                            <ComboBox x:Name="ThemeCombo" Width="200" HorizontalAlignment="Left"
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                            <TextBlock Text="Theme" Width="170" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource WindowForegroundBrush}"/>
+                            <ComboBox x:Name="ThemeCombo" Width="200"
                                       DisplayMemberPath="DisplayName"/>
-                        </Grid>
+                        </StackPanel>
 
                         <!-- General Section -->
                         <Separator Margin="0,12"/>
-                        <TextBlock Text="General" FontWeight="SemiBold" FontSize="16" Margin="0,8,0,8"/>
+                        <TextBlock Text="General" FontWeight="SemiBold" FontSize="16" Margin="0,12,0,12"
+                                   Foreground="{DynamicResource WindowForegroundBrush}"/>
 
                         <CheckBox x:Name="CheckUpdatesCheck" Content="Check for updates on startup" Margin="0,4"/>
 
-                        <Grid Margin="0,6,0,6">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="160"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Text="Auto-save interval (s)" VerticalAlignment="Center"/>
-                            <TextBox x:Name="AutoSaveBox" Width="60" HorizontalAlignment="Left"
+                        <StackPanel Orientation="Horizontal" Margin="0,8,0,8">
+                            <TextBlock Text="Auto-save interval (s)" Width="170" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource WindowForegroundBrush}"/>
+                            <TextBox x:Name="AutoSaveBox" Width="60"
                                      TextAlignment="Center" VerticalContentAlignment="Center" Height="28"/>
-                        </Grid>
+                        </StackPanel>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>

@@ -204,6 +204,15 @@ public partial class EditorHost : UserControl
     private void OnFindRequested()
     {
         if (!IsActiveEditorHost()) return;
+
+        // Route to hex search when in binary mode
+        var vm = DataContext as EditorTabViewModel;
+        if (vm?.IsBinaryMode == true)
+        {
+            HexEditor.ShowSearch();
+            return;
+        }
+
         _searchPanel?.Open();
     }
 

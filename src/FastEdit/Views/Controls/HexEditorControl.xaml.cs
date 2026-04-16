@@ -31,6 +31,7 @@ public partial class HexEditorControl : UserControl
     private Brush? _selectionBrush;
     private Brush? _modifiedBrush;
     private Brush? _selectedForegroundBrush;
+    private Brush? _searchHighlightBrush;
 
     public HexEditorControl()
     {
@@ -64,6 +65,9 @@ public partial class HexEditorControl : UserControl
         _selectionBrush = FindBrush("EditorSelectionBackgroundBrush");
         _modifiedBrush = FindBrush("HexModifiedBackgroundBrush");
         _selectedForegroundBrush = FindBrush("HexSelectedForegroundBrush");
+        _searchHighlightBrush = FindBrush("EditorFindHighlightBrush");
+        if (_searchHighlightBrush == null || _searchHighlightBrush == Brushes.Transparent)
+            _searchHighlightBrush = new SolidColorBrush(Color.FromArgb(80, 255, 200, 0));
     }
 
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
@@ -149,6 +153,22 @@ public partial class HexEditorControl : UserControl
 
     private void HexCanvas_KeyDown(object sender, KeyEventArgs e)
     {
+        // Ctrl+F opens search
+        if (e.Key == Key.F && Keyboard.Modifiers == ModifierKeys.Control)
+        {
+            ShowSearch();
+            e.Handled = true;
+            return;
+        }
+
+        // Escape closes search if open
+        if (e.Key == Key.Escape && HexSearchBar.Visibility == Visibility.Visible)
+        {
+            HideSearch();
+            e.Handled = true;
+            return;
+        }
+
         if (_viewModel?.ByteBuffer == null || _selectedOffset < 0) return;
 
         var buffer = _viewModel.ByteBuffer;
@@ -313,10 +333,17 @@ public partial class HexEditorControl : UserControl
                     // Check if this byte is modified
                     bool isModified = _viewModel?.ByteBuffer?.IsModified(byteOffset) ?? false;
 
-                    // Draw selection/modification background
+                    // Check if this byte is in a search result
+                    bool isSearchHit = IsInSearchResult(byteOffset);
+
+                    // Draw selection/modification/search background
                     if (isSelected)
                     {
                         dc.DrawRectangle(_selectionBrush, null, new Rect(x - 1, y, _charWidth * 2 + 2, _lineHeight));
+                    }
+                    else if (isSearchHit)
+                    {
+                        dc.DrawRectangle(_searchHighlightBrush, null, new Rect(x - 1, y, _charWidth * 2 + 2, _lineHeight));
                     }
                     else if (isModified)
                     {
@@ -375,6 +402,171 @@ public partial class HexEditorControl : UserControl
     public void OnThemeChanged()
     {
         RefreshBrushes();
+        RenderHex();
+    }
+
+    // --- Hex Search ---
+    private List<long> _searchResults = new();
+    private int _searchResultIndex = -1;
+    private int _searchPatternLength = 0;
+
+    private bool IsInSearchResult(long offset)
+    {
+        if (_searchResults.Count == 0 || _searchPatternLength == 0) return false;
+        foreach (var start in _searchResults)
+        {
+            if (offset >= start && offset < start + _searchPatternLength)
+                return true;
+            if (start > offset) break; // sorted, no need to continue
+        }
+        return false;
+    }
+
+    public void ShowSearch()
+    {
+        HexSearchBar.Visibility = Visibility.Visible;
+        HexSearchBox.Focus();
+        HexSearchBox.SelectAll();
+    }
+
+    public void HideSearch()
+    {
+        HexSearchBar.Visibility = Visibility.Collapsed;
+        _searchResults.Clear();
+        _searchResultIndex = -1;
+        _searchPatternLength = 0;
+        HexSearchStatus.Text = "";
+        RenderHex();
+    }
+
+    private void HexSearchBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter)
+        {
+            if (Keyboard.Modifiers == ModifierKeys.Shift)
+                SearchPrevious();
+            else
+                SearchNext();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape)
+        {
+            HideSearch();
+            e.Handled = true;
+        }
+    }
+
+    private void HexSearchNext_Click(object sender, RoutedEventArgs e) => SearchNext();
+    private void HexSearchPrev_Click(object sender, RoutedEventArgs e) => SearchPrevious();
+    private void HexSearchClose_Click(object sender, RoutedEventArgs e) => HideSearch();
+
+    private byte[]? ParseSearchQuery(string query)
+    {
+        query = query.Trim();
+        if (string.IsNullOrEmpty(query)) return null;
+
+        // Quoted string → search as ASCII/UTF-8 text
+        if (query.StartsWith('"') && query.EndsWith('"') && query.Length >= 2)
+        {
+            var text = query[1..^1];
+            return System.Text.Encoding.UTF8.GetBytes(text);
+        }
+
+        // Otherwise parse as hex bytes (space-separated or continuous)
+        try
+        {
+            var hex = query.Replace(" ", "").Replace("-", "");
+            if (hex.Length % 2 != 0) return null;
+            var bytes = new byte[hex.Length / 2];
+            for (int i = 0; i < bytes.Length; i++)
+                bytes[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
+            return bytes;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private void PerformSearch()
+    {
+        _searchResults.Clear();
+        _searchResultIndex = -1;
+        _searchPatternLength = 0;
+
+        var pattern = ParseSearchQuery(HexSearchBox.Text);
+        if (pattern == null || pattern.Length == 0 || _viewModel?.ByteBuffer == null)
+        {
+            HexSearchStatus.Text = "No results";
+            return;
+        }
+
+        _searchPatternLength = pattern.Length;
+
+        var buffer = _viewModel.ByteBuffer;
+        var length = buffer.Length;
+
+        for (long i = 0; i <= length - pattern.Length; i++)
+        {
+            bool match = true;
+            for (int j = 0; j < pattern.Length; j++)
+            {
+                if (buffer.GetByte(i + j) != pattern[j])
+                {
+                    match = false;
+                    break;
+                }
+            }
+            if (match)
+            {
+                _searchResults.Add(i);
+                if (_searchResults.Count > 10000) break; // limit
+            }
+        }
+
+        HexSearchStatus.Text = _searchResults.Count > 0
+            ? $"{_searchResults.Count} match(es)"
+            : "No results";
+    }
+
+    private void SearchNext()
+    {
+        if (_searchResults.Count == 0 || HexSearchBox.Text != _lastSearchQuery)
+        {
+            _lastSearchQuery = HexSearchBox.Text;
+            PerformSearch();
+        }
+
+        if (_searchResults.Count == 0) return;
+
+        _searchResultIndex = (_searchResultIndex + 1) % _searchResults.Count;
+        NavigateToResult();
+    }
+
+    private void SearchPrevious()
+    {
+        if (_searchResults.Count == 0 || HexSearchBox.Text != _lastSearchQuery)
+        {
+            _lastSearchQuery = HexSearchBox.Text;
+            PerformSearch();
+        }
+
+        if (_searchResults.Count == 0) return;
+
+        _searchResultIndex--;
+        if (_searchResultIndex < 0) _searchResultIndex = _searchResults.Count - 1;
+        NavigateToResult();
+    }
+
+    private string _lastSearchQuery = "";
+
+    private void NavigateToResult()
+    {
+        if (_searchResultIndex < 0 || _searchResultIndex >= _searchResults.Count) return;
+
+        _selectedOffset = _searchResults[_searchResultIndex];
+        EnsureOffsetVisible(_selectedOffset);
+        HexSearchStatus.Text = $"{_searchResultIndex + 1} of {_searchResults.Count}";
         RenderHex();
     }
 }

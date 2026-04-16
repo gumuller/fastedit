@@ -7,14 +7,43 @@
              MouseLeftButtonDown="HexCanvas_MouseDown">
 
     <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*"/>
             <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
 
+        <!-- Hex Search Bar -->
+        <Border x:Name="HexSearchBar" Grid.Row="0" Grid.ColumnSpan="2"
+                Background="{DynamicResource PanelBackgroundBrush}"
+                BorderBrush="{DynamicResource PanelBorderBrush}"
+                BorderThickness="0,0,0,1"
+                Padding="8,4"
+                Visibility="Collapsed">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="Find:" VerticalAlignment="Center" Margin="0,0,6,0"
+                           Foreground="{DynamicResource WindowForegroundBrush}"/>
+                <TextBox x:Name="HexSearchBox" Width="200" Height="26"
+                         VerticalContentAlignment="Center"
+                         KeyDown="HexSearchBox_KeyDown"
+                         FontFamily="Cascadia Code, Consolas"
+                         ToolTip="Enter hex bytes (e.g. FF 00 AB) or text in quotes (e.g. &quot;hello&quot;)"/>
+                <Button Content="Find Next" Click="HexSearchNext_Click" Padding="8,4" Margin="6,0,0,0" Height="26"/>
+                <Button Content="Find Prev" Click="HexSearchPrev_Click" Padding="8,4" Margin="4,0,0,0" Height="26"/>
+                <TextBlock x:Name="HexSearchStatus" VerticalAlignment="Center" Margin="8,0,0,0"
+                           Foreground="{DynamicResource TabForegroundBrush}" FontSize="11"/>
+                <Button Content="✕" Click="HexSearchClose_Click" Background="Transparent"
+                        BorderThickness="0" Padding="6,2" Margin="8,0,0,0" Height="26"
+                        Foreground="{DynamicResource TabForegroundBrush}" Cursor="Hand"/>
+            </StackPanel>
+        </Border>
+
         <!-- Hex Content Canvas -->
         <Canvas x:Name="HexCanvas"
-                Grid.Column="0"
+                Grid.Row="1" Grid.Column="0"
                 ClipToBounds="True"
                 Focusable="True"
                 MouseWheel="HexCanvas_MouseWheel"
@@ -22,7 +51,7 @@
 
         <!-- Vertical ScrollBar -->
         <ScrollBar x:Name="VerticalScrollBar"
-                   Grid.Column="1"
+                   Grid.Row="1" Grid.Column="1"
                    Orientation="Vertical"
                    Minimum="0"
                    Maximum="0"
