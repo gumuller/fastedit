@@ -10,13 +10,48 @@
             <ColumnDefinition x:Name="MinimapColumn" Width="0"/>
         </Grid.ColumnDefinitions>
         <Grid.RowDefinitions>
+            <RowDefinition x:Name="BreadcrumbRow" Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition x:Name="SplitRow" Height="0"/>
         </Grid.RowDefinitions>
 
+        <!-- Breadcrumb Bar -->
+        <Border x:Name="BreadcrumbBar" Grid.Row="0" Grid.ColumnSpan="2"
+                Background="{DynamicResource EditorBackgroundBrush}"
+                BorderBrush="{DynamicResource PanelBorderBrush}"
+                BorderThickness="0,0,0,1"
+                Padding="8,4"
+                Visibility="Collapsed">
+            <ItemsControl x:Name="BreadcrumbItems">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Orientation="Horizontal"/>
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="{Binding Separator}" Foreground="{DynamicResource TabForegroundBrush}"
+                                       Margin="4,0" VerticalAlignment="Center" FontSize="11"
+                                       Visibility="{Binding SeparatorVisibility}"/>
+                            <TextBlock Foreground="{DynamicResource EditorForegroundBrush}"
+                                       VerticalAlignment="Center" FontSize="12"
+                                       FontFamily="Cascadia Code, Consolas"
+                                       Cursor="Hand"
+                                       MouseLeftButtonDown="Breadcrumb_MouseLeftButtonDown">
+                                <Run Text="{Binding Kind, Mode=OneWay}" Foreground="{DynamicResource AccentBrush}" FontSize="10"/>
+                                <Run Text=" "/>
+                                <Run Text="{Binding Name, Mode=OneWay}"/>
+                            </TextBlock>
+                        </StackPanel>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </Border>
+
         <!-- Text Editor (shown when not binary mode) -->
         <avalonedit:TextEditor x:Name="TextEditor"
-                               Grid.Column="0" Grid.Row="0"
+                               Grid.Column="0" Grid.Row="1"
                                FontFamily="Cascadia Code, Consolas, Courier New"
                                FontSize="14"
                                ShowLineNumbers="True"
@@ -39,12 +74,12 @@
         </avalonedit:TextEditor>
 
         <!-- Split Editor (second view of same document) -->
-        <GridSplitter x:Name="SplitSplitter" Grid.Row="0" Grid.Column="0"
+        <GridSplitter x:Name="SplitSplitter" Grid.Row="1" Grid.Column="0"
                       Height="4" HorizontalAlignment="Stretch" VerticalAlignment="Bottom"
                       Background="{DynamicResource BorderBrush}"
                       Visibility="Collapsed"/>
         <avalonedit:TextEditor x:Name="SplitEditor"
-                               Grid.Column="0" Grid.Row="1"
+                               Grid.Column="0" Grid.Row="2"
                                FontFamily="Cascadia Code, Consolas, Courier New"
                                FontSize="14"
                                ShowLineNumbers="True"
@@ -55,12 +90,12 @@
 
         <!-- Document Map / Minimap -->
         <controls:DocumentMapControl x:Name="DocumentMap"
-                                     Grid.Column="1" Grid.RowSpan="2"
+                                     Grid.Column="1" Grid.Row="1" Grid.RowSpan="2"
                                      Visibility="Collapsed"/>
 
         <!-- Hex Editor (shown when binary mode) -->
         <controls:HexEditorControl x:Name="HexEditor"
-                                   Grid.ColumnSpan="2" Grid.RowSpan="2"
+                                   Grid.ColumnSpan="2" Grid.RowSpan="3"
                                    Visibility="Collapsed"/>
     </Grid>
 </UserControl>

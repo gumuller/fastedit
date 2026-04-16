@@ -65,10 +65,22 @@ public partial class MainViewModel : ObservableObject
     private bool _isIndentGuidesEnabled = true;
 
     [ObservableProperty]
+    private bool _isBreadcrumbVisible = true;
+
+    [ObservableProperty]
     private bool _isCommandRunnerVisible;
 
     [ObservableProperty]
+    private bool _isZenMode;
+
+    [ObservableProperty]
     private string _gitBranch = "";
+
+    [ObservableProperty]
+    private EditorTabViewModel? _secondaryTab;
+
+    [ObservableProperty]
+    private bool _isSideBySideMode;
 
     // Events for editor-specific actions
     public event Action? FindRequested;
@@ -364,6 +376,15 @@ public partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand]
+    private void ToggleBreadcrumb() => IsBreadcrumbVisible = !IsBreadcrumbVisible;
+
+    partial void OnIsBreadcrumbVisibleChanged(bool value)
+    {
+        if (_isInitializing) return;
+        StatusText = value ? "Breadcrumb Bar: Visible" : "Breadcrumb Bar: Hidden";
+    }
+
+    [RelayCommand]
     private void CommandPalette() => CommandPaletteRequested?.Invoke();
 
     [RelayCommand]
@@ -371,6 +392,9 @@ public partial class MainViewModel : ObservableObject
 
     [RelayCommand]
     private void ToggleCommandRunner() => IsCommandRunnerVisible = !IsCommandRunnerVisible;
+
+    [RelayCommand]
+    private void ToggleZenMode() => IsZenMode = !IsZenMode;
 
     partial void OnIsCommandRunnerVisibleChanged(bool value)
     {
@@ -380,6 +404,34 @@ public partial class MainViewModel : ObservableObject
 
     [RelayCommand]
     private void ToggleSplitView() => ToggleSplitViewRequested?.Invoke();
+
+    [RelayCommand]
+    private void ToggleSideBySide()
+    {
+        if (IsSideBySideMode)
+        {
+            CloseSideBySide();
+        }
+        else if (Tabs.Count >= 2)
+        {
+            var selectedIndex = SelectedTab != null ? Tabs.IndexOf(SelectedTab) : 0;
+            var secondaryIndex = (selectedIndex + 1) % Tabs.Count;
+            SecondaryTab = Tabs[secondaryIndex];
+            IsSideBySideMode = true;
+        }
+    }
+
+    public void OpenInSplitView(EditorTabViewModel tab)
+    {
+        SecondaryTab = tab;
+        IsSideBySideMode = true;
+    }
+
+    public void CloseSideBySide()
+    {
+        IsSideBySideMode = false;
+        SecondaryTab = null;
+    }
 
     [RelayCommand]
     private void ConvertLineEndings(string? target)
@@ -469,6 +521,9 @@ public partial class MainViewModel : ObservableObject
         var index = Tabs.IndexOf(tab);
         Tabs.Remove(tab);
         tab.Dispose();
+
+        if (SecondaryTab == tab)
+            CloseSideBySide();
 
         if (Tabs.Count > 0)
         {

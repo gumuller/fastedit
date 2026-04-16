@@ -96,9 +96,11 @@
                                 Padding="12,6"
                                 Cursor="Hand"
                                 MouseLeftButtonDown="TabHeader_MouseLeftButtonDown"
+                                MouseRightButtonUp="TabHeader_MouseRightButtonUp"
                                 MouseMove="TabHeader_MouseMove"
                                 AllowDrop="True"
                                 DragOver="TabHeader_DragOver"
+                                DragLeave="TabHeader_DragLeave"
                                 Drop="TabHeader_Drop"
                                 Tag="{Binding}">
                             <StackPanel Orientation="Horizontal">
@@ -280,6 +282,7 @@
                 <MenuItem Header="Code _Folding" IsCheckable="True" IsChecked="{Binding IsFoldingEnabled, Mode=TwoWay}"/>
                 <MenuItem Header="_Minimap" IsCheckable="True" IsChecked="{Binding IsMinimapVisible, Mode=TwoWay}"/>
                 <MenuItem Header="_Indent Guides" IsCheckable="True" IsChecked="{Binding IsIndentGuidesEnabled, Mode=TwoWay}"/>
+                <MenuItem Header="_Breadcrumb Bar" IsCheckable="True" IsChecked="{Binding IsBreadcrumbVisible, Mode=TwoWay}"/>
                 <Separator/>
                 <MenuItem Header="Zoom _In" Command="{Binding ZoomInCommand}" InputGestureText="Ctrl++"/>
                 <MenuItem Header="Zoom _Out" Command="{Binding ZoomOutCommand}" InputGestureText="Ctrl+-"/>
@@ -287,6 +290,7 @@
                 <Separator/>
                 <MenuItem Header="Split _Editor" Command="{Binding ToggleSplitViewCommand}" InputGestureText="Ctrl+\"/>
                 <MenuItem Header="_Terminal" Command="{Binding ToggleCommandRunnerCommand}" InputGestureText="Ctrl+`"/>
+                <MenuItem Header="_Zen Mode" IsCheckable="True" IsChecked="{Binding IsZenMode, Mode=TwoWay}" InputGestureText="F11"/>
                 <Separator/>
                 <MenuItem Header="_Auto-Reload (Tail)" IsCheckable="True" IsChecked="{Binding IsAutoReloadEnabled, Mode=TwoWay}"/>
                 <MenuItem Header="Compare _Files..." Command="{Binding CompareFilesCommand}"/>
