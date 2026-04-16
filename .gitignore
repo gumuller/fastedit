@@ -58,3 +58,6 @@ TestResults/
 
 # Misc
 nul
+
+# Deploy output
+deploy/output/
