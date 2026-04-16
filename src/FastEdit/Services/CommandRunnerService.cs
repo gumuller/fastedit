@@ -95,7 +95,7 @@ public class CommandRunnerService : IDisposable
 
         // Emit initial sentinel to mark shell as ready
         _commandId++;
-        SendRawCommand($"Write-Output '{SentinelPrefix}{_commandId}|' ; Write-Output ((Get-Location).Path)");
+        SendRawCommand($"Write-Output \"{SentinelPrefix}{_commandId}|$((Get-Location).Path)\"");
     }
 
     public void ExecuteCommand(string command)
@@ -112,7 +112,6 @@ public class CommandRunnerService : IDisposable
 
         _isReady = false;
         CommandStarted?.Invoke();
-        OutputReceived?.Invoke($"\r\n❯ {command}\r\n");
 
         _commandId++;
         var id = _commandId;
@@ -276,6 +275,9 @@ public class CommandRunnerService : IDisposable
         var output = filteredLines.ToString();
         if (!string.IsNullOrEmpty(output))
         {
+            // Collapse runs of 2+ consecutive blank lines to max 1
+            output = Regex.Replace(output, @"(\n\s*){2,}", "\n");
+
             lock (_outputBuffer)
             {
                 _outputBuffer.Append(output);

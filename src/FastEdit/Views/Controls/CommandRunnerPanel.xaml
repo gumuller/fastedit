@@ -10,7 +10,6 @@
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
-                <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
             <!-- Header -->
@@ -39,44 +38,24 @@
                 </Grid>
             </Border>
 
-            <!-- Output -->
-            <ScrollViewer x:Name="OutputScroll" Grid.Row="1"
-                          VerticalScrollBarVisibility="Auto"
-                          HorizontalScrollBarVisibility="Auto">
-                <TextBox x:Name="OutputBox"
-                         IsReadOnly="True"
+            <!-- Terminal area using RichTextBox -->
+            <RichTextBox x:Name="TerminalBox" Grid.Row="1"
                          BorderThickness="0"
                          FontFamily="Cascadia Code,Consolas,Courier New"
                          FontSize="12"
                          Background="{DynamicResource EditorBackgroundBrush}"
                          Foreground="{DynamicResource EditorForegroundBrush}"
-                         TextWrapping="Wrap"
-                         AcceptsReturn="True"
-                         VerticalScrollBarVisibility="Disabled"
-                         Padding="8,4"/>
-            </ScrollViewer>
-
-            <!-- Input -->
-            <Border Grid.Row="2" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-                    <TextBlock x:Name="PromptLabel" Grid.Column="0"
-                               FontFamily="Cascadia Code,Consolas"
-                               FontSize="12" Padding="8,6,4,6" VerticalAlignment="Center"
-                               Foreground="{DynamicResource AccentBrush}"/>
-                    <TextBox x:Name="InputBox" Grid.Column="1"
-                             FontFamily="Cascadia Code,Consolas,Courier New"
-                             FontSize="12"
-                             BorderThickness="0"
-                             Background="{DynamicResource EditorBackgroundBrush}"
-                             Foreground="{DynamicResource EditorForegroundBrush}"
-                             Padding="0,6"
-                             KeyDown="InputBox_KeyDown"/>
-                </Grid>
-            </Border>
+                         CaretBrush="{DynamicResource EditorForegroundBrush}"
+                         SelectionBrush="{DynamicResource AccentBrush}"
+                         AcceptsReturn="False"
+                         AcceptsTab="False"
+                         VerticalScrollBarVisibility="Auto"
+                         HorizontalScrollBarVisibility="Disabled"
+                         Padding="8,4"
+                         IsUndoEnabled="False"
+                         PreviewKeyDown="TerminalBox_PreviewKeyDown"
+                         PreviewTextInput="TerminalBox_PreviewTextInput"
+                         PreviewMouseDown="TerminalBox_PreviewMouseDown"/>
         </Grid>
     </Border>
 </UserControl>

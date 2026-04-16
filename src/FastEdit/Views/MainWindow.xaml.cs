@@ -379,7 +379,8 @@ public partial class MainWindow : FluentWindow
                 TerminalRow.Height = _savedTerminalHeight;
                 TerminalRow.MinHeight = 80;
                 CommandRunner.EnsureStarted();
-                CommandRunner.FocusInput();
+                Dispatcher.BeginInvoke(() => CommandRunner.FocusInput(),
+                    System.Windows.Threading.DispatcherPriority.Input);
             }
             else
             {

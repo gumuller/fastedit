@@ -686,8 +686,12 @@ public partial class MainViewModel : ObservableObject
             {
                 if (sessionFile.IsUntitled)
                 {
-                    // Skip untitled binary tabs — can't be meaningfully restored
                     if (sessionFile.IsBinaryMode) continue;
+
+                    // Skip if an untitled tab with same name was already recovered
+                    var fileName = Path.GetFileName(sessionFile.FilePath);
+                    if (Tabs.Any(t => string.IsNullOrEmpty(t.FilePath) && t.FileName == fileName))
+                        continue;
 
                     string content = string.Empty;
 
@@ -701,11 +705,15 @@ public partial class MainViewModel : ObservableObject
                     }
 
                     var tab = _tabFactory.CreateUntitled(content);
-                    tab.FileName = Path.GetFileName(sessionFile.FilePath);
+                    tab.FileName = fileName;
                     Tabs.Add(tab);
                 }
                 else if (_fileSystemService.FileExists(sessionFile.FilePath))
                 {
+                    // Skip if this file is already open
+                    if (Tabs.Any(t => string.Equals(t.FilePath, sessionFile.FilePath, StringComparison.OrdinalIgnoreCase)))
+                        continue;
+
                     var tab = _tabFactory.Create();
                     await tab.LoadFileAsync(sessionFile.FilePath);
                     Tabs.Add(tab);
