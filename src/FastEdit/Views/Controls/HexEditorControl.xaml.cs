@@ -389,14 +389,8 @@ public partial class HexEditorControl : UserControl
 
     private Brush FindBrush(string resourceKey)
     {
-        try
-        {
-            return FindResource(resourceKey) as Brush ?? Brushes.Transparent;
-        }
-        catch
-        {
-            return Brushes.Transparent;
-        }
+        var resource = TryFindResource(resourceKey);
+        return resource as Brush ?? Brushes.Transparent;
     }
 
     public void OnThemeChanged()
