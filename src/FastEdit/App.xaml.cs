@@ -53,6 +53,7 @@ public partial class App : Application
                 services.AddTransient<IFileWatcherService, FileWatcherService>();
                 services.AddSingleton<IUpdateService, UpdateService>();
                 services.AddSingleton<IGitService, GitService>();
+                services.AddSingleton<IKeyBindingService, KeyBindingService>();
 
                 // Factories
                 services.AddSingleton<IEditorTabFactory, EditorTabFactory>();
