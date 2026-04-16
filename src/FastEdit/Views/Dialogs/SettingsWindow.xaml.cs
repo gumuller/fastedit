@@ -57,6 +57,18 @@ public partial class SettingsWindow : Wpf.Ui.Controls.FluentWindow
 
         UseTabsCheck.IsChecked = _settingsService.UseTabs;
 
+        // Cursor style
+        foreach (ComboBoxItem item in CursorStyleCombo.Items)
+        {
+            if (item.Tag?.ToString() == _settingsService.CursorStyle)
+            {
+                CursorStyleCombo.SelectedItem = item;
+                break;
+            }
+        }
+        if (CursorStyleCombo.SelectedItem == null)
+            CursorStyleCombo.SelectedIndex = 0; // default to Line
+
         // Appearance
         ThemeCombo.ItemsSource = _viewModel.AvailableThemes;
         var currentTheme = _viewModel.AvailableThemes.FirstOrDefault(
@@ -189,6 +201,12 @@ public partial class SettingsWindow : Wpf.Ui.Controls.FluentWindow
             _settingsService.TabSize = tabSize;
         }
         _settingsService.UseTabs = UseTabsCheck.IsChecked == true;
+
+        // Cursor style
+        if (CursorStyleCombo.SelectedItem is ComboBoxItem cursorItem)
+        {
+            _settingsService.CursorStyle = cursorItem.Tag?.ToString() ?? "Line";
+        }
 
         // Theme
         if (ThemeCombo.SelectedItem is ThemeDefinition theme)

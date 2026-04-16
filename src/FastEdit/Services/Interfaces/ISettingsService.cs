@@ -13,6 +13,7 @@ public interface ISettingsService
     int AutoSaveIntervalSeconds { get; set; }
     int TabSize { get; set; }
     bool UseTabs { get; set; }
+    string CursorStyle { get; set; }  // Line, Block, Underscore, LineThin
     double EditorFontSize { get; set; }
     double WindowLeft { get; set; }
     double WindowTop { get; set; }

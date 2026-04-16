@@ -39,6 +39,7 @@ public partial class EditorHost : UserControl
     private System.Windows.Threading.DispatcherTimer? _foldingTimer;
     private CompletionWindow? _completionWindow;
     private System.Windows.Threading.DispatcherTimer? _breadcrumbTimer;
+    private CaretStyleAdorner? _caretAdorner;
 
     public EditorHost()
     {
@@ -96,6 +97,12 @@ public partial class EditorHost : UserControl
 
         // File watcher for auto-reload
         _fileWatcher.FileChanged += OnFileWatcherChanged;
+
+        // Install custom caret style adorner
+        _caretAdorner = new CaretStyleAdorner(TextEditor.TextArea);
+        var adornerLayer = System.Windows.Documents.AdornerLayer.GetAdornerLayer(TextEditor.TextArea);
+        adornerLayer?.Add(_caretAdorner);
+        ApplyCaretStyle();
 
         // Subscribe to theme changes
         var themeService = App.Services.GetService<IThemeService>();
@@ -183,6 +190,14 @@ public partial class EditorHost : UserControl
         TextEditor.Options.ShowTabs = mainVm.IsWhitespaceVisible;
         TextEditor.Options.ShowSpaces = mainVm.IsWhitespaceVisible;
         TextEditor.Options.ShowEndOfLine = mainVm.IsWhitespaceVisible;
+    }
+
+    private void ApplyCaretStyle()
+    {
+        if (_caretAdorner == null) return;
+        var settings = App.Services.GetService<ISettingsService>();
+        if (settings != null)
+            _caretAdorner.CaretStyle = settings.CursorStyle;
     }
 
     // --- Find & Replace ---

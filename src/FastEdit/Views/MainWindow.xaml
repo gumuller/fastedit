@@ -311,6 +311,8 @@
                 <MenuItem Header="_Refresh Themes" Command="{Binding RefreshThemesCommand}"/>
             </MenuItem>
             <MenuItem Header="_Help">
+                <MenuItem Header="_Settings..." Click="Settings_Click" InputGestureText="Ctrl+,"/>
+                <Separator/>
                 <MenuItem Header="_About" Click="About_Click"/>
             </MenuItem>
         </Menu>
@@ -336,13 +338,24 @@
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
 
-                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="12,8">
+                    <Grid Grid.Row="0" Margin="12,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
                         <TextBlock Text="EXPLORER"
                                    Foreground="{DynamicResource WindowForegroundBrush}"
                                    FontSize="11"
                                    FontWeight="SemiBold"
                                    VerticalAlignment="Center"/>
-                    </StackPanel>
+                        <Button Grid.Column="1" Click="ToggleExplorer_Click"
+                                Background="Transparent" BorderThickness="0"
+                                Foreground="{DynamicResource TabForegroundBrush}"
+                                Padding="4,2" Cursor="Hand" Focusable="False"
+                                ToolTip="Hide Explorer (Ctrl+B)">
+                            <TextBlock Text="&#xE89F;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="12"/>
+                        </Button>
+                    </Grid>
 
                     <TreeView Grid.Row="1"
                               x:Name="FileTreeView"

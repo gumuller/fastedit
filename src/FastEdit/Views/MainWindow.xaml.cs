@@ -279,6 +279,12 @@ public partial class MainWindow : FluentWindow
         ShowSettingsDialog();
     }
 
+    private void ToggleExplorer_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel != null)
+            _viewModel.IsExplorerVisible = !_viewModel.IsExplorerVisible;
+    }
+
     private void OnOpenSettingsRequested()
     {
         ShowSettingsDialog();

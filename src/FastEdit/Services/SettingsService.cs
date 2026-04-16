@@ -166,6 +166,16 @@ public class SettingsService : ISettingsService
         }
     }
 
+    public string CursorStyle
+    {
+        get => _settings.CursorStyle;
+        set
+        {
+            _settings.CursorStyle = value;
+            Save();
+        }
+    }
+
     public void AddRecentFile(string filePath)
     {
         _settings.RecentFiles.Remove(filePath);
@@ -239,6 +249,7 @@ public class SettingsService : ISettingsService
         public int AutoSaveIntervalSeconds { get; set; } = 30;
         public int TabSize { get; set; } = 4;
         public bool UseTabs { get; set; }
+        public string CursorStyle { get; set; } = "Line";
         public double WindowLeft { get; set; } = double.NaN;
         public double WindowTop { get; set; } = double.NaN;
         public double WindowWidth { get; set; } = 1100;

@@ -60,6 +60,20 @@
 
                         <CheckBox x:Name="UseTabsCheck" Content="Use tabs (instead of spaces)" Margin="0,4"/>
 
+                        <Grid Margin="0,6,0,6">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="160"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Cursor style" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="CursorStyleCombo" Width="160" HorizontalAlignment="Left">
+                                <ComboBoxItem Content="Line" Tag="Line"/>
+                                <ComboBoxItem Content="Line Thin" Tag="LineThin"/>
+                                <ComboBoxItem Content="Block" Tag="Block"/>
+                                <ComboBoxItem Content="Underscore" Tag="Underscore"/>
+                            </ComboBox>
+                        </Grid>
+
                         <!-- Appearance Section -->
                         <Separator Margin="0,12"/>
                         <TextBlock Text="Appearance" FontWeight="SemiBold" FontSize="16" Margin="0,8,0,8"/>
