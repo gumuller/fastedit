@@ -27,7 +27,9 @@ public partial class FileNodeViewModel : ObservableObject
     [ObservableProperty]
     private ObservableCollection<FileNodeViewModel> _children = new();
 
-    public string Icon => IsDirectory ? "\uE8B7" : "\uE8A5";
+    public string Icon => Helpers.FileIconHelper.GetIcon(Name, IsDirectory);
+
+    public string? IconColor => IsDirectory ? null : Helpers.FileIconHelper.GetIconColor(Name);
 
     public FileNodeViewModel(string path, bool isDirectory, IFileSystemService? fileSystemService = null)
     {

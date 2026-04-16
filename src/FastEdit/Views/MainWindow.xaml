@@ -51,6 +51,7 @@
         <KeyBinding Key="P" Modifiers="Control" Command="{Binding PrintCommand}"/>
         <KeyBinding Key="D" Modifiers="Control" Command="{Binding SelectNextOccurrenceCommand}"/>
         <KeyBinding Key="L" Modifiers="Control+Shift" Command="{Binding SelectAllOccurrencesCommand}"/>
+        <KeyBinding Key="F11" Command="{Binding ToggleZenModeCommand}"/>
     </Window.InputBindings>
 
     <Grid>
@@ -101,6 +102,10 @@
                                 Drop="TabHeader_Drop"
                                 Tag="{Binding}">
                             <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{Binding FileName, Converter={StaticResource FileNameToIconConverter}}"
+                                           FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="12"
+                                           Margin="0,0,4,0" VerticalAlignment="Center"
+                                           Foreground="{DynamicResource TabForegroundBrush}"/>
                                 <TextBlock Text="{Binding FileName}" Margin="0,0,8,0"
                                            Foreground="{DynamicResource TabForegroundBrush}"
                                            VerticalAlignment="Center" FontSize="12"/>
@@ -162,7 +167,7 @@
         </Grid>
 
         <!-- Menu Bar -->
-        <Menu Grid.Row="1" Margin="0,0,0,0">
+        <Menu x:Name="MenuBar" Grid.Row="1" Margin="0,0,0,0">
             <MenuItem Header="_File">
                 <MenuItem Header="_New" Command="{Binding NewFileCommand}" InputGestureText="Ctrl+N"/>
                 <MenuItem Header="_Open..." Command="{Binding OpenFileCommand}" InputGestureText="Ctrl+O"/>
@@ -318,7 +323,7 @@
             </Grid.RowDefinitions>
 
             <!-- File Tree Panel -->
-            <Border Grid.Column="0" Background="{DynamicResource PanelBackgroundBrush}">
+            <Border x:Name="FileTreePanel" Grid.Column="0" Background="{DynamicResource PanelBackgroundBrush}">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -344,7 +349,20 @@
                         <TreeView.ItemTemplate>
                             <HierarchicalDataTemplate ItemsSource="{Binding Children}">
                                 <StackPanel Orientation="Horizontal" Margin="2">
-                                    <TextBlock Text="{Binding Icon}" Margin="0,0,6,0" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="14" VerticalAlignment="Center"/>
+                                    <TextBlock Text="{Binding Icon}" Margin="0,0,6,0"
+                                               FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="14"
+                                               VerticalAlignment="Center">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Foreground" Value="{Binding IconColor, Converter={StaticResource StringToBrushConverter}}"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IconColor}" Value="{x:Null}">
+                                                        <Setter Property="Foreground" Value="{DynamicResource WindowForegroundBrush}"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
                                     <TextBlock Text="{Binding Name}"
                                                Foreground="{DynamicResource WindowForegroundBrush}"
                                                VerticalAlignment="Center"/>
@@ -361,7 +379,7 @@
             </Border>
 
             <!-- Splitter -->
-            <GridSplitter Grid.Column="1"
+            <GridSplitter x:Name="TreeSplitter" Grid.Column="1"
                           Width="4"
                           HorizontalAlignment="Center"
                           VerticalAlignment="Stretch"
@@ -422,7 +440,7 @@
                                       Visibility="{Binding IsCommandRunnerVisible, Converter={StaticResource BooleanToVisibilityConverter}}"/>
 
         <!-- Status Bar -->
-        <StatusBar Grid.Row="5" Style="{StaticResource EditorStatusBarStyle}">
+        <StatusBar x:Name="MainStatusBar" Grid.Row="5" Style="{StaticResource EditorStatusBarStyle}">
             <StatusBarItem>
                 <TextBlock Text="{Binding StatusText}" Foreground="{DynamicResource StatusBarForegroundBrush}"/>
             </StatusBarItem>
@@ -436,6 +454,7 @@
                     <TextBlock Text="{Binding LineEnding}" Foreground="{DynamicResource StatusBarForegroundBrush}" Margin="0,0,16,0"
                                ToolTip="Line ending type"/>
                     <TextBlock Text="{Binding SelectedTab.Encoding}" Foreground="{DynamicResource StatusBarForegroundBrush}" Margin="0,0,16,0"/>
+                    <TextBlock Text="{Binding SelectedTab.IndentInfo}" Foreground="{DynamicResource StatusBarForegroundBrush}" Margin="0,0,16,0"/>
                     <Button Content="{Binding SelectedTab.IsBinaryMode, Converter={StaticResource BoolToModeConverter}}"
                             Command="{Binding SelectedTab.ToggleModeAsyncCommand}"
                             Foreground="{DynamicResource StatusBarForegroundBrush}"

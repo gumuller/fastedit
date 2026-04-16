@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using FastEdit.Helpers;
 using FastEdit.Services;
@@ -13,6 +14,15 @@ using ICSharpCode.AvalonEdit.Search;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace FastEdit.Views.Controls;
+
+public class BreadcrumbDisplayItem
+{
+    public string Name { get; set; } = "";
+    public string Kind { get; set; } = "";
+    public string Separator { get; set; } = "›";
+    public Visibility SeparatorVisibility { get; set; } = Visibility.Visible;
+    public int Line { get; set; }
+}
 
 public partial class EditorHost : UserControl
 {
@@ -28,6 +38,7 @@ public partial class EditorHost : UserControl
     private readonly List<int> _bookmarks = new();
     private System.Windows.Threading.DispatcherTimer? _foldingTimer;
     private CompletionWindow? _completionWindow;
+    private System.Windows.Threading.DispatcherTimer? _breadcrumbTimer;
 
     public EditorHost()
     {
@@ -54,6 +65,17 @@ public partial class EditorHost : UserControl
         _bracketRenderer = new BracketHighlightRenderer(TextEditor);
         TextEditor.TextArea.TextView.BackgroundRenderers.Add(_bracketRenderer);
         TextEditor.TextArea.Caret.PositionChanged += OnCaretPositionChangedForBrackets;
+
+        // Install breadcrumb debounce timer
+        _breadcrumbTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(100)
+        };
+        _breadcrumbTimer.Tick += (s, args) =>
+        {
+            _breadcrumbTimer.Stop();
+            UpdateBreadcrumbs();
+        };
 
         // Install indent guide renderer
         _indentGuideRenderer = new IndentGuideRenderer(TextEditor.TextArea.TextView);
@@ -144,6 +166,9 @@ public partial class EditorHost : UserControl
                 break;
             case nameof(MainViewModel.IsIndentGuidesEnabled):
                 UpdateIndentGuides(vm.IsIndentGuidesEnabled);
+                break;
+            case nameof(MainViewModel.IsBreadcrumbVisible):
+                UpdateBreadcrumbVisibility(vm.IsBreadcrumbVisible);
                 break;
         }
     }
@@ -990,6 +1015,14 @@ public partial class EditorHost : UserControl
 
             TextEditor.Text = vm.Content;
 
+            // Detect indentation from content
+            var indentResult = IndentDetector.Detect(vm.Content);
+            TextEditor.Options.ConvertTabsToSpaces = !indentResult.UseTabs;
+            TextEditor.Options.IndentationSize = indentResult.IndentSize;
+            vm.IndentInfo = indentResult.UseTabs
+                ? "Tabs"
+                : $"Spaces: {indentResult.IndentSize}";
+
             // Remove old handler to prevent duplicates
             TextEditor.TextChanged -= TextEditor_TextChanged;
             TextEditor.TextChanged += TextEditor_TextChanged;
@@ -1046,6 +1079,10 @@ public partial class EditorHost : UserControl
             _currentVm.Line = TextEditor.TextArea.Caret.Line;
             _currentVm.Column = TextEditor.TextArea.Caret.Column;
         }
+
+        // Debounce breadcrumb update
+        _breadcrumbTimer?.Stop();
+        _breadcrumbTimer?.Start();
     }
 
     // --- Occurrence Highlight ---
@@ -1125,6 +1162,61 @@ public partial class EditorHost : UserControl
             TextEditor.TextArea.TextView.BackgroundRenderers.Remove(_indentGuideRenderer);
         }
         TextEditor.TextArea.TextView.InvalidateLayer(_indentGuideRenderer.Layer);
+    }
+
+    // --- Breadcrumb Bar ---
+    private void UpdateBreadcrumbs()
+    {
+        var mainVm = App.Services.GetService<MainViewModel>();
+        if (mainVm?.IsBreadcrumbVisible != true || _currentVm == null || _currentVm.IsBinaryMode)
+        {
+            BreadcrumbBar.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        var text = TextEditor.Text;
+        var caretLine = TextEditor.TextArea.Caret.Line;
+        var language = _currentVm.SyntaxLanguage;
+
+        var items = BreadcrumbHelper.GetBreadcrumbs(text, caretLine, language);
+
+        if (items.Count == 0)
+        {
+            BreadcrumbBar.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        var displayItems = new List<BreadcrumbDisplayItem>();
+        for (int i = 0; i < items.Count; i++)
+        {
+            displayItems.Add(new BreadcrumbDisplayItem
+            {
+                Name = items[i].Name,
+                Kind = items[i].Kind,
+                Separator = "›",
+                SeparatorVisibility = i == 0 ? Visibility.Collapsed : Visibility.Visible,
+                Line = items[i].Line
+            });
+        }
+
+        BreadcrumbItems.ItemsSource = displayItems;
+        BreadcrumbBar.Visibility = Visibility.Visible;
+    }
+
+    private void UpdateBreadcrumbVisibility(bool visible)
+    {
+        if (visible)
+            UpdateBreadcrumbs();
+        else
+            BreadcrumbBar.Visibility = Visibility.Collapsed;
+    }
+
+    private void Breadcrumb_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is TextBlock tb && tb.DataContext is BreadcrumbDisplayItem item)
+        {
+            GoToLine(item.Line);
+        }
     }
 
     // --- Session State Save ---

@@ -10,6 +10,8 @@
     <converters:BoolToModeConverter x:Key="BoolToModeConverter"/>
     <converters:NullToCollapsedConverter x:Key="NullToCollapsedConverter"/>
     <converters:EqualityConverter x:Key="EqualityConverter"/>
+    <converters:StringToBrushConverter x:Key="StringToBrushConverter"/>
+    <converters:FileNameToIconConverter x:Key="FileNameToIconConverter"/>
 
     <!-- Default Dark Theme Colors (will be overwritten at runtime by ThemeService) -->
 

@@ -69,6 +69,9 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private string _syntaxLanguage = string.Empty;
 
+    [ObservableProperty]
+    private string _indentInfo = "Spaces: 4";
+
     // Hex editor properties
     [ObservableProperty]
     private long _hexOffset;
