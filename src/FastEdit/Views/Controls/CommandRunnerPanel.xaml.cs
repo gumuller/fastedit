@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
@@ -9,61 +9,247 @@ using FastEdit.ViewModels;
 
 namespace FastEdit.Views.Controls;
 
-public partial class CommandRunnerPanel : UserControl
+public class TerminalTabInfo : IDisposable
 {
-    private readonly CommandRunnerService _runner = new();
-    private const int MaxParagraphs = 5000;
+    public string Title { get; set; } = "";
+    public CommandRunnerService Service { get; }
+    public FlowDocument Document { get; }
+    public Run? PromptRun { get; set; }
+    public Run? InputRun { get; set; }
+    public string CurrentPrompt { get; set; } = "❯ ";
 
-    private string _currentPrompt = "❯ ";
-    private Run? _promptRun;
-    private Run? _inputRun;
-
-    public CommandRunnerPanel()
+    public TerminalTabInfo(string title)
     {
-        InitializeComponent();
-
-        // Set up the FlowDocument with no spacing between paragraphs
-        TerminalBox.Document = new FlowDocument
+        Title = title;
+        Service = new CommandRunnerService();
+        Document = new FlowDocument
         {
             PagePadding = new Thickness(0),
             FontFamily = new FontFamily("Cascadia Code,Consolas,Courier New"),
             FontSize = 12
         };
 
-        // Override default paragraph style to remove spacing
         var paraStyle = new Style(typeof(Paragraph));
         paraStyle.Setters.Add(new Setter(Block.MarginProperty, new Thickness(0)));
         paraStyle.Setters.Add(new Setter(Block.PaddingProperty, new Thickness(0)));
-        TerminalBox.Document.Resources.Add(typeof(Paragraph), paraStyle);
+        Document.Resources.Add(typeof(Paragraph), paraStyle);
+    }
 
-        _runner.OutputReceived += text => Dispatcher.Invoke(() => AppendOutput(text));
-        _runner.CommandStarted += () => Dispatcher.Invoke(() => StopButton.IsEnabled = true);
-        _runner.CommandCompleted += () => Dispatcher.Invoke(() =>
-        {
-            StopButton.IsEnabled = false;
-            ShowPrompt();
-        });
-        _runner.WorkingDirectoryChanged += cwd => Dispatcher.Invoke(() => UpdatePrompt(cwd));
+    public void Dispose()
+    {
+        Service.Dispose();
+    }
+}
 
-        UpdatePrompt(_runner.WorkingDirectory);
+public partial class CommandRunnerPanel : UserControl
+{
+    private readonly List<TerminalTabInfo> _tabs = new();
+    private TerminalTabInfo? _activeTab;
+    private int _tabCounter;
+    private const int MaxParagraphs = 5000;
+
+    public CommandRunnerPanel()
+    {
+        InitializeComponent();
+
+        AddNewTab();
+
         Loaded += (s, e) =>
         {
-            _runner.StartShell();
+            _activeTab?.Service.StartShell();
         };
-        Unloaded += (s, e) => _runner.Dispose();
+        Unloaded += (s, e) =>
+        {
+            foreach (var tab in _tabs)
+                tab.Dispose();
+        };
 
-        // Intercept paste to strip newlines and enforce input area
         DataObject.AddPastingHandler(TerminalBox, OnPaste);
 
-        // Block cut/undo/redo commands that could corrupt output
         TerminalBox.AddHandler(CommandManager.PreviewExecutedEvent,
             new ExecutedRoutedEventHandler(OnPreviewCommandExecuted), true);
     }
 
+    private TerminalTabInfo AddNewTab()
+    {
+        _tabCounter++;
+        var tab = new TerminalTabInfo($"Terminal {_tabCounter}");
+
+        tab.Service.OutputReceived += text => Dispatcher.Invoke(() =>
+        {
+            if (_activeTab == tab)
+                AppendOutput(text);
+            else
+                AppendOutputToTab(tab, text);
+        });
+        tab.Service.CommandStarted += () => Dispatcher.Invoke(() =>
+        {
+            if (_activeTab == tab) StopButton.IsEnabled = true;
+        });
+        tab.Service.CommandCompleted += () => Dispatcher.Invoke(() =>
+        {
+            if (_activeTab == tab)
+            {
+                StopButton.IsEnabled = false;
+                ShowPrompt();
+            }
+            else
+            {
+                ShowPromptOnTab(tab);
+            }
+        });
+        tab.Service.WorkingDirectoryChanged += cwd => Dispatcher.Invoke(() =>
+        {
+            UpdatePromptForTab(tab, cwd);
+        });
+
+        UpdatePromptForTab(tab, tab.Service.WorkingDirectory);
+        _tabs.Add(tab);
+        SwitchToTab(tab);
+        RebuildTabStrip();
+        return tab;
+    }
+
+    private void RemoveTab(TerminalTabInfo tab)
+    {
+        if (_tabs.Count <= 1) return;
+
+        var idx = _tabs.IndexOf(tab);
+        _tabs.Remove(tab);
+        tab.Dispose();
+
+        if (_activeTab == tab)
+        {
+            var newIdx = Math.Min(idx, _tabs.Count - 1);
+            SwitchToTab(_tabs[newIdx]);
+        }
+
+        RebuildTabStrip();
+    }
+
+    private void SwitchToTab(TerminalTabInfo tab)
+    {
+        if (_activeTab != null)
+        {
+            _activeTab.PromptRun = _promptRun;
+            _activeTab.InputRun = _inputRun;
+        }
+
+        _activeTab = tab;
+
+        TerminalBox.Document = tab.Document;
+        _promptRun = tab.PromptRun;
+        _inputRun = tab.InputRun;
+
+        StopButton.IsEnabled = tab.Service.IsBusy;
+
+        RebuildTabStrip();
+    }
+
+    private void RebuildTabStrip()
+    {
+        TabStripPanel.Children.Clear();
+
+        foreach (var tab in _tabs)
+        {
+            var isActive = tab == _activeTab;
+
+            var titleBlock = new TextBlock
+            {
+                Text = tab.Title,
+                Foreground = (FindResource("EditorForegroundBrush") as Brush) ?? Brushes.White,
+                FontSize = 11,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 4, 0)
+            };
+
+            var closeBtn = new Button
+            {
+                Content = "✕",
+                FontSize = 9,
+                Padding = new Thickness(2, 0, 2, 0),
+                Margin = new Thickness(0),
+                Background = Brushes.Transparent,
+                BorderThickness = new Thickness(0),
+                Foreground = (FindResource("EditorForegroundBrush") as Brush) ?? Brushes.White,
+                Cursor = Cursors.Hand,
+                VerticalAlignment = VerticalAlignment.Center,
+                Focusable = false,
+                Visibility = _tabs.Count > 1 ? Visibility.Visible : Visibility.Collapsed,
+                Tag = tab
+            };
+            closeBtn.Click += TabClose_Click;
+
+            var panel = new StackPanel { Orientation = Orientation.Horizontal };
+            panel.Children.Add(titleBlock);
+            panel.Children.Add(closeBtn);
+
+            var border = new Border
+            {
+                Child = panel,
+                Padding = new Thickness(8, 4, 8, 4),
+                Cursor = Cursors.Hand,
+                Background = isActive
+                    ? ((FindResource("EditorBackgroundBrush") as Brush) ?? Brushes.Black)
+                    : Brushes.Transparent,
+                BorderThickness = isActive ? new Thickness(0, 2, 0, 0) : new Thickness(0),
+                BorderBrush = isActive ? ((FindResource("AccentBrush") as Brush) ?? Brushes.Cyan) : null,
+                Tag = tab
+            };
+            border.MouseLeftButtonDown += TabBorder_Click;
+
+            TabStripPanel.Children.Add(border);
+        }
+
+        var addBtn = new Button
+        {
+            Content = "+",
+            FontSize = 13,
+            FontWeight = FontWeights.Bold,
+            Padding = new Thickness(6, 2, 6, 2),
+            Background = Brushes.Transparent,
+            BorderThickness = new Thickness(0),
+            Foreground = (FindResource("EditorForegroundBrush") as Brush) ?? Brushes.White,
+            Cursor = Cursors.Hand,
+            VerticalAlignment = VerticalAlignment.Center,
+            Focusable = false,
+            ToolTip = "New Terminal"
+        };
+        addBtn.Click += (s, e) =>
+        {
+            var newTab = AddNewTab();
+            newTab.Service.StartShell();
+            ShowPrompt();
+            FocusInput();
+        };
+        TabStripPanel.Children.Add(addBtn);
+    }
+
+    private void TabBorder_Click(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is Border border && border.Tag is TerminalTabInfo tab)
+        {
+            SwitchToTab(tab);
+            FocusInput();
+        }
+    }
+
+    private void TabClose_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button btn && btn.Tag is TerminalTabInfo tab)
+        {
+            RemoveTab(tab);
+        }
+    }
+
+    private Run? _promptRun;
+    private Run? _inputRun;
+
     public void SetWorkingDirectory(string? directory)
     {
-        if (_runner.SetWorkingDirectory(directory))
-            UpdatePrompt(_runner.WorkingDirectory);
+        if (_activeTab == null) return;
+        if (_activeTab.Service.SetWorkingDirectory(directory))
+            UpdatePromptForTab(_activeTab, _activeTab.Service.WorkingDirectory);
     }
 
     public void FocusInput()
@@ -75,7 +261,7 @@ public partial class CommandRunnerPanel : UserControl
 
     public void EnsureStarted()
     {
-        _runner.StartShell();
+        _activeTab?.Service.StartShell();
     }
 
     private Brush GetPromptBrush()
@@ -90,7 +276,8 @@ public partial class CommandRunnerPanel : UserControl
 
     private void ShowPrompt()
     {
-        _promptRun = new Run(_currentPrompt) { Foreground = GetPromptBrush() };
+        if (_activeTab == null) return;
+        _promptRun = new Run(_activeTab.CurrentPrompt) { Foreground = GetPromptBrush() };
         _inputRun = new Run("") { Foreground = GetForegroundBrush() };
 
         var para = new Paragraph { Margin = new Thickness(0) };
@@ -101,6 +288,23 @@ public partial class CommandRunnerPanel : UserControl
         TerminalBox.CaretPosition = _inputRun.ContentEnd;
         TerminalBox.Focus();
         TerminalBox.ScrollToEnd();
+
+        _activeTab.PromptRun = _promptRun;
+        _activeTab.InputRun = _inputRun;
+    }
+
+    private void ShowPromptOnTab(TerminalTabInfo tab)
+    {
+        var promptRun = new Run(tab.CurrentPrompt) { Foreground = GetPromptBrush() };
+        var inputRun = new Run("") { Foreground = GetForegroundBrush() };
+
+        var para = new Paragraph { Margin = new Thickness(0) };
+        para.Inlines.Add(promptRun);
+        para.Inlines.Add(inputRun);
+
+        tab.Document.Blocks.Add(para);
+        tab.PromptRun = promptRun;
+        tab.InputRun = inputRun;
     }
 
     private string GetInputText()
@@ -151,60 +355,58 @@ public partial class CommandRunnerPanel : UserControl
 
     private void TerminalBox_PreviewKeyDown(object sender, KeyEventArgs e)
     {
-        // Ctrl+C: copy or interrupt
+        if (_activeTab == null) return;
+        var runner = _activeTab.Service;
+
         if (e.Key == Key.C && Keyboard.Modifiers == ModifierKeys.Control)
         {
-            if (TerminalBox.Selection.IsEmpty && _runner.IsBusy)
+            if (TerminalBox.Selection.IsEmpty && runner.IsBusy)
             {
-                _runner.StopCurrentProcess();
+                runner.StopCurrentProcess();
                 e.Handled = true;
             }
             return;
         }
 
-        // Allow Ctrl+A (select all), Ctrl+V (paste handled separately)
         if (Keyboard.Modifiers == ModifierKeys.Control && e.Key != Key.V)
             return;
 
-        // Ctrl+V: force caret into input area
         if (e.Key == Key.V && Keyboard.Modifiers == ModifierKeys.Control)
         {
             if (!IsCaretInInputRun()) MoveCaretToInputEnd();
             return;
         }
 
-        // Enter: submit command
         if (e.Key == Key.Enter)
         {
             var input = GetInputText().Trim();
             if (!string.IsNullOrEmpty(input))
             {
-                // Freeze the prompt line (no longer editable via _inputRun tracking)
                 _inputRun = null;
                 _promptRun = null;
-                _runner.ExecuteCommand(input);
+                _activeTab.InputRun = null;
+                _activeTab.PromptRun = null;
+                runner.ExecuteCommand(input);
             }
             e.Handled = true;
             return;
         }
 
-        // Up/Down: history
         if (e.Key == Key.Up)
         {
-            var prev = _runner.GetPreviousHistoryItem();
+            var prev = runner.GetPreviousHistoryItem();
             if (prev != null) SetInputText(prev);
             e.Handled = true;
             return;
         }
         if (e.Key == Key.Down)
         {
-            var next = _runner.GetNextHistoryItem();
+            var next = runner.GetNextHistoryItem();
             if (next != null) SetInputText(next);
             e.Handled = true;
             return;
         }
 
-        // Home: go to start of input
         if (e.Key == Key.Home)
         {
             if (_inputRun != null)
@@ -213,7 +415,6 @@ public partial class CommandRunnerPanel : UserControl
             return;
         }
 
-        // Backspace: block at start of input or if selection spans outside
         if (e.Key == Key.Back)
         {
             if (!IsCaretInInputRun() || IsCaretAtInputStart() ||
@@ -224,7 +425,6 @@ public partial class CommandRunnerPanel : UserControl
             }
         }
 
-        // Delete: block outside input or if selection spans outside
         if (e.Key == Key.Delete)
         {
             if (!IsCaretInInputRun() ||
@@ -235,7 +435,6 @@ public partial class CommandRunnerPanel : UserControl
             }
         }
 
-        // Left: block at start of input
         if (e.Key == Key.Left)
         {
             if (IsCaretAtInputStart())
@@ -245,7 +444,6 @@ public partial class CommandRunnerPanel : UserControl
             }
         }
 
-        // Any other key: ensure caret is in input area
         if (!IsCaretInInputRun())
         {
             MoveCaretToInputEnd();
@@ -264,7 +462,6 @@ public partial class CommandRunnerPanel : UserControl
     {
         if (e.ChangedButton == MouseButton.Left)
         {
-            // Focus the control, then redirect caret to prompt after layout processes the click
             TerminalBox.Focus();
             Dispatcher.BeginInvoke(() => MoveCaretToInputEnd(),
                 System.Windows.Threading.DispatcherPriority.Input);
@@ -274,16 +471,13 @@ public partial class CommandRunnerPanel : UserControl
 
     private void OnPaste(object sender, DataObjectPastingEventArgs e)
     {
-        // Strip newlines from pasted text and ensure it goes to input area
         if (!IsCaretInInputRun()) MoveCaretToInputEnd();
 
         if (e.DataObject.GetDataPresent(DataFormats.UnicodeText))
         {
             var text = (string)e.DataObject.GetData(DataFormats.UnicodeText);
-            // Strip newlines — single-line shell input only
             text = text.Replace("\r\n", " ").Replace("\r", " ").Replace("\n", " ").Trim();
 
-            // Replace the clipboard data with cleaned text
             var dataObj = new DataObject();
             dataObj.SetData(DataFormats.UnicodeText, text);
             e.DataObject = dataObj;
@@ -292,7 +486,6 @@ public partial class CommandRunnerPanel : UserControl
 
     private void OnPreviewCommandExecuted(object sender, ExecutedRoutedEventArgs e)
     {
-        // Block Cut, Undo, Redo if selection spans outside input area
         if (e.Command == ApplicationCommands.Cut ||
             e.Command == ApplicationCommands.Undo ||
             e.Command == ApplicationCommands.Redo)
@@ -306,7 +499,6 @@ public partial class CommandRunnerPanel : UserControl
 
     private void AppendOutput(string text)
     {
-        // Trim trailing blank lines
         text = text.TrimEnd('\r', '\n', ' ');
         if (string.IsNullOrEmpty(text)) return;
 
@@ -314,21 +506,38 @@ public partial class CommandRunnerPanel : UserControl
         var para = new Paragraph { Margin = new Thickness(0) };
         para.Inlines.Add(outputRun);
 
-        // Insert before the prompt paragraph if it exists
         var promptPara = _promptRun?.Parent as Paragraph;
         if (promptPara != null)
             TerminalBox.Document.Blocks.InsertBefore(promptPara, para);
         else
             TerminalBox.Document.Blocks.Add(para);
 
-        // Cap scrollback
         while (TerminalBox.Document.Blocks.Count > MaxParagraphs)
             TerminalBox.Document.Blocks.Remove(TerminalBox.Document.Blocks.FirstBlock);
 
         TerminalBox.ScrollToEnd();
     }
 
-    private void UpdatePrompt(string cwd)
+    private void AppendOutputToTab(TerminalTabInfo tab, string text)
+    {
+        text = text.TrimEnd('\r', '\n', ' ');
+        if (string.IsNullOrEmpty(text)) return;
+
+        var outputRun = new Run(text + "\n") { Foreground = GetForegroundBrush() };
+        var para = new Paragraph { Margin = new Thickness(0) };
+        para.Inlines.Add(outputRun);
+
+        var promptPara = tab.PromptRun?.Parent as Paragraph;
+        if (promptPara != null)
+            tab.Document.Blocks.InsertBefore(promptPara, para);
+        else
+            tab.Document.Blocks.Add(para);
+
+        while (tab.Document.Blocks.Count > MaxParagraphs)
+            tab.Document.Blocks.Remove(tab.Document.Blocks.FirstBlock);
+    }
+
+    private void UpdatePromptForTab(TerminalTabInfo tab, string cwd)
     {
         try
         {
@@ -338,11 +547,11 @@ public partial class CommandRunnerPanel : UserControl
                 displayPath = "~";
             else if (cwd.StartsWith(userProfile + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
                 displayPath = "~" + cwd[userProfile.Length..];
-            _currentPrompt = $"{displayPath} ❯ ";
+            tab.CurrentPrompt = $"{displayPath} ❯ ";
         }
         catch
         {
-            _currentPrompt = "❯ ";
+            tab.CurrentPrompt = "❯ ";
         }
     }
 
@@ -354,7 +563,7 @@ public partial class CommandRunnerPanel : UserControl
 
     private void Stop_Click(object sender, RoutedEventArgs e)
     {
-        _runner.StopCurrentProcess();
+        _activeTab?.Service.StopCurrentProcess();
     }
 
     private void Close_Click(object sender, RoutedEventArgs e)

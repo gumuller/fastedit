@@ -9,6 +9,7 @@
         <Grid>
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
 
@@ -38,8 +39,13 @@
                 </Grid>
             </Border>
 
+            <!-- Terminal Tab Strip -->
+            <Border Grid.Row="1" Background="{DynamicResource MenuBackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
+                <StackPanel x:Name="TabStripPanel" Orientation="Horizontal"/>
+            </Border>
+
             <!-- Terminal area using RichTextBox -->
-            <RichTextBox x:Name="TerminalBox" Grid.Row="1"
+            <RichTextBox x:Name="TerminalBox" Grid.Row="2"
                          BorderThickness="0"
                          FontFamily="Cascadia Code,Consolas,Courier New"
                          FontSize="12"
