@@ -9,6 +9,10 @@ public interface ISettingsService
     List<string> RecentFiles { get; set; }
     bool WordWrapEnabled { get; set; }
     bool ShowWhitespace { get; set; }
+    bool CheckForUpdatesOnStartup { get; set; }
+    int AutoSaveIntervalSeconds { get; set; }
+    int TabSize { get; set; }
+    bool UseTabs { get; set; }
     double EditorFontSize { get; set; }
     double WindowLeft { get; set; }
     double WindowTop { get; set; }

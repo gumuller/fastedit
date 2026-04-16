@@ -51,6 +51,8 @@ public partial class App : Application
                 services.AddSingleton<IDispatcherService, WpfDispatcherService>();
                 services.AddSingleton<IProcessService, ProcessService>();
                 services.AddTransient<IFileWatcherService, FileWatcherService>();
+                services.AddSingleton<IUpdateService, UpdateService>();
+                services.AddSingleton<IGitService, GitService>();
 
                 // Factories
                 services.AddSingleton<IEditorTabFactory, EditorTabFactory>();

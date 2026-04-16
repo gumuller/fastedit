@@ -97,6 +97,7 @@ public partial class MainViewModel : ObservableObject
     public event Action? CompareFilesRequested;
     public event Action? CommandPaletteRequested;
     public event Action? ShowCompletionRequested;
+    public event Action? OpenSettingsRequested;
     public event Action? ToggleSplitViewRequested;
     public event Action<string>? TextToolRequested;
     public event Action? PrintRequested;
@@ -389,6 +390,9 @@ public partial class MainViewModel : ObservableObject
 
     [RelayCommand]
     private void ShowCompletion() => ShowCompletionRequested?.Invoke();
+
+    [RelayCommand]
+    private void OpenSettings() => OpenSettingsRequested?.Invoke();
 
     [RelayCommand]
     private void ToggleCommandRunner() => IsCommandRunnerVisible = !IsCommandRunnerVisible;

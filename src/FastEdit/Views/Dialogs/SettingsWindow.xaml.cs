@@ -1,0 +1,226 @@
+using System.Collections.ObjectModel;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using FastEdit.Services.Interfaces;
+using FastEdit.Theming;
+using FastEdit.ViewModels;
+
+namespace FastEdit.Views.Dialogs;
+
+public partial class SettingsWindow : Wpf.Ui.Controls.FluentWindow
+{
+    private readonly MainViewModel _viewModel;
+    private readonly ISettingsService _settingsService;
+    private readonly IKeyBindingService _keyBindingService;
+    private readonly ObservableCollection<KeyBindingEntry> _shortcutEntries = new();
+    private bool _isRecording;
+    private KeyBindingEntry? _recordingEntry;
+
+    public bool ShortcutsChanged { get; private set; }
+
+    public SettingsWindow(MainViewModel viewModel, ISettingsService settingsService, IKeyBindingService keyBindingService)
+    {
+        _viewModel = viewModel;
+        _settingsService = settingsService;
+        _keyBindingService = keyBindingService;
+
+        InitializeComponent();
+
+        LoadCurrentValues();
+        LoadShortcuts();
+    }
+
+    private void LoadCurrentValues()
+    {
+        // Editor
+        FontSizeBox.Text = _viewModel.EditorFontSize.ToString("0");
+        WordWrapCheck.IsChecked = _viewModel.IsWordWrapEnabled;
+        ShowWhitespaceCheck.IsChecked = _viewModel.IsWhitespaceVisible;
+        IndentGuidesCheck.IsChecked = _viewModel.IsIndentGuidesEnabled;
+        CodeFoldingCheck.IsChecked = _viewModel.IsFoldingEnabled;
+        MinimapCheck.IsChecked = _viewModel.IsMinimapVisible;
+        AutoReloadCheck.IsChecked = _viewModel.IsAutoReloadEnabled;
+
+        // Tab size
+        var tabSize = _settingsService.TabSize;
+        foreach (ComboBoxItem item in TabSizeCombo.Items)
+        {
+            if (item.Tag?.ToString() == tabSize.ToString())
+            {
+                TabSizeCombo.SelectedItem = item;
+                break;
+            }
+        }
+        if (TabSizeCombo.SelectedItem == null)
+            TabSizeCombo.SelectedIndex = 1; // default to 4
+
+        UseTabsCheck.IsChecked = _settingsService.UseTabs;
+
+        // Appearance
+        ThemeCombo.ItemsSource = _viewModel.AvailableThemes;
+        var currentTheme = _viewModel.AvailableThemes.FirstOrDefault(
+            t => t.Name == _viewModel.CurrentThemeName);
+        ThemeCombo.SelectedItem = currentTheme;
+
+        // General
+        CheckUpdatesCheck.IsChecked = _settingsService.CheckForUpdatesOnStartup;
+        AutoSaveBox.Text = _settingsService.AutoSaveIntervalSeconds.ToString();
+    }
+
+    private void LoadShortcuts()
+    {
+        _shortcutEntries.Clear();
+        var bindings = _keyBindingService.GetBindings();
+        foreach (var kvp in bindings.OrderBy(k => k.Key))
+        {
+            _shortcutEntries.Add(new KeyBindingEntry { Command = kvp.Key, Gesture = kvp.Value });
+        }
+        ShortcutsGrid.ItemsSource = _shortcutEntries;
+    }
+
+    private void FontSizeDown_Click(object sender, RoutedEventArgs e)
+    {
+        if (double.TryParse(FontSizeBox.Text, out var size))
+            FontSizeBox.Text = Math.Max(8, size - 1).ToString("0");
+    }
+
+    private void FontSizeUp_Click(object sender, RoutedEventArgs e)
+    {
+        if (double.TryParse(FontSizeBox.Text, out var size))
+            FontSizeBox.Text = Math.Min(72, size + 1).ToString("0");
+    }
+
+    private void RecordShortcut_Click(object sender, RoutedEventArgs e)
+    {
+        if (ShortcutsGrid.SelectedItem is not KeyBindingEntry entry)
+        {
+            MessageBox.Show("Select a command first.", "Record Shortcut",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        _isRecording = true;
+        _recordingEntry = entry;
+        entry.Gesture = "Press key combination...";
+        Title = "Settings — Recording shortcut...";
+        PreviewKeyDown += OnRecordKeyDown;
+    }
+
+    private void OnRecordKeyDown(object sender, KeyEventArgs e)
+    {
+        e.Handled = true;
+
+        var key = e.Key == Key.System ? e.SystemKey : e.Key;
+
+        // Ignore modifier-only keys
+        if (key is Key.LeftCtrl or Key.RightCtrl or Key.LeftAlt or Key.RightAlt
+            or Key.LeftShift or Key.RightShift or Key.LWin or Key.RWin)
+            return;
+
+        var modifiers = Keyboard.Modifiers;
+        var parts = new List<string>();
+        if (modifiers.HasFlag(ModifierKeys.Control)) parts.Add("Ctrl");
+        if (modifiers.HasFlag(ModifierKeys.Alt)) parts.Add("Alt");
+        if (modifiers.HasFlag(ModifierKeys.Shift)) parts.Add("Shift");
+
+        var keyName = key switch
+        {
+            Key.OemPlus => "Plus",
+            Key.OemMinus => "Minus",
+            Key.OemTilde => "`",
+            Key.OemPipe => "\\",
+            Key.OemComma => ",",
+            Key.D0 => "0",
+            Key.D1 => "1",
+            Key.D2 => "2",
+            Key.D3 => "3",
+            Key.D4 => "4",
+            Key.D5 => "5",
+            Key.D6 => "6",
+            Key.D7 => "7",
+            Key.D8 => "8",
+            Key.D9 => "9",
+            _ => key.ToString()
+        };
+        parts.Add(keyName);
+
+        var gesture = string.Join("+", parts);
+
+        if (_recordingEntry != null)
+        {
+            _recordingEntry.Gesture = gesture;
+            ShortcutsGrid.Items.Refresh();
+        }
+
+        _isRecording = false;
+        _recordingEntry = null;
+        Title = "Settings";
+        PreviewKeyDown -= OnRecordKeyDown;
+    }
+
+    private void ResetShortcuts_Click(object sender, RoutedEventArgs e)
+    {
+        _keyBindingService.ResetToDefaults();
+        LoadShortcuts();
+        ShortcutsChanged = true;
+    }
+
+    private void Save_Click(object sender, RoutedEventArgs e)
+    {
+        // Editor settings
+        if (double.TryParse(FontSizeBox.Text, out var fontSize))
+        {
+            _viewModel.EditorFontSize = Math.Clamp(fontSize, 8, 72);
+            _settingsService.EditorFontSize = _viewModel.EditorFontSize;
+        }
+
+        _viewModel.IsWordWrapEnabled = WordWrapCheck.IsChecked == true;
+        _viewModel.IsWhitespaceVisible = ShowWhitespaceCheck.IsChecked == true;
+        _viewModel.IsIndentGuidesEnabled = IndentGuidesCheck.IsChecked == true;
+        _viewModel.IsFoldingEnabled = CodeFoldingCheck.IsChecked == true;
+        _viewModel.IsMinimapVisible = MinimapCheck.IsChecked == true;
+        _viewModel.IsAutoReloadEnabled = AutoReloadCheck.IsChecked == true;
+
+        // Tab size
+        if (TabSizeCombo.SelectedItem is ComboBoxItem tabItem &&
+            int.TryParse(tabItem.Tag?.ToString(), out var tabSize))
+        {
+            _settingsService.TabSize = tabSize;
+        }
+        _settingsService.UseTabs = UseTabsCheck.IsChecked == true;
+
+        // Theme
+        if (ThemeCombo.SelectedItem is ThemeDefinition theme)
+        {
+            _viewModel.ChangeThemeCommand.Execute(theme.Name);
+        }
+
+        // General
+        _settingsService.CheckForUpdatesOnStartup = CheckUpdatesCheck.IsChecked == true;
+        if (int.TryParse(AutoSaveBox.Text, out var autoSave) && autoSave > 0)
+        {
+            _settingsService.AutoSaveIntervalSeconds = autoSave;
+        }
+
+        // Save keyboard shortcuts
+        foreach (var entry in _shortcutEntries)
+        {
+            _keyBindingService.SetBinding(entry.Command, entry.Gesture);
+        }
+        ShortcutsChanged = true;
+
+        DialogResult = true;
+    }
+
+    private void Cancel_Click(object sender, RoutedEventArgs e)
+    {
+        DialogResult = false;
+    }
+
+    public class KeyBindingEntry
+    {
+        public string Command { get; set; } = string.Empty;
+        public string Gesture { get; set; } = string.Empty;
+    }
+}

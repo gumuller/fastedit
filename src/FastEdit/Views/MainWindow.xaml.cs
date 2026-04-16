@@ -1,4 +1,6 @@
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
 using FastEdit.Infrastructure;
@@ -16,6 +18,11 @@ public partial class MainWindow : FluentWindow
     private MainViewModel? _viewModel;
     private FindInFilesViewModel? _findInFilesVm;
     private CommandRegistry? _commandRegistry;
+
+    // Zen mode state
+    private WindowState _preZenWindowState;
+    private WindowStyle _preZenWindowStyle;
+    private GridLength _preZenFileTreeWidth;
 
     public MainWindow()
     {
@@ -55,6 +62,7 @@ public partial class MainWindow : FluentWindow
 
         Loaded += MainWindow_Loaded;
         Closing += MainWindow_Closing;
+        PreviewKeyDown += MainWindow_PreviewKeyDown;
 
         // Subscribe to events
         _viewModel.GoToLineRequested += OnGoToLineRequested;
@@ -116,7 +124,9 @@ public partial class MainWindow : FluentWindow
         _commandRegistry.Register("Zoom Out", "View", "Ctrl+-", _viewModel.ZoomOutCommand);
         _commandRegistry.Register("Reset Zoom", "View", "Ctrl+0", _viewModel.ResetZoomCommand);
         _commandRegistry.Register("Split Editor", "View", "Ctrl+\\", _viewModel.ToggleSplitViewCommand);
+        _commandRegistry.Register("Side-by-Side View", "View", null, _viewModel.ToggleSideBySideCommand);
         _commandRegistry.Register("Toggle Terminal", "View", "Ctrl+`", _viewModel.ToggleCommandRunnerCommand);
+        _commandRegistry.Register("Zen Mode", "View", "F11", _viewModel.ToggleZenModeCommand);
         _commandRegistry.Register("Auto-Reload", "View", null, _viewModel.ToggleAutoReloadCommand);
         _commandRegistry.Register("Compare Files", "View", null, _viewModel.CompareFilesCommand);
         _commandRegistry.Register("Show Completion", "Edit", "Ctrl+Space", _viewModel.ShowCompletionCommand);
@@ -196,6 +206,9 @@ public partial class MainWindow : FluentWindow
             if (!string.IsNullOrEmpty(folder))
                 CommandRunner.SetWorkingDirectory(folder);
         }
+
+        // Apply custom key bindings
+        ApplyKeyBindings();
     }
 
     private bool _isClosingConfirmed;
@@ -257,6 +270,134 @@ public partial class MainWindow : FluentWindow
     private void Exit_Click(object sender, RoutedEventArgs e)
     {
         Close();
+    }
+
+    private void Settings_Click(object sender, RoutedEventArgs e)
+    {
+        ShowSettingsDialog();
+    }
+
+    private void OnOpenSettingsRequested()
+    {
+        ShowSettingsDialog();
+    }
+
+    private void ShowSettingsDialog()
+    {
+        if (_viewModel == null) return;
+        var settingsService = App.Services.GetRequiredService<ISettingsService>();
+        var keyBindingService = App.Services.GetRequiredService<IKeyBindingService>();
+
+        var dialog = new SettingsWindow(_viewModel, settingsService, keyBindingService)
+        {
+            Owner = this
+        };
+
+        if (dialog.ShowDialog() == true && dialog.ShortcutsChanged)
+        {
+            ApplyKeyBindings();
+        }
+    }
+
+    private void ApplyKeyBindings()
+    {
+        if (_viewModel == null) return;
+        var keyBindingService = App.Services.GetRequiredService<IKeyBindingService>();
+        var bindings = keyBindingService.GetBindings();
+
+        InputBindings.Clear();
+
+        var commandMap = new Dictionary<string, ICommand>
+        {
+            ["NewFile"] = _viewModel.NewFileCommand,
+            ["OpenFile"] = _viewModel.OpenFileCommand,
+            ["Save"] = _viewModel.SaveCommand,
+            ["SaveAs"] = _viewModel.SaveAsCommand,
+            ["CloseTab"] = _viewModel.CloseTabCommand,
+            ["Find"] = _viewModel.FindCommand,
+            ["Replace"] = _viewModel.ReplaceCommand,
+            ["GoToLine"] = _viewModel.GoToLineCommand,
+            ["DuplicateLine"] = _viewModel.DuplicateLineCommand,
+            ["MoveLineUp"] = _viewModel.MoveLineUpCommand,
+            ["MoveLineDown"] = _viewModel.MoveLineDownCommand,
+            ["ZoomIn"] = _viewModel.ZoomInCommand,
+            ["ZoomOut"] = _viewModel.ZoomOutCommand,
+            ["ResetZoom"] = _viewModel.ResetZoomCommand,
+            ["FindInFiles"] = _viewModel.FindInFilesCommand,
+            ["ToggleBookmark"] = _viewModel.ToggleBookmarkCommand,
+            ["NextBookmark"] = _viewModel.NextBookmarkCommand,
+            ["PrevBookmark"] = _viewModel.PrevBookmarkCommand,
+            ["CommandPalette"] = _viewModel.CommandPaletteCommand,
+            ["Completion"] = _viewModel.ShowCompletionCommand,
+            ["ToggleTerminal"] = _viewModel.ToggleCommandRunnerCommand,
+            ["SplitView"] = _viewModel.ToggleSplitViewCommand,
+            ["Print"] = _viewModel.PrintCommand,
+            ["SelectNextOccurrence"] = _viewModel.SelectNextOccurrenceCommand,
+            ["SelectAllOccurrences"] = _viewModel.SelectAllOccurrencesCommand,
+            ["Settings"] = _viewModel.OpenSettingsCommand,
+        };
+
+        foreach (var kvp in bindings)
+        {
+            if (!commandMap.TryGetValue(kvp.Key, out var command)) continue;
+
+            try
+            {
+                var gesture = ParseGesture(kvp.Value);
+                if (gesture != null)
+                    InputBindings.Add(new KeyBinding(command, gesture));
+            }
+            catch
+            {
+                // Skip invalid gestures
+            }
+        }
+    }
+
+    private static KeyGesture? ParseGesture(string gestureString)
+    {
+        var modifiers = ModifierKeys.None;
+        var parts = gestureString.Split('+');
+        var keyPart = parts[^1].Trim();
+
+        for (int i = 0; i < parts.Length - 1; i++)
+        {
+            var mod = parts[i].Trim();
+            if (mod.Equals("Ctrl", StringComparison.OrdinalIgnoreCase)) modifiers |= ModifierKeys.Control;
+            else if (mod.Equals("Alt", StringComparison.OrdinalIgnoreCase)) modifiers |= ModifierKeys.Alt;
+            else if (mod.Equals("Shift", StringComparison.OrdinalIgnoreCase)) modifiers |= ModifierKeys.Shift;
+        }
+
+        var key = keyPart switch
+        {
+            "Plus" => Key.OemPlus,
+            "Minus" => Key.OemMinus,
+            "`" => Key.OemTilde,
+            "\\" => Key.OemPipe,
+            "," => Key.OemComma,
+            "0" => Key.D0,
+            "1" => Key.D1,
+            "2" => Key.D2,
+            "3" => Key.D3,
+            "4" => Key.D4,
+            "5" => Key.D5,
+            "6" => Key.D6,
+            "7" => Key.D7,
+            "8" => Key.D8,
+            "9" => Key.D9,
+            _ => Enum.TryParse<Key>(keyPart, true, out var k) ? k : (Key?)null
+        };
+
+        if (key == null) return null;
+
+        try
+        {
+            return new KeyGesture(key.Value, modifiers);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private void About_Click(object sender, RoutedEventArgs e)
@@ -391,6 +532,82 @@ public partial class MainWindow : FluentWindow
                 TerminalRow.MinHeight = 0;
             }
         }
+        else if (e.PropertyName == nameof(MainViewModel.IsZenMode))
+        {
+            if (_viewModel!.IsZenMode)
+                EnterZenMode();
+            else
+                ExitZenMode();
+        }
+        else if (e.PropertyName == nameof(MainViewModel.IsSideBySideMode))
+        {
+            UpdateSideBySideColumns();
+        }
+    }
+
+    private void UpdateSideBySideColumns()
+    {
+        if (_viewModel == null) return;
+
+        if (_viewModel.IsSideBySideMode)
+        {
+            SideBySideSplitterCol.Width = GridLength.Auto;
+            SecondaryEditorCol.Width = new GridLength(1, GridUnitType.Star);
+            SideBySideSplitter.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            SideBySideSplitterCol.Width = new GridLength(0);
+            SecondaryEditorCol.Width = new GridLength(0);
+            SideBySideSplitter.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private void EnterZenMode()
+    {
+        _preZenWindowState = WindowState;
+        _preZenWindowStyle = WindowStyle;
+        _preZenFileTreeWidth = FileTreePanel.ActualWidth > 0
+            ? new GridLength(FileTreePanel.ActualWidth) 
+            : new GridLength(250);
+
+        // Hide chrome
+        MenuBar.Visibility = Visibility.Collapsed;
+        FileTreePanel.Visibility = Visibility.Collapsed;
+        TreeSplitter.Visibility = Visibility.Collapsed;
+        MainStatusBar.Visibility = Visibility.Collapsed;
+        TitleBarGrid.Visibility = Visibility.Collapsed;
+
+        // Hide terminal if visible
+        if (_viewModel!.IsCommandRunnerVisible)
+            _viewModel.IsCommandRunnerVisible = false;
+
+        // Fullscreen
+        WindowStyle = WindowStyle.None;
+        WindowState = WindowState.Maximized;
+    }
+
+    private void ExitZenMode()
+    {
+        // Restore chrome
+        MenuBar.Visibility = Visibility.Visible;
+        FileTreePanel.Visibility = Visibility.Visible;
+        TreeSplitter.Visibility = Visibility.Visible;
+        MainStatusBar.Visibility = Visibility.Visible;
+        TitleBarGrid.Visibility = Visibility.Visible;
+
+        // Restore window state
+        WindowStyle = _preZenWindowStyle;
+        WindowState = _preZenWindowState;
+    }
+
+    private void MainWindow_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape && _viewModel?.IsZenMode == true)
+        {
+            _viewModel.IsZenMode = false;
+            e.Handled = true;
+        }
     }
 
     // --- Compare Files ---
@@ -481,8 +698,40 @@ public partial class MainWindow : FluentWindow
         }
     }
 
+    private void TabHeader_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.Tag is EditorTabViewModel tab && _viewModel != null)
+        {
+            var contextMenu = new ContextMenu();
+
+            var splitItem = new System.Windows.Controls.MenuItem { Header = "Open in Split View" };
+            splitItem.Click += (_, _) =>
+            {
+                _viewModel.OpenInSplitView(tab);
+                UpdateSideBySideColumns();
+            };
+            contextMenu.Items.Add(splitItem);
+
+            if (_viewModel.IsSideBySideMode)
+            {
+                var closeItem = new System.Windows.Controls.MenuItem { Header = "Close Split View" };
+                closeItem.Click += (_, _) =>
+                {
+                    _viewModel.CloseSideBySide();
+                    UpdateSideBySideColumns();
+                };
+                contextMenu.Items.Add(closeItem);
+            }
+
+            fe.ContextMenu = contextMenu;
+            contextMenu.IsOpen = true;
+            e.Handled = true;
+        }
+    }
+
     private Point? _dragStartPoint;
     private EditorTabViewModel? _dragSourceTab;
+    private TabDropAdorner? _tabDropAdorner;
 
     private void TabHeader_MouseMove(object sender, MouseEventArgs e)
     {
@@ -497,6 +746,7 @@ public partial class MainWindow : FluentWindow
         {
             var data = new DataObject("TabItem", _dragSourceTab);
             DragDrop.DoDragDrop((DependencyObject)sender, data, DragDropEffects.Move);
+            RemoveTabDropAdorner();
             _dragStartPoint = null;
             _dragSourceTab = null;
         }
@@ -505,14 +755,70 @@ public partial class MainWindow : FluentWindow
     private void TabHeader_DragOver(object sender, DragEventArgs e)
     {
         if (e.Data.GetDataPresent("TabItem"))
+        {
             e.Effects = DragDropEffects.Move;
+            UpdateTabDropAdorner(sender as FrameworkElement, e);
+        }
         else
+        {
             e.Effects = DragDropEffects.None;
+        }
         e.Handled = true;
+    }
+
+    private void UpdateTabDropAdorner(FrameworkElement? targetElement, DragEventArgs e)
+    {
+        if (targetElement == null) return;
+
+        var adornerLayer = AdornerLayer.GetAdornerLayer(TabStrip);
+        if (adornerLayer == null) return;
+
+        if (_tabDropAdorner == null)
+        {
+            _tabDropAdorner = new TabDropAdorner(TabStrip);
+            adornerLayer.Add(_tabDropAdorner);
+        }
+
+        var pos = e.GetPosition(TabStrip);
+        var targetCenter = targetElement.TranslatePoint(
+            new Point(targetElement.ActualWidth / 2, 0), TabStrip).X;
+
+        double insertX;
+        if (pos.X < targetCenter)
+        {
+            insertX = targetElement.TranslatePoint(new Point(0, 0), TabStrip).X;
+        }
+        else
+        {
+            insertX = targetElement.TranslatePoint(new Point(targetElement.ActualWidth, 0), TabStrip).X;
+        }
+
+        _tabDropAdorner.UpdatePosition(insertX);
+    }
+
+    private void RemoveTabDropAdorner()
+    {
+        if (_tabDropAdorner != null)
+        {
+            var adornerLayer = AdornerLayer.GetAdornerLayer(TabStrip);
+            adornerLayer?.Remove(_tabDropAdorner);
+            _tabDropAdorner = null;
+        }
+    }
+
+    private void TabHeader_DragLeave(object sender, DragEventArgs e)
+    {
+        var pos = e.GetPosition(TabStrip);
+        if (pos.X < 0 || pos.Y < 0 || pos.X > TabStrip.ActualWidth || pos.Y > TabStrip.ActualHeight)
+        {
+            RemoveTabDropAdorner();
+        }
     }
 
     private void TabHeader_Drop(object sender, DragEventArgs e)
     {
+        RemoveTabDropAdorner();
+
         if (_viewModel == null || !e.Data.GetDataPresent("TabItem")) return;
 
         var sourceTab = e.Data.GetData("TabItem") as EditorTabViewModel;

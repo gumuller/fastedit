@@ -289,6 +289,7 @@
                 <MenuItem Header="_Reset Zoom" Command="{Binding ResetZoomCommand}" InputGestureText="Ctrl+0"/>
                 <Separator/>
                 <MenuItem Header="Split _Editor" Command="{Binding ToggleSplitViewCommand}" InputGestureText="Ctrl+\"/>
+                <MenuItem Header="Side-by-Side _View" Command="{Binding ToggleSideBySideCommand}"/>
                 <MenuItem Header="_Terminal" Command="{Binding ToggleCommandRunnerCommand}" InputGestureText="Ctrl+`"/>
                 <MenuItem Header="_Zen Mode" IsCheckable="True" IsChecked="{Binding IsZenMode, Mode=TwoWay}" InputGestureText="F11"/>
                 <Separator/>
@@ -391,8 +392,14 @@
 
             <!-- Editor Area -->
             <Grid Grid.Column="2">
-                <!-- Editor Content (tabs are in title bar) -->
-                <ContentControl Content="{Binding SelectedTab}"
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition x:Name="SideBySideSplitterCol" Width="0"/>
+                    <ColumnDefinition x:Name="SecondaryEditorCol" Width="0"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Primary Editor -->
+                <ContentControl Grid.Column="0" Content="{Binding SelectedTab}"
                                 Visibility="{Binding SelectedTab, Converter={StaticResource NullToCollapsedConverter}}">
                     <ContentControl.ContentTemplate>
                         <DataTemplate>
@@ -401,8 +408,26 @@
                     </ContentControl.ContentTemplate>
                 </ContentControl>
 
+                <!-- Side-by-Side Splitter -->
+                <GridSplitter x:Name="SideBySideSplitter" Grid.Column="1" Width="4"
+                              HorizontalAlignment="Center" VerticalAlignment="Stretch"
+                              Background="{DynamicResource PanelBorderBrush}"
+                              Visibility="Collapsed"/>
+
+                <!-- Secondary Editor -->
+                <ContentControl x:Name="SecondaryEditorContent" Grid.Column="2"
+                                Content="{Binding SecondaryTab}"
+                                Visibility="{Binding IsSideBySideMode, Converter={StaticResource BoolToVisibilityConverter}}">
+                    <ContentControl.ContentTemplate>
+                        <DataTemplate>
+                            <controls:EditorHost DataContext="{Binding}"/>
+                        </DataTemplate>
+                    </ContentControl.ContentTemplate>
+                </ContentControl>
+
                 <!-- Empty State -->
-                <Border Background="{DynamicResource EditorBackgroundBrush}"
+                <Border Grid.Column="0" Grid.ColumnSpan="3"
+                        Background="{DynamicResource EditorBackgroundBrush}"
                         Visibility="{Binding Tabs.Count, Converter={StaticResource CountToVisibilityConverter}}">
                     <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
                         <TextBlock Text="FastEdit"

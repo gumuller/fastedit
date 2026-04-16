@@ -126,6 +126,46 @@ public class SettingsService : ISettingsService
         set => _settings.WindowMaximized = value;
     }
 
+    public bool CheckForUpdatesOnStartup
+    {
+        get => _settings.CheckForUpdatesOnStartup;
+        set
+        {
+            _settings.CheckForUpdatesOnStartup = value;
+            Save();
+        }
+    }
+
+    public int AutoSaveIntervalSeconds
+    {
+        get => _settings.AutoSaveIntervalSeconds;
+        set
+        {
+            _settings.AutoSaveIntervalSeconds = value;
+            Save();
+        }
+    }
+
+    public int TabSize
+    {
+        get => _settings.TabSize;
+        set
+        {
+            _settings.TabSize = value;
+            Save();
+        }
+    }
+
+    public bool UseTabs
+    {
+        get => _settings.UseTabs;
+        set
+        {
+            _settings.UseTabs = value;
+            Save();
+        }
+    }
+
     public void AddRecentFile(string filePath)
     {
         _settings.RecentFiles.Remove(filePath);
@@ -195,6 +235,10 @@ public class SettingsService : ISettingsService
         public bool WordWrapEnabled { get; set; }
         public bool ShowWhitespace { get; set; }
         public double EditorFontSize { get; set; } = 14;
+        public bool CheckForUpdatesOnStartup { get; set; } = true;
+        public int AutoSaveIntervalSeconds { get; set; } = 30;
+        public int TabSize { get; set; } = 4;
+        public bool UseTabs { get; set; }
         public double WindowLeft { get; set; } = double.NaN;
         public double WindowTop { get; set; } = double.NaN;
         public double WindowWidth { get; set; } = 1100;
