@@ -173,7 +173,8 @@
         <Setter Property="BorderBrush" Value="{DynamicResource PanelBorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="8,4"/>
-        <Setter Property="MinHeight" Value="28"/>
+        <Setter Property="MinHeight" Value="30"/>
+        <Setter Property="Height" Value="30"/>
         <Setter Property="MinWidth" Value="220"/>
         <Setter Property="SnapsToDevicePixels" Value="True"/>
         <Setter Property="Template">
@@ -276,7 +277,8 @@
                             BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}"
                             CornerRadius="6"
-                            Padding="8"
+                            Padding="8,6"
+                            Margin="0,0,20,0"
                             HorizontalAlignment="Right"
                             VerticalAlignment="Top">
                         <StackPanel Orientation="Vertical">
@@ -310,7 +312,7 @@
                                     </TextBox.Text>
                                 </TextBox>
 
-                                <search:DropDownButton Grid.Column="2">
+                                <search:DropDownButton Grid.Column="2" Width="28" MinWidth="28" Height="28" MinHeight="28" Padding="0" VerticalAlignment="Center">
                                     <search:DropDownButton.DropDownContent>
                                         <Popup StaysOpen="False">
                                             <Border Background="{DynamicResource PanelBackgroundBrush}"

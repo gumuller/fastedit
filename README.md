@@ -44,6 +44,8 @@ A fast, lightweight text and hex editor for Windows, built with WPF (.NET 8), Av
 - **Built-in Terminal** (Ctrl+\`) — run commands without leaving the editor
 - **Log File Tailing** — auto-reload files when modified (View → Auto-Reload)
 - **Side-by-Side File Compare** — visual diff with color-coded changes (View → Compare Files)
+- **Line Filters** (Ctrl+L) — color-coded text/regex filters with include/exclude modes, show-only-filtered-lines toggle, save/load filter sets (inspired by TextAnalysisTool.NET)
+- **Hex Search** (Ctrl+F in hex mode) — search by hex bytes (`FF 00 AB`) or quoted text (`"hello"`)
 - **Git Branch Detection** — current branch shown in status bar
 - **Hex/Text Mode Toggle** — switch between text and hex views for any file
 - **Binary Detection** — automatically opens binary files in hex mode
@@ -90,6 +92,7 @@ A fast, lightweight text and hex editor for Windows, built with WPF (.NET 8), Av
 | Toggle Bookmark | Ctrl+F2 |
 | Next/Prev Bookmark | F2 / Shift+F2 |
 | Split Editor | Ctrl+\\ |
+| Line Filters | Ctrl+L |
 | Toggle Terminal | Ctrl+\` |
 | Zoom In/Out | Ctrl+Plus/Minus |
 | Reset Zoom | Ctrl+0 |
