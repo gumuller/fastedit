@@ -67,7 +67,7 @@ if (-not $SkipInstaller) {
             Write-Host ""
             Write-Host "--- Creating $arch installer ---" -ForegroundColor Yellow
 
-            & $nsisExe /DVERSION=$Version /DARCH=$arch /DPUBLISH_DIR=$publishDir /DOUTPUT_DIR=$OutputDir $nsiScript
+            & $nsisExe /DVERSION=$Version /DARCH=$arch "/DPUBLISH_DIR=$publishDir" "/DOUTPUT_DIR=$OutputDir" $nsiScript
 
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "WARNING: NSIS failed for $arch" -ForegroundColor Red

@@ -37,8 +37,6 @@ RequestExecutionLevel admin
 !endif
 
 ; ---- Interface ----
-!define MUI_ICON "${PUBLISH_DIR}\fastedit.ico"
-!define MUI_UNICON "${PUBLISH_DIR}\fastedit.ico"
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${APP_EXEC}"
 !define MUI_FINISHPAGE_RUN_TEXT "Launch ${APP_NAME}"
