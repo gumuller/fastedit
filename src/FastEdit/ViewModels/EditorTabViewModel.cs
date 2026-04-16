@@ -19,6 +19,26 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     private Encoding _fileEncoding = new UTF8Encoding(false);
     private bool _hasBom;
 
+    internal const string FileDialogFilters =
+        "All Files (*.*)|*.*|" +
+        "Text Files (*.txt)|*.txt|" +
+        "C# Files (*.cs)|*.cs|" +
+        "XML Files (*.xml)|*.xml|" +
+        "JSON Files (*.json)|*.json|" +
+        "JavaScript (*.js)|*.js|" +
+        "TypeScript (*.ts;*.tsx)|*.ts;*.tsx|" +
+        "HTML Files (*.html;*.htm)|*.html;*.htm|" +
+        "CSS Files (*.css)|*.css|" +
+        "Python Files (*.py)|*.py|" +
+        "Markdown (*.md)|*.md|" +
+        "YAML (*.yml;*.yaml)|*.yml;*.yaml|" +
+        "SQL Files (*.sql)|*.sql|" +
+        "PowerShell (*.ps1)|*.ps1|" +
+        "Batch Files (*.bat;*.cmd)|*.bat;*.cmd|" +
+        "Log Files (*.log)|*.log|" +
+        "INI Files (*.ini;*.cfg)|*.ini;*.cfg|" +
+        "CSV Files (*.csv)|*.csv";
+
     [ObservableProperty]
     private string _filePath = string.Empty;
 
@@ -145,7 +165,9 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         // If untitled (no file path), prompt for Save As
         if (string.IsNullOrEmpty(savePath))
         {
-            savePath = _dialogService.ShowSaveFileDialog(defaultFileName: FileName);
+            savePath = _dialogService.ShowSaveFileDialog(
+                filter: FileDialogFilters,
+                defaultFileName: FileName);
             if (string.IsNullOrEmpty(savePath))
                 return false; // User cancelled
         }
@@ -164,7 +186,9 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     private async Task<bool> SaveAsAsync()
     {
         var defaultName = string.IsNullOrEmpty(FilePath) ? FileName : Path.GetFileName(FilePath);
-        var savePath = _dialogService.ShowSaveFileDialog(defaultFileName: defaultName);
+        var savePath = _dialogService.ShowSaveFileDialog(
+            filter: FileDialogFilters,
+            defaultFileName: defaultName);
         if (string.IsNullOrEmpty(savePath))
             return false;
 

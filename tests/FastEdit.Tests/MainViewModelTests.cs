@@ -117,11 +117,11 @@ public class MainViewModelTests
     [Fact]
     public async Task OpenFile_NoPath_ShowsDialog()
     {
-        _dialogService.Setup(d => d.ShowOpenFileDialog(null, null)).Returns((string?)null);
+        _dialogService.Setup(d => d.ShowOpenFileDialog(It.IsAny<string>(), null)).Returns((string?)null);
 
         await _sut.OpenFileCommand.ExecuteAsync(null);
 
-        _dialogService.Verify(d => d.ShowOpenFileDialog(null, null), Times.Once);
+        _dialogService.Verify(d => d.ShowOpenFileDialog(It.IsAny<string>(), null), Times.Once);
         Assert.Empty(_sut.Tabs);
     }
 

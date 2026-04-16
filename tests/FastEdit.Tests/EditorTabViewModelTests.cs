@@ -88,12 +88,12 @@ public class EditorTabViewModelTests
         sut.FileName = "Untitled-1";
         sut.Content = "content";
 
-        _dialogService.Setup(d => d.ShowSaveFileDialog(null, "Untitled-1", null))
+        _dialogService.Setup(d => d.ShowSaveFileDialog(It.IsAny<string>(), "Untitled-1", null))
             .Returns(@"C:\saved.txt");
 
         await sut.SaveCommand.ExecuteAsync(null);
 
-        _dialogService.Verify(d => d.ShowSaveFileDialog(null, "Untitled-1", null), Times.Once);
+        _dialogService.Verify(d => d.ShowSaveFileDialog(It.IsAny<string>(), "Untitled-1", null), Times.Once);
         Assert.Equal(@"C:\saved.txt", sut.FilePath);
         Assert.Equal("saved.txt", sut.FileName);
     }
@@ -105,7 +105,7 @@ public class EditorTabViewModelTests
         sut.FileName = "Untitled-1";
         sut.Content = "content";
 
-        _dialogService.Setup(d => d.ShowSaveFileDialog(null, "Untitled-1", null))
+        _dialogService.Setup(d => d.ShowSaveFileDialog(It.IsAny<string>(), "Untitled-1", null))
             .Returns((string?)null);
 
         await sut.SaveCommand.ExecuteAsync(null);
@@ -124,7 +124,7 @@ public class EditorTabViewModelTests
         sut.FileName = "old.txt";
         sut.Content = "content";
 
-        _dialogService.Setup(d => d.ShowSaveFileDialog(null, "old.txt", null))
+        _dialogService.Setup(d => d.ShowSaveFileDialog(It.IsAny<string>(), "old.txt", null))
             .Returns(@"C:\new.txt");
 
         await sut.SaveAsCommand.ExecuteAsync(null);
@@ -143,7 +143,7 @@ public class EditorTabViewModelTests
         sut.FilePath = @"C:\old.txt";
         sut.FileName = "old.txt";
 
-        _dialogService.Setup(d => d.ShowSaveFileDialog(null, "old.txt", null))
+        _dialogService.Setup(d => d.ShowSaveFileDialog(It.IsAny<string>(), "old.txt", null))
             .Returns((string?)null);
 
         await sut.SaveAsCommand.ExecuteAsync(null);

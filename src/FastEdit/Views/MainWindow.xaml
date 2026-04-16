@@ -58,8 +58,8 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto" x:Name="TerminalSplitterRow"/>
+            <RowDefinition Height="0" MinHeight="0" x:Name="TerminalRow"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
@@ -411,6 +411,7 @@
 
         <!-- Terminal Splitter -->
         <GridSplitter Grid.Row="3" Height="4" HorizontalAlignment="Stretch"
+                      ResizeDirection="Rows" ResizeBehavior="PreviousAndNext"
                       Background="{DynamicResource PanelBorderBrush}"
                       Cursor="SizeNS"
                       Visibility="{Binding IsCommandRunnerVisible, Converter={StaticResource BooleanToVisibilityConverter}}"/>
@@ -418,7 +419,6 @@
         <!-- Command Runner Panel -->
         <controls:CommandRunnerPanel x:Name="CommandRunner"
                                       Grid.Row="4"
-                                      MinHeight="100" Height="250"
                                       Visibility="{Binding IsCommandRunnerVisible, Converter={StaticResource BooleanToVisibilityConverter}}"/>
 
         <!-- Status Bar -->

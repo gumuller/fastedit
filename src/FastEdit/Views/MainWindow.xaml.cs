@@ -61,6 +61,7 @@ public partial class MainWindow : FluentWindow
         _viewModel.FindInFilesRequested += OnFindInFilesRequested;
         _viewModel.CompareFilesRequested += OnCompareFilesRequested;
         _viewModel.CommandPaletteRequested += OnCommandPaletteRequested;
+        _viewModel.PropertyChanged += OnViewModelPropertyChanged;
 
         // Setup Find in Files
         _findInFilesVm = App.Services.GetRequiredService<FindInFilesViewModel>();
@@ -366,20 +367,60 @@ public partial class MainWindow : FluentWindow
         });
     }
 
+    // --- Terminal row visibility ---
+    private GridLength _savedTerminalHeight = new(250);
+
+    private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(MainViewModel.IsCommandRunnerVisible))
+        {
+            if (_viewModel!.IsCommandRunnerVisible)
+            {
+                TerminalRow.Height = _savedTerminalHeight;
+                TerminalRow.MinHeight = 80;
+                CommandRunner.EnsureStarted();
+                CommandRunner.FocusInput();
+            }
+            else
+            {
+                _savedTerminalHeight = TerminalRow.Height;
+                TerminalRow.Height = new GridLength(0);
+                TerminalRow.MinHeight = 0;
+            }
+        }
+    }
+
     // --- Compare Files ---
     private void OnCompareFilesRequested()
     {
         var dialog = new Microsoft.Win32.OpenFileDialog
         {
-            Title = "Select first file to compare",
-            Multiselect = false
+            Title = "Select two files to compare (hold Ctrl to multi-select)",
+            Multiselect = true
         };
         if (dialog.ShowDialog() != true) return;
-        var leftPath = dialog.FileName;
 
-        dialog.Title = "Select second file to compare";
-        if (dialog.ShowDialog() != true) return;
-        var rightPath = dialog.FileName;
+        string leftPath, rightPath;
+
+        if (dialog.FileNames.Length >= 2)
+        {
+            leftPath = dialog.FileNames[0];
+            rightPath = dialog.FileNames[1];
+        }
+        else if (dialog.FileNames.Length == 1)
+        {
+            leftPath = dialog.FileNames[0];
+            // Ask for second file
+            var dialog2 = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "Select second file to compare",
+                Multiselect = false,
+                InitialDirectory = System.IO.Path.GetDirectoryName(leftPath)
+            };
+            if (dialog2.ShowDialog() != true) return;
+            rightPath = dialog2.FileName;
+        }
+        else return;
 
         var compareWindow = new CompareFilesWindow
         {

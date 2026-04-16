@@ -137,7 +137,7 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private async Task OpenFileAsync(string? filePath = null)
     {
-        filePath ??= _dialogService.ShowOpenFileDialog();
+        filePath ??= _dialogService.ShowOpenFileDialog(filter: EditorTabViewModel.FileDialogFilters);
         if (string.IsNullOrEmpty(filePath)) return;
 
         // Check if already open
