@@ -18,17 +18,19 @@
         </Grid.RowDefinitions>
 
         <!-- Find bar -->
-        <Border Grid.Row="0" Background="{DynamicResource PanelBackgroundBrush}"
+        <Border x:Name="FindBar" Grid.Row="0" Background="{DynamicResource PanelBackgroundBrush}"
                 BorderBrush="{DynamicResource PanelBorderBrush}"
-                BorderThickness="0,0,0,1" Padding="6,4">
+                BorderThickness="0,0,0,1" Padding="6,4"
+                Visibility="Collapsed">
             <StackPanel Orientation="Horizontal">
                 <TextBox x:Name="FindBox" Width="260" VerticalAlignment="Center"
                          Padding="4,2" KeyDown="FindBox_KeyDown"
-                         ToolTip="Find (Enter = next, Shift+Enter = previous)"/>
+                         ToolTip="Find (Enter = next, Shift+Enter = previous, Esc = close)"/>
                 <CheckBox x:Name="CaseSensitiveBox" Content="Aa" Margin="6,0,0,0"
                           VerticalAlignment="Center" ToolTip="Match case"/>
                 <Button Content="▲" Margin="6,0,0,0" Padding="6,2" Click="FindPrev_Click" ToolTip="Previous (Shift+Enter)"/>
                 <Button Content="▼" Margin="2,0,0,0" Padding="6,2" Click="FindNext_Click" ToolTip="Next (Enter)"/>
+                <Button Content="✕" Margin="6,0,0,0" Padding="6,2" Click="CloseFindBar_Click" ToolTip="Close (Esc)"/>
                 <TextBlock x:Name="FindStatusText" Margin="8,0,0,0" VerticalAlignment="Center"
                            Foreground="{DynamicResource StatusForegroundBrush}"/>
                 <Separator Margin="8,0" Width="1"/>

@@ -44,7 +44,39 @@ public partial class LargeFileViewer : UserControl
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
         DataContextChanged += OnDataContextChanged;
+        PreviewKeyDown += OnPreviewKeyDown;
     }
+
+    private void OnPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.F && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
+        {
+            ToggleFindBar(true);
+            FindBox.Focus();
+            FindBox.SelectAll();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape && FindBar.Visibility == Visibility.Visible)
+        {
+            ToggleFindBar(false);
+            e.Handled = true;
+        }
+        else if (e.Key == Key.G && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
+        {
+            ToggleFindBar(true);
+            GotoBox.Focus();
+            GotoBox.SelectAll();
+            e.Handled = true;
+        }
+    }
+
+    private void ToggleFindBar(bool show)
+    {
+        FindBar.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        if (!show) Focus();
+    }
+
+    private void CloseFindBar_Click(object sender, RoutedEventArgs e) => ToggleFindBar(false);
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
@@ -402,7 +434,7 @@ public partial class LargeFileViewer : UserControl
         return hasIncluder ? included : true;
     }
 
-    private Brush? GetFilterBrushFor(string line)
+    private (Brush bg, Brush fg)? GetFilterBrushesFor(string line)
     {
         if (_filters == null) return null;
         foreach (var f in _filters)
@@ -410,12 +442,29 @@ public partial class LargeFileViewer : UserControl
             if (!f.IsEnabled || f.IsExcluding || string.IsNullOrEmpty(f.Pattern)) continue;
             if (f.Matches(line))
             {
-                try { return new SolidColorBrush((Color)ColorConverter.ConvertFromString(f.BackgroundColor)); }
+                try
+                {
+                    var c = (Color)ColorConverter.ConvertFromString(f.BackgroundColor);
+                    return (new SolidColorBrush(c), ContrastingTextBrush(c));
+                }
                 catch { return null; }
             }
         }
         return null;
     }
+
+    private static Brush ContrastingTextBrush(Color bg)
+    {
+        // WCAG-style relative luminance; pick white text on dark bg and near-black on light bg.
+        double r = SRGBtoLinear(bg.R / 255.0);
+        double g = SRGBtoLinear(bg.G / 255.0);
+        double b = SRGBtoLinear(bg.B / 255.0);
+        double L = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        return L > 0.45 ? Brushes.Black : Brushes.White;
+    }
+
+    private static double SRGBtoLinear(double c) =>
+        c <= 0.03928 ? c / 12.92 : Math.Pow((c + 0.055) / 1.055, 2.4);
 
     private sealed class RenderCanvas : FrameworkElement
     {
@@ -457,17 +506,21 @@ public partial class LargeFileViewer : UserControl
                 string line = _owner._doc.GetLine(physical);
                 double y = i * lineH;
 
-                // Highlight (filter)
-                var hl = _owner.GetFilterBrushFor(line);
-                if (hl != null)
-                    dc.DrawRectangle(hl, null, new Rect(gutterW, y, ActualWidth - gutterW, lineH));
+                // Filter highlight: contrasting text color
+                var brushes = _owner.GetFilterBrushesFor(line);
+                Brush textBrush = fg;
+                if (brushes != null)
+                {
+                    dc.DrawRectangle(brushes.Value.bg, null, new Rect(gutterW, y, ActualWidth - gutterW, lineH));
+                    textBrush = brushes.Value.fg;
+                }
 
                 var numFt = new FormattedText(physical.ToString(), CultureInfo.InvariantCulture,
                     FlowDirection.LeftToRight, typeface, _owner.FontSize, gutterFg, dpi);
                 dc.DrawText(numFt, new Point(gutterW - numFt.Width - 6, y));
 
                 var textFt = new FormattedText(line, CultureInfo.InvariantCulture,
-                    FlowDirection.LeftToRight, typeface, _owner.FontSize, fg, dpi);
+                    FlowDirection.LeftToRight, typeface, _owner.FontSize, textBrush, dpi);
                 dc.DrawText(textFt, new Point(gutterW + 6, y));
             }
         }
