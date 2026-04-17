@@ -10,7 +10,9 @@ using System.Windows.Input;
 using System.Windows.Media;
 using FastEdit.Core.LargeFile;
 using FastEdit.Models;
+using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace FastEdit.Views.Controls;
 
@@ -29,6 +31,8 @@ public partial class LargeFileViewer : UserControl
     private int _currentMatchIndex = -1;
     private CancellationTokenSource? _searchCts;
 
+    private ILineFilterService? _filterService;
+
     // Filter support
     private IReadOnlyList<LineFilter>? _filters;
     private List<long>? _showOnlyLines; // when non-null: showing only matching lines
@@ -38,6 +42,7 @@ public partial class LargeFileViewer : UserControl
     {
         InitializeComponent();
         Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
         DataContextChanged += OnDataContextChanged;
     }
 
@@ -48,8 +53,51 @@ public partial class LargeFileViewer : UserControl
             _canvas = new RenderCanvas(this);
             RenderHost.Child = _canvas;
         }
+
+        // Subscribe to the line-filter service directly (same pattern as EditorHost)
+        if (_filterService == null)
+        {
+            _filterService = App.Services.GetService<ILineFilterService>();
+            if (_filterService != null)
+            {
+                _filterService.FiltersChanged += OnFilterServiceChanged;
+                // Apply current state immediately
+                OnFilterServiceChanged();
+            }
+        }
+
         UpdateMetrics();
         Render();
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        if (_filterService != null)
+        {
+            _filterService.FiltersChanged -= OnFilterServiceChanged;
+            _filterService = null;
+        }
+        _filterScanCts?.Cancel();
+        _searchCts?.Cancel();
+    }
+
+    private void OnFilterServiceChanged()
+    {
+        Dispatcher.Invoke(() =>
+        {
+            if (_filterService == null) return;
+            _filters = _filterService.Filters.ToList();
+
+            if (_filterService.ShowOnlyFilteredLines && _filters.Any(f => f.IsEnabled && !string.IsNullOrEmpty(f.Pattern)))
+            {
+                _ = ShowOnlyFilteredAsync(_filters);
+            }
+            else
+            {
+                if (_showOnlyLines != null) ClearShowOnly();
+                Render();
+            }
+        });
     }
 
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
@@ -241,6 +289,48 @@ public partial class LargeFileViewer : UserControl
         FindStatusText.Text = $"{_currentMatchIndex + 1} of {_searchMatches.Count:N0}";
     }
 
+    public void NavigateToNextFilterMatch()
+    {
+        NavigateFilterMatch(forward: true);
+    }
+
+    public void NavigateToPreviousFilterMatch()
+    {
+        NavigateFilterMatch(forward: false);
+    }
+
+    private void NavigateFilterMatch(bool forward)
+    {
+        if (_doc == null || _filters == null) return;
+        var activeFilters = _filters.Where(f => f.IsEnabled && !string.IsNullOrEmpty(f.Pattern) && !f.IsExcluding).ToList();
+        if (activeFilters.Count == 0) return;
+
+        long total = _doc.TotalLines;
+        long start = _topLine;
+        long end = forward ? total : 1;
+        int step = forward ? 1 : -1;
+
+        // Scan from just after current top line, wrap around if needed.
+        for (int pass = 0; pass < 2; pass++)
+        {
+            long from = pass == 0 ? start + step : (forward ? 1 : total);
+            long to = pass == 0 ? end : start;
+
+            for (long ln = from; forward ? ln <= to : ln >= to; ln += step)
+            {
+                var text = _doc.GetLine(ln);
+                foreach (var f in activeFilters)
+                {
+                    if (f.Matches(text))
+                    {
+                        GoToLine(ln);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     // Filter integration --------------------------------------------------
     public void ApplyFilters(IReadOnlyList<LineFilter>? filters)
     {
@@ -251,36 +341,36 @@ public partial class LargeFileViewer : UserControl
     public async Task ShowOnlyFilteredAsync(IReadOnlyList<LineFilter> filters, IProgress<double>? progress = null)
     {
         if (_doc == null) return;
+        var activeFilters = filters.Where(f => f.IsEnabled && !string.IsNullOrEmpty(f.Pattern)).ToList();
+        if (activeFilters.Count == 0) { ClearShowOnly(); return; }
+
         _filterScanCts?.Cancel();
         _filterScanCts = new CancellationTokenSource();
         var ct = _filterScanCts.Token;
         _filters = filters;
 
-        var result = await Task.Run(() =>
-        {
-            var list = new List<long>();
-            long total = _doc.TotalLines;
-            long lastReport = 0;
-            for (long line = 1; line <= total; line++)
-            {
-                if ((line & 0xFFF) == 0) ct.ThrowIfCancellationRequested();
-                var text = _doc.GetLine(line);
-                if (LineMatchesAnyFilter(text, filters))
-                    list.Add(line);
-                if (line - lastReport >= 50_000)
-                {
-                    progress?.Report((double)line / total);
-                    lastReport = line;
-                }
-            }
-            return list;
-        }, ct);
+        FooterText.Text = "Scanning for filter matches… 0%";
+        var footerProgress = new Progress<double>(p =>
+            FooterText.Text = $"Scanning for filter matches… {p * 100:0}%");
 
-        _showOnlyLines = result;
-        _topLine = 1;
-        UpdateScrollBar();
-        UpdateFooter();
-        Render();
+        try
+        {
+            var result = await _doc.FindMatchingLinesAsync(
+                predicate: line => LineMatchesAnyFilter(line, activeFilters),
+                maxResults: int.MaxValue,
+                onProgress: footerProgress,
+                ct: ct);
+
+            _showOnlyLines = result;
+            _topLine = 1;
+            UpdateScrollBar();
+            UpdateFooter();
+            Render();
+        }
+        catch (OperationCanceledException)
+        {
+            UpdateFooter();
+        }
     }
 
     public void ClearShowOnly()

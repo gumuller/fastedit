@@ -400,4 +400,54 @@ public class LargeFileDocumentTests : IDisposable
         // Sanity: index build well under 60s on any modern dev machine.
         Assert.True(sw1.Elapsed.TotalSeconds < 60, $"index build too slow: {sw1.Elapsed}");
     }
+
+
+    [Fact]
+    public async Task FindMatchingLines_Streams_And_Returns_Correct_Lines()
+    {
+        var content = "apple\nbanana\ncherry apple\ndate\nApple pie";
+        var path = CreateTextFile(content, new UTF8Encoding(false), false);
+        using var doc = new LargeFileDocument(path);
+        await doc.BuildIndexAsync(null, CancellationToken.None);
+
+        var lines = await doc.FindMatchingLinesAsync(
+            l => l.IndexOf("apple", StringComparison.OrdinalIgnoreCase) >= 0,
+            maxResults: 100, null, CancellationToken.None);
+
+        Assert.Equal(new long[] { 1, 3, 5 }, lines);
+    }
+
+    [Fact]
+    public async Task FindMatchingLines_Handles_Line_Across_4MB_Buffer_Boundary()
+    {
+        var sb = new StringBuilder();
+        string filler = new string('f', 4095);
+        for (int i = 0; i < 1250; i++) sb.Append(filler).Append('\n');
+        sb.Append("BOUNDARY\n");
+        var path = CreateTextFile(sb.ToString(), new UTF8Encoding(false), false);
+        using var doc = new LargeFileDocument(path);
+        await doc.BuildIndexAsync(null, CancellationToken.None);
+
+        var lines = await doc.FindMatchingLinesAsync(
+            l => l == "BOUNDARY", 100, null, CancellationToken.None);
+        Assert.Single(lines);
+        Assert.Equal(1251, lines[0]);
+    }
+
+    [Fact]
+    public async Task FindMatchingLines_Is_Fast_On_20MB_File()
+    {
+        var sb = new StringBuilder();
+        for (int i = 1; i <= 200_000; i++) sb.Append($"line-{i} content padding padding padding\n");
+        var path = CreateTextFile(sb.ToString(), new UTF8Encoding(false), false);
+        using var doc = new LargeFileDocument(path);
+        await doc.BuildIndexAsync(null, CancellationToken.None);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var matches = await doc.FindMatchingLinesAsync(
+            l => l.Contains("line-100000"), int.MaxValue, null, CancellationToken.None);
+        sw.Stop();
+        Assert.Single(matches);
+        Assert.True(sw.Elapsed.TotalSeconds < 3, $"bulk scan too slow: {sw.Elapsed.TotalSeconds:0.0}s");
+    }
 }

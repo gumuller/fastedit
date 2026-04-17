@@ -88,28 +88,17 @@ public partial class MainWindow : FluentWindow
         LineFilterPanel.NavigateNextRequested += () =>
         {
             var lfv = FindActiveLargeFileViewer();
-            if (lfv != null) { /* next via internal match nav handled by search bar */ }
+            if (lfv != null) lfv.NavigateToNextFilterMatch();
             else FindActiveEditorHost()?.NavigateToNextFilterMatch();
         };
         LineFilterPanel.NavigatePrevRequested += () =>
         {
             var lfv = FindActiveLargeFileViewer();
-            if (lfv == null) FindActiveEditorHost()?.NavigateToPreviousFilterMatch();
+            if (lfv != null) lfv.NavigateToPreviousFilterMatch();
+            else FindActiveEditorHost()?.NavigateToPreviousFilterMatch();
         };
-        LineFilterPanel.FiltersUpdated += () =>
-        {
-            var lfv = FindActiveLargeFileViewer();
-            if (lfv != null)
-            {
-                var svc = App.Services.GetService(typeof(Services.Interfaces.ILineFilterService))
-                    as Services.Interfaces.ILineFilterService;
-                lfv.ApplyFilters(svc?.Filters.ToList());
-                if (svc?.ShowOnlyFilteredLines == true)
-                    _ = lfv.ShowOnlyFilteredAsync(svc.Filters.ToList());
-                else
-                    lfv.ClearShowOnly();
-            }
-        };
+        // LargeFileViewer subscribes to the filter service itself via App.Services;
+        // no need for MainWindow to re-dispatch FiltersUpdated.
 
         BuildCommandRegistry();
     }

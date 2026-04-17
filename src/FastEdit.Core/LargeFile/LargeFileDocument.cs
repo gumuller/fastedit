@@ -311,6 +311,115 @@ public sealed class LargeFileDocument : IDisposable
 
     public readonly record struct SearchMatch(long LineNumber, int ColumnInLine);
 
+    public async Task<List<long>> FindMatchingLinesAsync(
+        Func<string, bool> predicate,
+        int maxResults,
+        IProgress<double>? onProgress,
+        CancellationToken ct)
+    {
+        return await Task.Run(() => FindMatchingLinesSync(predicate, maxResults, onProgress, ct), ct)
+            .ConfigureAwait(false);
+    }
+
+    private List<long> FindMatchingLinesSync(Func<string, bool> predicate, int maxResults,
+        IProgress<double>? onProgress, CancellationToken ct)
+    {
+        var results = new List<long>();
+        if (!HasBuiltIndex || FileSize == 0 || _accessor == null) return results;
+
+        bool isUtf16Le = Encoding.Equals(Encoding.Unicode);
+        bool isUtf16Be = Encoding.Equals(Encoding.BigEndianUnicode);
+        int stride = (isUtf16Le || isUtf16Be) ? 2 : 1;
+
+        const int BufSize = 4 * 1024 * 1024;
+        var buf = new byte[BufSize];
+
+        long pos = BomLength;
+        long currentLine = 1;
+        long lastProgressReport = 0;
+
+        // Carry holds the tail of the previous buffer for a line spanning the boundary.
+        var carry = new List<byte>(4096);
+
+        while (pos < FileSize)
+        {
+            ct.ThrowIfCancellationRequested();
+            int toRead = (int)Math.Min(BufSize, FileSize - pos);
+            _accessor.ReadArray(pos, buf, 0, toRead);
+
+            int lineStart = 0;
+            for (int i = 0; i < toRead; i += stride)
+            {
+                bool isNewline;
+                if (isUtf16Le) isNewline = i + 1 < toRead && buf[i] == 0x0A && buf[i + 1] == 0x00;
+                else if (isUtf16Be) isNewline = i + 1 < toRead && buf[i] == 0x00 && buf[i + 1] == 0x0A;
+                else isNewline = buf[i] == 0x0A;
+
+                if (isNewline)
+                {
+                    int byteLen = i - lineStart;
+                    string line;
+                    if (carry.Count > 0)
+                    {
+                        carry.AddRange(new ArraySegment<byte>(buf, lineStart, byteLen));
+                        line = DecodeLine(carry.ToArray(), 0, carry.Count, stride, isUtf16Le, isUtf16Be);
+                        carry.Clear();
+                    }
+                    else
+                    {
+                        line = DecodeLine(buf, lineStart, byteLen, stride, isUtf16Le, isUtf16Be);
+                    }
+
+                    if (predicate(line))
+                    {
+                        results.Add(currentLine);
+                        if (results.Count >= maxResults) return results;
+                    }
+
+                    currentLine++;
+                    lineStart = i + stride;
+                }
+            }
+
+            // Carry over the tail (partial line at end of buffer).
+            if (lineStart < toRead)
+            {
+                int tailLen = toRead - lineStart;
+                // Cap carry to avoid pathological memory use on a single giant line.
+                if (carry.Count + tailLen <= 4 * 1024 * 1024)
+                    carry.AddRange(new ArraySegment<byte>(buf, lineStart, tailLen));
+            }
+
+            pos += toRead;
+
+            if (pos - lastProgressReport >= 16 * 1024 * 1024)
+            {
+                onProgress?.Report((double)pos / FileSize);
+                lastProgressReport = pos;
+            }
+        }
+
+        // Final line without trailing newline.
+        if (carry.Count > 0)
+        {
+            string line = DecodeLine(carry.ToArray(), 0, carry.Count, stride, isUtf16Le, isUtf16Be);
+            if (predicate(line))
+                results.Add(currentLine);
+        }
+
+        onProgress?.Report(1.0);
+        return results;
+    }
+
+    private string DecodeLine(byte[] buf, int offset, int length, int stride, bool isUtf16Le, bool isUtf16Be)
+    {
+        // Strip trailing CR for LF-terminated single-byte lines.
+        if (!isUtf16Le && !isUtf16Be && length > 0 && buf[offset + length - 1] == 0x0D) length--;
+        if (length <= 0) return string.Empty;
+        return Encoding.GetString(buf, offset, length);
+    }
+
+
     public async Task<List<SearchMatch>> SearchAsync(
         string needle,
         bool caseSensitive,
