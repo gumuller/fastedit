@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
@@ -83,6 +84,31 @@ public partial class MainWindow : FluentWindow
         {
             if (_viewModel != null) _viewModel.IsFilterPanelVisible = false;
             LineFilterPanel.Visibility = Visibility.Collapsed;
+        };
+        LineFilterPanel.NavigateNextRequested += () =>
+        {
+            var lfv = FindActiveLargeFileViewer();
+            if (lfv != null) { /* next via internal match nav handled by search bar */ }
+            else FindActiveEditorHost()?.NavigateToNextFilterMatch();
+        };
+        LineFilterPanel.NavigatePrevRequested += () =>
+        {
+            var lfv = FindActiveLargeFileViewer();
+            if (lfv == null) FindActiveEditorHost()?.NavigateToPreviousFilterMatch();
+        };
+        LineFilterPanel.FiltersUpdated += () =>
+        {
+            var lfv = FindActiveLargeFileViewer();
+            if (lfv != null)
+            {
+                var svc = App.Services.GetService(typeof(Services.Interfaces.ILineFilterService))
+                    as Services.Interfaces.ILineFilterService;
+                lfv.ApplyFilters(svc?.Filters.ToList());
+                if (svc?.ShowOnlyFilteredLines == true)
+                    _ = lfv.ShowOnlyFilteredAsync(svc.Filters.ToList());
+                else
+                    lfv.ClearShowOnly();
+            }
         };
 
         BuildCommandRegistry();
@@ -707,6 +733,11 @@ public partial class MainWindow : FluentWindow
     private EditorHost? FindActiveEditorHost()
     {
         return FindVisualChild<EditorHost>(this);
+    }
+
+    private LargeFileViewer? FindActiveLargeFileViewer()
+    {
+        return FindVisualChild<LargeFileViewer>(this);
     }
 
     private static T? FindVisualChild<T>(DependencyObject parent) where T : UIElement

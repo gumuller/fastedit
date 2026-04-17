@@ -14,6 +14,8 @@ public partial class FilterPanel : UserControl
 
     public event Action? CloseRequested;
     public event Action? FiltersUpdated;
+    public event Action? NavigateNextRequested;
+    public event Action? NavigatePrevRequested;
 
     public FilterPanel()
     {
@@ -145,5 +147,15 @@ public partial class FilterPanel : UserControl
     private void Close_Click(object sender, RoutedEventArgs e)
     {
         CloseRequested?.Invoke();
+    }
+
+    private void NextMatch_Click(object sender, RoutedEventArgs e)
+    {
+        NavigateNextRequested?.Invoke();
+    }
+
+    private void PrevMatch_Click(object sender, RoutedEventArgs e)
+    {
+        NavigatePrevRequested?.Invoke();
     }
 }

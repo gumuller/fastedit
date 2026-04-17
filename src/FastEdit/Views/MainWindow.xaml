@@ -418,11 +418,28 @@
                 <!-- Primary Editor -->
                 <ContentControl Grid.Column="0" Content="{Binding SelectedTab}"
                                 Visibility="{Binding SelectedTab, Converter={StaticResource NullToCollapsedConverter}}">
-                    <ContentControl.ContentTemplate>
-                        <DataTemplate>
-                            <controls:EditorHost DataContext="{Binding}"/>
-                        </DataTemplate>
-                    </ContentControl.ContentTemplate>
+                    <ContentControl.Style>
+                        <Style TargetType="ContentControl">
+                            <Setter Property="ContentTemplate">
+                                <Setter.Value>
+                                    <DataTemplate>
+                                        <controls:EditorHost DataContext="{Binding}"/>
+                                    </DataTemplate>
+                                </Setter.Value>
+                            </Setter>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding SelectedTab.IsLargeFileMode}" Value="True">
+                                    <Setter Property="ContentTemplate">
+                                        <Setter.Value>
+                                            <DataTemplate>
+                                                <controls:LargeFileViewer DataContext="{Binding}"/>
+                                            </DataTemplate>
+                                        </Setter.Value>
+                                    </Setter>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ContentControl.Style>
                 </ContentControl>
 
                 <!-- Side-by-Side Splitter -->

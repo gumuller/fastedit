@@ -1,0 +1,68 @@
+<UserControl x:Class="FastEdit.Views.Controls.LargeFileViewer"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:FastEdit.Views.Controls"
+             mc:Ignorable="d"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             Background="{DynamicResource EditorBackgroundBrush}"
+             Foreground="{DynamicResource EditorForegroundBrush}"
+             FontFamily="Consolas"
+             FontSize="13"
+             Focusable="True">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Find bar -->
+        <Border Grid.Row="0" Background="{DynamicResource PanelBackgroundBrush}"
+                BorderBrush="{DynamicResource PanelBorderBrush}"
+                BorderThickness="0,0,0,1" Padding="6,4">
+            <StackPanel Orientation="Horizontal">
+                <TextBox x:Name="FindBox" Width="260" VerticalAlignment="Center"
+                         Padding="4,2" KeyDown="FindBox_KeyDown"
+                         ToolTip="Find (Enter = next, Shift+Enter = previous)"/>
+                <CheckBox x:Name="CaseSensitiveBox" Content="Aa" Margin="6,0,0,0"
+                          VerticalAlignment="Center" ToolTip="Match case"/>
+                <Button Content="▲" Margin="6,0,0,0" Padding="6,2" Click="FindPrev_Click" ToolTip="Previous (Shift+Enter)"/>
+                <Button Content="▼" Margin="2,0,0,0" Padding="6,2" Click="FindNext_Click" ToolTip="Next (Enter)"/>
+                <TextBlock x:Name="FindStatusText" Margin="8,0,0,0" VerticalAlignment="Center"
+                           Foreground="{DynamicResource StatusForegroundBrush}"/>
+                <Separator Margin="8,0" Width="1"/>
+                <TextBlock Text="Go to line:" VerticalAlignment="Center" Margin="4,0"/>
+                <TextBox x:Name="GotoBox" Width="80" Padding="4,2" VerticalAlignment="Center" KeyDown="GotoBox_KeyDown"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Viewer + scrollbar -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <Border x:Name="RenderHost" Grid.Column="0"
+                    Background="{DynamicResource EditorBackgroundBrush}"
+                    SizeChanged="RenderHost_SizeChanged"
+                    MouseWheel="RenderHost_MouseWheel"
+                    Focusable="True"
+                    ClipToBounds="True"/>
+
+            <ScrollBar x:Name="VScroll" Grid.Column="1" Orientation="Vertical"
+                       Width="16" Minimum="0" Maximum="100" Value="0"
+                       SmallChange="1" LargeChange="10"
+                       Scroll="VScroll_Scroll"/>
+        </Grid>
+
+        <!-- Footer status -->
+        <Border Grid.Row="2" Background="{DynamicResource StatusBarBackgroundBrush}"
+                BorderBrush="{DynamicResource PanelBorderBrush}"
+                BorderThickness="0,1,0,0" Padding="8,3">
+            <TextBlock x:Name="FooterText"
+                       Foreground="{DynamicResource StatusForegroundBrush}"/>
+        </Border>
+    </Grid>
+</UserControl>

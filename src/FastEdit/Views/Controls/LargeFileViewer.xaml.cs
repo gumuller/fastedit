@@ -1,0 +1,390 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
+using FastEdit.Core.LargeFile;
+using FastEdit.Models;
+using FastEdit.ViewModels;
+
+namespace FastEdit.Views.Controls;
+
+/// <summary>
+/// Viewer control for multi-GB files backed by LargeFileDocument.
+/// Uses custom rendering on a DrawingVisual to avoid ListView virtualization limits.
+/// </summary>
+public partial class LargeFileViewer : UserControl
+{
+    private LargeFileDocument? _doc;
+    private RenderCanvas? _canvas;
+    private long _topLine = 1;
+    private double _lineHeight = 16;
+    private int _visibleLineCount = 10;
+    private List<LargeFileDocument.SearchMatch>? _searchMatches;
+    private int _currentMatchIndex = -1;
+    private CancellationTokenSource? _searchCts;
+
+    // Filter support
+    private IReadOnlyList<LineFilter>? _filters;
+    private List<long>? _showOnlyLines; // when non-null: showing only matching lines
+    private CancellationTokenSource? _filterScanCts;
+
+    public LargeFileViewer()
+    {
+        InitializeComponent();
+        Loaded += OnLoaded;
+        DataContextChanged += OnDataContextChanged;
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        if (_canvas == null)
+        {
+            _canvas = new RenderCanvas(this);
+            RenderHost.Child = _canvas;
+        }
+        UpdateMetrics();
+        Render();
+    }
+
+    private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
+    {
+        if (DataContext is EditorTabViewModel tab && tab.LargeFileDoc != null)
+        {
+            _doc = tab.LargeFileDoc;
+            _topLine = 1;
+            UpdateScrollBar();
+            UpdateFooter();
+            Render();
+        }
+    }
+
+    private void UpdateMetrics()
+    {
+        var typeface = new Typeface(FontFamily, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
+        var ft = new FormattedText("Mg", CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
+            typeface, FontSize, Brushes.Black, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+        _lineHeight = Math.Ceiling(ft.Height);
+        _visibleLineCount = Math.Max(1, (int)(RenderHost.ActualHeight / _lineHeight));
+    }
+
+    private void UpdateScrollBar()
+    {
+        if (_doc == null) { VScroll.Maximum = 0; return; }
+        long total = EffectiveLineCount();
+        VScroll.Minimum = 1;
+        VScroll.Maximum = Math.Max(1, total);
+        VScroll.ViewportSize = _visibleLineCount;
+        VScroll.LargeChange = Math.Max(1, _visibleLineCount - 1);
+        VScroll.Value = _topLine;
+    }
+
+    private long EffectiveLineCount() =>
+        _showOnlyLines != null ? _showOnlyLines.Count : (_doc?.TotalLines ?? 0);
+
+    private long ResolvePhysicalLine(long logicalIndex1Based)
+    {
+        if (_showOnlyLines == null) return logicalIndex1Based;
+        long idx = logicalIndex1Based - 1;
+        if (idx < 0 || idx >= _showOnlyLines.Count) return 0;
+        return _showOnlyLines[(int)idx];
+    }
+
+    private void UpdateFooter()
+    {
+        if (_doc == null) { FooterText.Text = ""; return; }
+        string mode = _showOnlyLines != null ? $"Filtered: {_showOnlyLines.Count:N0} / " : "";
+        FooterText.Text = $"{mode}{_doc.TotalLines:N0} lines • {FormatBytes(_doc.FileSize)} • {_doc.EncodingDisplayName} • Read-only (large file viewer)";
+    }
+
+    private static string FormatBytes(long b)
+    {
+        string[] u = { "B", "KB", "MB", "GB", "TB" };
+        double v = b; int i = 0;
+        while (v >= 1024 && i < u.Length - 1) { v /= 1024; i++; }
+        return $"{v:0.##} {u[i]}";
+    }
+
+    internal void Render()
+    {
+        _canvas?.InvalidateVisual();
+    }
+
+    private void RenderHost_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        UpdateMetrics();
+        UpdateScrollBar();
+        Render();
+    }
+
+    private void RenderHost_MouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        int delta = -e.Delta / 120 * 3;
+        ScrollBy(delta);
+        e.Handled = true;
+    }
+
+    private void VScroll_Scroll(object sender, System.Windows.Controls.Primitives.ScrollEventArgs e)
+    {
+        _topLine = (long)Math.Round(VScroll.Value);
+        ClampTopLine();
+        Render();
+    }
+
+    private void ScrollBy(int deltaLines)
+    {
+        _topLine += deltaLines;
+        ClampTopLine();
+        VScroll.Value = _topLine;
+        Render();
+    }
+
+    private void ClampTopLine()
+    {
+        long total = EffectiveLineCount();
+        if (total == 0) { _topLine = 1; return; }
+        long max = Math.Max(1, total - _visibleLineCount + 1);
+        if (_topLine > max) _topLine = max;
+        if (_topLine < 1) _topLine = 1;
+    }
+
+    private void GotoBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter && long.TryParse(GotoBox.Text, out var line))
+        {
+            GoToLine(line);
+            e.Handled = true;
+        }
+    }
+
+    public void GoToLine(long lineNumber)
+    {
+        if (_doc == null) return;
+        lineNumber = Math.Max(1, Math.Min(_doc.TotalLines, lineNumber));
+        if (_showOnlyLines != null)
+        {
+            // find index in filtered list
+            int idx = _showOnlyLines.BinarySearch(lineNumber);
+            if (idx < 0) idx = ~idx;
+            _topLine = Math.Max(1, idx + 1);
+        }
+        else
+        {
+            _topLine = lineNumber;
+        }
+        ClampTopLine();
+        UpdateScrollBar();
+        Render();
+    }
+
+    private async void FindBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter)
+        {
+            bool shift = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
+            if (_searchMatches == null || _searchMatches.Count == 0)
+                await RunSearchAsync();
+            if (_searchMatches != null && _searchMatches.Count > 0)
+            {
+                if (shift) FindPrev_Click(sender, e); else FindNext_Click(sender, e);
+            }
+            e.Handled = true;
+        }
+        else if (e.Key != Key.LeftShift && e.Key != Key.RightShift)
+        {
+            _searchMatches = null; // invalidate on text change
+            _currentMatchIndex = -1;
+            FindStatusText.Text = "";
+        }
+    }
+
+    private async Task RunSearchAsync()
+    {
+        if (_doc == null || string.IsNullOrEmpty(FindBox.Text)) return;
+        _searchCts?.Cancel();
+        _searchCts = new CancellationTokenSource();
+        FindStatusText.Text = "Searching…";
+        try
+        {
+            _searchMatches = await _doc.SearchAsync(
+                FindBox.Text,
+                CaseSensitiveBox.IsChecked == true,
+                maxResults: 100_000,
+                onProgress: null,
+                ct: _searchCts.Token);
+            _currentMatchIndex = -1;
+            FindStatusText.Text = $"{_searchMatches.Count:N0} matches";
+        }
+        catch (OperationCanceledException) { FindStatusText.Text = ""; }
+    }
+
+    private async void FindNext_Click(object sender, RoutedEventArgs e)
+    {
+        if (_searchMatches == null) await RunSearchAsync();
+        if (_searchMatches == null || _searchMatches.Count == 0) return;
+        _currentMatchIndex = (_currentMatchIndex + 1) % _searchMatches.Count;
+        GoToLine(_searchMatches[_currentMatchIndex].LineNumber);
+        FindStatusText.Text = $"{_currentMatchIndex + 1} of {_searchMatches.Count:N0}";
+    }
+
+    private async void FindPrev_Click(object sender, RoutedEventArgs e)
+    {
+        if (_searchMatches == null) await RunSearchAsync();
+        if (_searchMatches == null || _searchMatches.Count == 0) return;
+        _currentMatchIndex = (_currentMatchIndex - 1 + _searchMatches.Count) % _searchMatches.Count;
+        GoToLine(_searchMatches[_currentMatchIndex].LineNumber);
+        FindStatusText.Text = $"{_currentMatchIndex + 1} of {_searchMatches.Count:N0}";
+    }
+
+    // Filter integration --------------------------------------------------
+    public void ApplyFilters(IReadOnlyList<LineFilter>? filters)
+    {
+        _filters = filters;
+        Render();
+    }
+
+    public async Task ShowOnlyFilteredAsync(IReadOnlyList<LineFilter> filters, IProgress<double>? progress = null)
+    {
+        if (_doc == null) return;
+        _filterScanCts?.Cancel();
+        _filterScanCts = new CancellationTokenSource();
+        var ct = _filterScanCts.Token;
+        _filters = filters;
+
+        var result = await Task.Run(() =>
+        {
+            var list = new List<long>();
+            long total = _doc.TotalLines;
+            long lastReport = 0;
+            for (long line = 1; line <= total; line++)
+            {
+                if ((line & 0xFFF) == 0) ct.ThrowIfCancellationRequested();
+                var text = _doc.GetLine(line);
+                if (LineMatchesAnyFilter(text, filters))
+                    list.Add(line);
+                if (line - lastReport >= 50_000)
+                {
+                    progress?.Report((double)line / total);
+                    lastReport = line;
+                }
+            }
+            return list;
+        }, ct);
+
+        _showOnlyLines = result;
+        _topLine = 1;
+        UpdateScrollBar();
+        UpdateFooter();
+        Render();
+    }
+
+    public void ClearShowOnly()
+    {
+        _showOnlyLines = null;
+        UpdateScrollBar();
+        UpdateFooter();
+        Render();
+    }
+
+    private static bool LineMatchesAnyFilter(string line, IReadOnlyList<LineFilter> filters)
+    {
+        bool included = false;
+        bool hasIncluder = false;
+        foreach (var f in filters)
+        {
+            if (!f.IsEnabled || string.IsNullOrEmpty(f.Pattern)) continue;
+            bool m = f.Matches(line);
+            if (f.IsExcluding)
+            {
+                if (m) return false;
+            }
+            else
+            {
+                hasIncluder = true;
+                if (m) included = true;
+            }
+        }
+        return hasIncluder ? included : true;
+    }
+
+    private Brush? GetFilterBrushFor(string line)
+    {
+        if (_filters == null) return null;
+        foreach (var f in _filters)
+        {
+            if (!f.IsEnabled || f.IsExcluding || string.IsNullOrEmpty(f.Pattern)) continue;
+            if (f.Matches(line))
+            {
+                try { return new SolidColorBrush((Color)ColorConverter.ConvertFromString(f.BackgroundColor)); }
+                catch { return null; }
+            }
+        }
+        return null;
+    }
+
+    private sealed class RenderCanvas : FrameworkElement
+    {
+        private readonly LargeFileViewer _owner;
+        public RenderCanvas(LargeFileViewer owner) { _owner = owner; }
+
+        protected override void OnRender(DrawingContext dc)
+        {
+            var bg = TryGetBrush("EditorBackgroundBrush", Brushes.White);
+            var fg = TryGetBrush("EditorForegroundBrush", Brushes.Black);
+            var gutter = TryGetBrush("PanelBackgroundBrush", Brushes.LightGray);
+            var gutterFg = TryGetBrush("LineNumberForegroundBrush", Brushes.Gray);
+
+            dc.DrawRectangle(bg, null, new Rect(0, 0, ActualWidth, ActualHeight));
+
+            if (_owner._doc == null) return;
+
+            var typeface = new Typeface(_owner.FontFamily, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
+            double dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
+            double lineH = _owner._lineHeight;
+            long totalEff = _owner.EffectiveLineCount();
+            long totalPhys = _owner._doc.TotalLines;
+
+            // Gutter width based on max physical line number
+            var maxFt = new FormattedText(totalPhys.ToString(), CultureInfo.InvariantCulture,
+                FlowDirection.LeftToRight, typeface, _owner.FontSize, gutterFg, dpi);
+            double gutterW = maxFt.Width + 16;
+
+            dc.DrawRectangle(gutter, null, new Rect(0, 0, gutterW, ActualHeight));
+
+            int visible = (int)Math.Ceiling(ActualHeight / lineH) + 1;
+            for (int i = 0; i < visible; i++)
+            {
+                long logical = _owner._topLine + i;
+                if (logical > totalEff) break;
+                long physical = _owner.ResolvePhysicalLine(logical);
+                if (physical == 0) break;
+
+                string line = _owner._doc.GetLine(physical);
+                double y = i * lineH;
+
+                // Highlight (filter)
+                var hl = _owner.GetFilterBrushFor(line);
+                if (hl != null)
+                    dc.DrawRectangle(hl, null, new Rect(gutterW, y, ActualWidth - gutterW, lineH));
+
+                var numFt = new FormattedText(physical.ToString(), CultureInfo.InvariantCulture,
+                    FlowDirection.LeftToRight, typeface, _owner.FontSize, gutterFg, dpi);
+                dc.DrawText(numFt, new Point(gutterW - numFt.Width - 6, y));
+
+                var textFt = new FormattedText(line, CultureInfo.InvariantCulture,
+                    FlowDirection.LeftToRight, typeface, _owner.FontSize, fg, dpi);
+                dc.DrawText(textFt, new Point(gutterW + 6, y));
+            }
+        }
+
+        private Brush TryGetBrush(string key, Brush fallback)
+        {
+            try { return (Brush)(_owner.TryFindResource(key) ?? fallback); } catch { return fallback; }
+        }
+    }
+}

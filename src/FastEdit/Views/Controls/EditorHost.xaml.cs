@@ -792,6 +792,10 @@ public partial class EditorHost : UserControl
             if (_foldingManager == null)
                 _foldingManager = FoldingHelper.Install(TextEditor, _currentVm?.SyntaxLanguage ?? "Text");
 
+            // If no language strategy exists (e.g. plain text), install a bare FoldingManager for filter folds
+            if (_foldingManager == null)
+                _foldingManager = ICSharpCode.AvalonEdit.Folding.FoldingManager.Install(TextEditor.TextArea);
+
             var doc = TextEditor.Document;
             if (doc == null) return;
 
@@ -866,6 +870,45 @@ public partial class EditorHost : UserControl
         int matched = _filterCache.Count(kv => kv.Value.IsVisible);
         int total = TextEditor.Document?.LineCount ?? 0;
         filterPanel.UpdateMatchCount(matched, total);
+    }
+
+    /// <summary>Jump to the next line matching any active filter (wraps around).</summary>
+    public void NavigateToNextFilterMatch() => NavigateFilterMatch(forward: true);
+
+    /// <summary>Jump to the previous line matching any active filter (wraps around).</summary>
+    public void NavigateToPreviousFilterMatch() => NavigateFilterMatch(forward: false);
+
+    private void NavigateFilterMatch(bool forward)
+    {
+        if (_filterCache.Count == 0 || TextEditor.Document == null) return;
+
+        var matchingLines = _filterCache
+            .Where(kv => kv.Value.IsVisible)
+            .Select(kv => kv.Key)
+            .OrderBy(n => n)
+            .ToList();
+
+        if (matchingLines.Count == 0) return;
+
+        int currentLine = TextEditor.TextArea.Caret.Line;
+        int target;
+
+        if (forward)
+        {
+            target = matchingLines.FirstOrDefault(n => n > currentLine);
+            if (target == 0) target = matchingLines[0]; // wrap to start
+        }
+        else
+        {
+            target = matchingLines.LastOrDefault(n => n < currentLine);
+            if (target == 0) target = matchingLines[^1]; // wrap to end
+        }
+
+        var line = TextEditor.Document.GetLineByNumber(target);
+        TextEditor.TextArea.Caret.Offset = line.Offset;
+        TextEditor.TextArea.Caret.BringCaretToView();
+        TextEditor.ScrollToLine(target);
+        TextEditor.Focus();
     }
 
     // --- Bracket Matching ---

@@ -1,19 +1,25 @@
 using System.IO;
 using System.Text;
+using System.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using FastEdit.Core.FileAnalysis;
 using FastEdit.Core.HexEngine;
+using FastEdit.Core.LargeFile;
 using FastEdit.Services.Interfaces;
 
 namespace FastEdit.ViewModels;
 
 public partial class EditorTabViewModel : ObservableObject, IDisposable
 {
+    /// <summary>Files at or above this size open in LargeText mode (MMF-backed read-only viewer).</summary>
+    public const long LargeFileThresholdBytes = 100L * 1024 * 1024;
+
     private readonly IFileService _fileService;
     private readonly IFileSystemService _fileSystemService;
     private readonly IDialogService _dialogService;
     private VirtualizedByteBuffer? _byteBuffer;
+    private LargeFileDocument? _largeFileDoc;
     private bool _disposed;
 
     private Encoding _fileEncoding = new UTF8Encoding(false);
@@ -47,6 +53,18 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private bool _isBinaryMode;
+
+    [ObservableProperty]
+    private bool _isLargeFileMode;
+
+    [ObservableProperty]
+    private FileOpenMode _mode = FileOpenMode.Text;
+
+    partial void OnModeChanged(FileOpenMode value)
+    {
+        IsBinaryMode = value == FileOpenMode.Binary;
+        IsLargeFileMode = value == FileOpenMode.LargeText;
+    }
 
     [ObservableProperty]
     private bool _isModified;
@@ -87,6 +105,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     private double _scrollOffset;
 
     public VirtualizedByteBuffer? ByteBuffer => _byteBuffer;
+    public LargeFileDocument? LargeFileDoc => _largeFileDoc;
 
     public Encoding FileEncoding => _fileEncoding;
     public bool HasBom => _hasBom;
@@ -110,10 +129,9 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         var detector = new BinaryDetector();
         var analysis = await detector.AnalyzeFileAsync(filePath);
 
-        IsBinaryMode = analysis.IsBinary;
-
-        if (IsBinaryMode)
+        if (analysis.IsBinary)
         {
+            Mode = FileOpenMode.Binary;
             Encoding = analysis.DetectedEncoding ?? "Binary";
             _byteBuffer = new VirtualizedByteBuffer(filePath);
             _byteBuffer.ModificationsChanged += (s, e) =>
@@ -121,8 +139,17 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
                 IsModified = _byteBuffer.HasModifications;
             };
         }
+        else if (FileSize >= LargeFileThresholdBytes)
+        {
+            Mode = FileOpenMode.LargeText;
+            _largeFileDoc = new LargeFileDocument(filePath);
+            Encoding = _largeFileDoc.EncodingDisplayName;
+            SyntaxLanguage = string.Empty; // no highlighting for huge files
+            await _largeFileDoc.BuildIndexAsync(null, CancellationToken.None);
+        }
         else
         {
+            Mode = FileOpenMode.Text;
             var result = await _fileService.ReadFileWithEncodingAsync(filePath);
             Content = result.Content;
             _fileEncoding = result.Encoding;

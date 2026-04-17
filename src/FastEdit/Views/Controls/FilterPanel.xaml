@@ -99,6 +99,14 @@
                         FontSize="11" Background="Transparent" Cursor="Hand"/>
                 <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}"
                            Margin="4,2"/>
+                <Button Content="▲ Prev" Click="PrevMatch_Click" Padding="8,3" Margin="0,0,4,0"
+                        FontSize="11" Background="Transparent" Cursor="Hand"
+                        ToolTip="Jump to previous matching line (Shift+F3)"/>
+                <Button Content="▼ Next" Click="NextMatch_Click" Padding="8,3" Margin="0,0,4,0"
+                        FontSize="11" Background="Transparent" Cursor="Hand"
+                        ToolTip="Jump to next matching line (F3)"/>
+                <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}"
+                           Margin="4,2"/>
                 <ToggleButton x:Name="ShowOnlyToggle" Content="👁 Show Only Filtered"
                               Click="ShowOnlyToggle_Click" Padding="8,3" Margin="0,0,4,0"
                               FontSize="11" Background="Transparent" Cursor="Hand"/>
