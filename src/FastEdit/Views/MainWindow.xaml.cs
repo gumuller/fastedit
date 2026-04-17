@@ -72,6 +72,8 @@ public partial class MainWindow : FluentWindow
         _viewModel.CompareFilesRequested += OnCompareFilesRequested;
         _viewModel.CommandPaletteRequested += OnCommandPaletteRequested;
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
+        _viewModel.FindRequested += OnFindRequested;
+        _viewModel.ReplaceRequested += OnReplaceRequested;
 
         // Setup Find in Files
         _findInFilesVm = App.Services.GetRequiredService<FindInFilesViewModel>();
@@ -727,6 +729,19 @@ public partial class MainWindow : FluentWindow
     private LargeFileViewer? FindActiveLargeFileViewer()
     {
         return FindVisualChild<LargeFileViewer>(this);
+    }
+
+    private void OnFindRequested()
+    {
+        // EditorHost subscribes to FindRequested on its own for normal text mode.
+        // We only need to handle the large-file case here.
+        var lfv = FindActiveLargeFileViewer();
+        if (lfv != null) lfv.ShowFindBar(focusSearch: true);
+    }
+
+    private void OnReplaceRequested()
+    {
+        // LargeFileViewer is read-only; nothing to do. EditorHost handles its own case.
     }
 
     private static T? FindVisualChild<T>(DependencyObject parent) where T : UIElement

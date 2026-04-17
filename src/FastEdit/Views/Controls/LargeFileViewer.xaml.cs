@@ -47,6 +47,16 @@ public partial class LargeFileViewer : UserControl
         PreviewKeyDown += OnPreviewKeyDown;
     }
 
+    public void ShowFindBar(bool focusSearch)
+    {
+        ToggleFindBar(true);
+        if (focusSearch)
+        {
+            FindBox.Focus();
+            FindBox.SelectAll();
+        }
+    }
+
     private void OnPreviewKeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key == Key.F && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
