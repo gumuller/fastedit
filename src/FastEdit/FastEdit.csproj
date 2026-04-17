@@ -7,8 +7,48 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <ApplicationIcon>fastedit.ico</ApplicationIcon>
-    <Version>1.1.0</Version>
+    <!-- Version is Major.Minor.Patch; the build number (4th component) is
+         auto-incremented on every build by the IncrementBuildCounter target. -->
+    <VersionPrefix>1.1.0</VersionPrefix>
+    <BuildCounterFile>$(MSBuildThisFileDirectory)..\..\build.counter</BuildCounterFile>
   </PropertyGroup>
+
+  <!-- Read & increment the build counter before the assembly version is baked in.
+       WPF's XAML compiler creates a temporary *_wpftmp.csproj that also runs this
+       target; we only want to bump the counter once per real build, so skip the tmp. -->
+  <Target Name="IncrementBuildCounter"
+          BeforeTargets="GetAssemblyVersion;GenerateAssemblyInfo;CoreCompile"
+          Condition="'$(SkipBuildCounterIncrement)' != 'true' And !$(MSBuildProjectFile.Contains('_wpftmp'))">
+    <ReadLinesFromFile File="$(BuildCounterFile)" Condition="Exists('$(BuildCounterFile)')">
+      <Output TaskParameter="Lines" PropertyName="_CurrentBuildCounter" />
+    </ReadLinesFromFile>
+    <PropertyGroup>
+      <_CurrentBuildCounter Condition="'$(_CurrentBuildCounter)' == ''">0</_CurrentBuildCounter>
+      <_NewBuildCounter>$([MSBuild]::Add($(_CurrentBuildCounter), 1))</_NewBuildCounter>
+      <Version>$(VersionPrefix).$(_NewBuildCounter)</Version>
+      <AssemblyVersion>$(VersionPrefix).$(_NewBuildCounter)</AssemblyVersion>
+      <FileVersion>$(VersionPrefix).$(_NewBuildCounter)</FileVersion>
+      <InformationalVersion>$(VersionPrefix).$(_NewBuildCounter)</InformationalVersion>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(BuildCounterFile)" Lines="$(_NewBuildCounter)" Overwrite="true" />
+    <Message Importance="high" Text="Build #$(_NewBuildCounter) — version $(Version)" />
+  </Target>
+
+  <!-- For the WPF XAML temp project, propagate the same version from the counter file
+       without incrementing it, so the compiled assembly reports the correct version. -->
+  <Target Name="ReadBuildCounterForWpfTmp"
+          BeforeTargets="GetAssemblyVersion;GenerateAssemblyInfo;CoreCompile"
+          Condition="$(MSBuildProjectFile.Contains('_wpftmp'))">
+    <ReadLinesFromFile File="$(BuildCounterFile)" Condition="Exists('$(BuildCounterFile)')">
+      <Output TaskParameter="Lines" PropertyName="_CurrentBuildCounter" />
+    </ReadLinesFromFile>
+    <PropertyGroup Condition="'$(_CurrentBuildCounter)' != ''">
+      <Version>$(VersionPrefix).$(_CurrentBuildCounter)</Version>
+      <AssemblyVersion>$(VersionPrefix).$(_CurrentBuildCounter)</AssemblyVersion>
+      <FileVersion>$(VersionPrefix).$(_CurrentBuildCounter)</FileVersion>
+      <InformationalVersion>$(VersionPrefix).$(_CurrentBuildCounter)</InformationalVersion>
+    </PropertyGroup>
+  </Target>
 
   <ItemGroup>
     <PackageReference Include="AvalonEdit" Version="6.3.1.120" />
