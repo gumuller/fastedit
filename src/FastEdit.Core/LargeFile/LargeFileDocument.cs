@@ -41,6 +41,17 @@ public sealed class LargeFileDocument : IDisposable
         FileSize = info.Length;
 
         _fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+
+        if (FileSize == 0)
+        {
+            // Can't create an MMF over a zero-byte file; treat as empty document.
+            _mmf = null!;
+            _accessor = null!;
+            Encoding = new UTF8Encoding(false);
+            BomLength = 0;
+            return;
+        }
+
         _mmf = MemoryMappedFile.CreateFromFile(
             _fileStream,
             mapName: null,
@@ -55,7 +66,7 @@ public sealed class LargeFileDocument : IDisposable
 
     private void DetectEncoding()
     {
-        if (FileSize == 0)
+        if (FileSize == 0 || _accessor == null)
         {
             Encoding = new UTF8Encoding(false);
             BomLength = 0;
@@ -126,6 +137,15 @@ public sealed class LargeFileDocument : IDisposable
 
     private void BuildIndexSync(IProgress<double>? onProgress, CancellationToken ct)
     {
+        if (FileSize == 0 || _accessor == null)
+        {
+            _totalLines = 0;
+            _lineCheckpoints = new long[] { 0 };
+            HasBuiltIndex = true;
+            onProgress?.Report(1.0);
+            return;
+        }
+
         var checkpoints = new List<long>(1024);
         long pos = BomLength;
         long lineCount = 1;
