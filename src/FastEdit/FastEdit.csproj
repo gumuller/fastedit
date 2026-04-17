@@ -7,9 +7,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <ApplicationIcon>fastedit.ico</ApplicationIcon>
-    <!-- Version is Major.Minor.Patch; the build number (4th component) is
-         auto-incremented on every build by the IncrementBuildCounter target. -->
-    <VersionPrefix>1.1.0</VersionPrefix>
+    <!-- Version is Major.Minor.BuildNumber — the 3rd component auto-increments
+         on every build via the IncrementBuildCounter target. -->
+    <VersionPrefix>1.1</VersionPrefix>
     <BuildCounterFile>$(MSBuildThisFileDirectory)..\..\build.counter</BuildCounterFile>
   </PropertyGroup>
 
