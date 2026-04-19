@@ -100,6 +100,26 @@ A fast, lightweight text and hex editor for Windows, built with WPF (.NET 8), Av
 | Select Next Occurrence | Ctrl+D |
 | Select All Occurrences | Ctrl+Shift+L |
 
+## Installing (Signed Builds)
+
+Releases are signed with a **self-signed certificate** (no cost, trusted once). On first install, Windows SmartScreen will show an "unknown publisher" warning unless you import the public certificate.
+
+**One-time setup (recommended for regular users):**
+
+1. Download `FastEdit-SelfSigned.cer` from the [latest release](https://github.com/gumuller/fastedit/releases/latest).
+2. In PowerShell:
+   ```powershell
+   Import-Certificate -FilePath .\FastEdit-SelfSigned.cer `
+     -CertStoreLocation Cert:\CurrentUser\TrustedPublisher
+   Import-Certificate -FilePath .\FastEdit-SelfSigned.cer `
+     -CertStoreLocation Cert:\CurrentUser\Root
+   ```
+3. After this, all FastEdit builds signed with this certificate run without SmartScreen or UAC warnings.
+
+**Without the import:** click "More info" → "Run anyway" on the SmartScreen dialog. The signature still verifies file integrity — you can confirm the publisher is `FastEdit Self-Signed` in the file's Properties → Digital Signatures tab.
+
+Verify the cert thumbprint of any downloaded `.cer` matches the one printed in the [release notes](https://github.com/gumuller/fastedit/releases/latest) before importing.
+
 ## Building
 
 ```bash

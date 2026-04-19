@@ -2,7 +2,8 @@
 # Builds self-contained packages for x64 and arm64, creates portable zips and NSIS installers
 param(
     [string]$Version = "1.0.0",
-    [switch]$SkipInstaller
+    [switch]$SkipInstaller,
+    [switch]$Sign
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,6 +11,8 @@ $RepoRoot = Split-Path $PSScriptRoot -Parent
 $ProjectPath = Join-Path $RepoRoot "src\FastEdit\FastEdit.csproj"
 $OutputDir = Join-Path $PSScriptRoot "output"
 $Runtimes = @("win-x64", "win-arm64")
+$SignScript = Join-Path $PSScriptRoot "sign.ps1"
+$PublicCertPath = Join-Path $OutputDir "FastEdit-SelfSigned.cer"
 
 # Clean output
 if (Test-Path $OutputDir) { Remove-Item $OutputDir -Recurse -Force }
@@ -44,6 +47,15 @@ foreach ($rid in $Runtimes) {
         exit 1
     }
 
+    # Sign the app binary before zipping so the portable zip contains a signed exe
+    if ($Sign) {
+        Write-Host "Signing $arch binaries..." -ForegroundColor Magenta
+        $exeToSign = Join-Path $publishDir "FastEdit.exe"
+        $exportArg = if ($rid -eq $Runtimes[0]) { @("-ExportCertTo", $PublicCertPath) } else { @() }
+        & pwsh -NoProfile -File $SignScript -Files $exeToSign @exportArg
+        if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: signing failed for $arch" -ForegroundColor Red; exit 1 }
+    }
+
     # Create portable zip
     Write-Host "Creating portable zip: $zipName" -ForegroundColor Green
     Compress-Archive -Path "$publishDir\*" -DestinationPath $zipPath -Force
@@ -71,6 +83,12 @@ if (-not $SkipInstaller) {
 
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "WARNING: NSIS failed for $arch" -ForegroundColor Red
+            }
+            elseif ($Sign) {
+                $setupExe = Join-Path $OutputDir "FastEdit-$Version-$arch-setup.exe"
+                Write-Host "Signing installer: $setupExe" -ForegroundColor Magenta
+                & pwsh -NoProfile -File $SignScript -Files $setupExe
+                if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: installer signing failed for $arch" -ForegroundColor Red }
             }
         }
     }
