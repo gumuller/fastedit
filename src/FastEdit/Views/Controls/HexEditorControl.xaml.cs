@@ -169,6 +169,14 @@ public partial class HexEditorControl : UserControl
             return;
         }
 
+        // Key events bubble up from child controls (e.g. the search TextBox).
+        // If the event did NOT originate on the hex canvas itself, ignore it —
+        // otherwise we'd treat keystrokes in the search box as hex edits,
+        // corrupt the buffer, and steal focus back to the canvas.
+        if (!ReferenceEquals(e.OriginalSource, HexCanvas) &&
+            !ReferenceEquals(e.OriginalSource, this))
+            return;
+
         if (_viewModel?.ByteBuffer == null || _selectedOffset < 0) return;
 
         var buffer = _viewModel.ByteBuffer;
@@ -423,15 +431,25 @@ public partial class HexEditorControl : UserControl
         HexSearchBox.TextChanged += HexSearchBox_TextChanged;
         UpdateSearchModeIndicator();
 
-        // Focus asynchronously — at this point the search bar's visual tree may not
-        // be fully realized, so a synchronous Focus() call can silently fail and
-        // leave keyboard focus on the hex canvas.
-        Dispatcher.BeginInvoke(new Action(() =>
+        // Make the search bar exist in the visual tree so Focus() can succeed.
+        HexSearchBar.UpdateLayout();
+
+        // Focus is surprisingly fragile with a TextBox inside a toggled-visible
+        // Border that's a sibling of the element that currently has keyboard
+        // focus. Attempt focus synchronously AND at multiple dispatcher
+        // priorities — whichever attempt runs after layout/input settles wins.
+        void FocusSearchBox()
         {
             HexSearchBox.Focus();
             Keyboard.Focus(HexSearchBox);
-            HexSearchBox.SelectAll();
-        }), System.Windows.Threading.DispatcherPriority.Input);
+            FocusManager.SetFocusedElement(this, HexSearchBox);
+            if (!string.IsNullOrEmpty(HexSearchBox.Text))
+                HexSearchBox.SelectAll();
+        }
+
+        FocusSearchBox();
+        Dispatcher.BeginInvoke((Action)FocusSearchBox, System.Windows.Threading.DispatcherPriority.Input);
+        Dispatcher.BeginInvoke((Action)FocusSearchBox, System.Windows.Threading.DispatcherPriority.ContextIdle);
     }
 
     public void HideSearch()

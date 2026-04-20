@@ -280,10 +280,17 @@ public partial class MainWindow : FluentWindow
         if (canClose)
         {
             _isClosingConfirmed = true;
-            SaveEditorState();
-            SaveWindowState();
-            _viewModel.SaveSession();
-            Close();
+            // Defer the Close() call — calling it synchronously from inside an
+            // async-void Closing handler (even after the await) can race with
+            // WPF's internal "window is closing" state and throw
+            // "Cannot set Visibility / call Close … while a Window is closing".
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                SaveEditorState();
+                SaveWindowState();
+                _viewModel.SaveSession();
+                Close();
+            }), System.Windows.Threading.DispatcherPriority.Background);
         }
     }
 
