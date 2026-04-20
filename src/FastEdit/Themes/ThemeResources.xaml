@@ -175,7 +175,7 @@
         <Setter Property="Padding" Value="8,4"/>
         <Setter Property="MinHeight" Value="30"/>
         <Setter Property="Height" Value="30"/>
-        <Setter Property="MinWidth" Value="220"/>
+        <Setter Property="MinWidth" Value="280"/>
         <Setter Property="SnapsToDevicePixels" Value="True"/>
         <Setter Property="Template">
             <Setter.Value>

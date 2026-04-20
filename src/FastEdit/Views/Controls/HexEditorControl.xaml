@@ -50,7 +50,7 @@
                     <!-- Search TextBox -->
                     <TextBox x:Name="HexSearchBox" Grid.Column="0"
                              Style="{StaticResource FastEditSearchTextBoxStyle}"
-                             MinWidth="220"
+                             MinWidth="280"
                              KeyDown="HexSearchBox_KeyDown"
                              FontFamily="Cascadia Code, Consolas"
                              ToolTip="Hex bytes (FF 00 AB) or quoted text (&quot;hello&quot;)"/>

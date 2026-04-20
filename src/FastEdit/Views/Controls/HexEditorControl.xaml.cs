@@ -419,10 +419,19 @@ public partial class HexEditorControl : UserControl
     public void ShowSearch()
     {
         HexSearchBar.Visibility = Visibility.Visible;
-        HexSearchBox.Focus();
-        HexSearchBox.SelectAll();
+        HexSearchBox.TextChanged -= HexSearchBox_TextChanged;
         HexSearchBox.TextChanged += HexSearchBox_TextChanged;
         UpdateSearchModeIndicator();
+
+        // Focus asynchronously — at this point the search bar's visual tree may not
+        // be fully realized, so a synchronous Focus() call can silently fail and
+        // leave keyboard focus on the hex canvas.
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            HexSearchBox.Focus();
+            Keyboard.Focus(HexSearchBox);
+            HexSearchBox.SelectAll();
+        }), System.Windows.Threading.DispatcherPriority.Input);
     }
 
     public void HideSearch()

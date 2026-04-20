@@ -731,12 +731,20 @@ public partial class MainWindow : FluentWindow
         return FindVisualChild<LargeFileViewer>(this);
     }
 
+    private HexEditorControl? FindActiveHexEditor()
+    {
+        return FindVisualChild<HexEditorControl>(this);
+    }
+
     private void OnFindRequested()
     {
         // EditorHost subscribes to FindRequested on its own for normal text mode.
-        // We only need to handle the large-file case here.
+        // Route to the large-file viewer or hex editor when appropriate.
         var lfv = FindActiveLargeFileViewer();
-        if (lfv != null) lfv.ShowFindBar(focusSearch: true);
+        if (lfv != null) { lfv.ShowFindBar(focusSearch: true); return; }
+
+        var hex = FindActiveHexEditor();
+        if (hex != null) { hex.ShowSearch(); return; }
     }
 
     private void OnReplaceRequested()
