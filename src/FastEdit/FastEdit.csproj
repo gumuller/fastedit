@@ -35,14 +35,18 @@
   </Target>
 
   <!-- For the WPF XAML temp project, propagate the same version from the counter file
-       without incrementing it, so the compiled assembly reports the correct version. -->
+       without incrementing it, so the compiled assembly reports the correct version.
+       Also runs when the caller explicitly opts out of incrementing (e.g. Debug
+       builds from the IDE or repeated rebuilds in a test session) — but only if
+       the caller hasn't already provided an explicit Version, so deploy/build.ps1
+       can still win by passing -p:Version=x.y.z. -->
   <Target Name="ReadBuildCounterForWpfTmp"
           BeforeTargets="GetAssemblyVersion;GenerateAssemblyInfo;CoreCompile"
           Condition="$(MSBuildProjectFile.Contains('_wpftmp')) Or '$(SkipBuildCounterIncrement)' == 'true'">
     <ReadLinesFromFile File="$(BuildCounterFile)" Condition="Exists('$(BuildCounterFile)')">
       <Output TaskParameter="Lines" PropertyName="_CurrentBuildCounter" />
     </ReadLinesFromFile>
-    <PropertyGroup Condition="'$(_CurrentBuildCounter)' != ''">
+    <PropertyGroup Condition="'$(_CurrentBuildCounter)' != '' And ('$(Version)' == '' Or '$(Version)' == '$(VersionPrefix)' Or '$(Version)' == '1.0.0')">
       <Version>$(VersionPrefix).$(_CurrentBuildCounter)</Version>
       <AssemblyVersion>$(VersionPrefix).$(_CurrentBuildCounter)</AssemblyVersion>
       <FileVersion>$(VersionPrefix).$(_CurrentBuildCounter)</FileVersion>

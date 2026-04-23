@@ -29,7 +29,10 @@ foreach ($rid in $Runtimes) {
     Write-Host ""
     Write-Host "--- Building $arch ---" -ForegroundColor Yellow
 
-    # Publish self-contained, single-dir, trimmed
+    # Publish self-contained, single-dir, trimmed.
+    # SkipBuildCounterIncrement=true so the explicit -p:Version wins and the
+    # build.counter file doesn't advance once per arch (which would produce
+    # e.g. 1.1.4 x64 and 1.1.5 arm64 within a single release).
     dotnet publish $ProjectPath `
         -c Release `
         -r $rid `
@@ -40,6 +43,7 @@ foreach ($rid in $Runtimes) {
         -p:Version=$Version `
         -p:FileVersion=$Version `
         -p:AssemblyVersion=$Version `
+        -p:SkipBuildCounterIncrement=true `
         -o $publishDir
 
     if ($LASTEXITCODE -ne 0) {
