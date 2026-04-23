@@ -38,7 +38,7 @@
        without incrementing it, so the compiled assembly reports the correct version. -->
   <Target Name="ReadBuildCounterForWpfTmp"
           BeforeTargets="GetAssemblyVersion;GenerateAssemblyInfo;CoreCompile"
-          Condition="$(MSBuildProjectFile.Contains('_wpftmp'))">
+          Condition="$(MSBuildProjectFile.Contains('_wpftmp')) Or '$(SkipBuildCounterIncrement)' == 'true'">
     <ReadLinesFromFile File="$(BuildCounterFile)" Condition="Exists('$(BuildCounterFile)')">
       <Output TaskParameter="Lines" PropertyName="_CurrentBuildCounter" />
     </ReadLinesFromFile>
@@ -64,6 +64,7 @@
 
   <ItemGroup>
     <Resource Include="fastedit.ico" />
+    <Resource Include="fastedit-icon.png" />
     <None Include="fastedit.ico" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

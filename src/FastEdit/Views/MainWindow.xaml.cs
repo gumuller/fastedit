@@ -38,10 +38,17 @@ public partial class MainWindow : FluentWindow
             var icoPath = System.IO.Path.Combine(dir, "fastedit.ico");
             if (System.IO.File.Exists(icoPath))
             {
-                // Load icon at desired decode size for crisp rendering
+                // Force the window icon to decode from a SMALL frame of the
+                // .ico. Without DecodePixelWidth, WPF picks the largest frame
+                // (256x256 with its rounded-rect padding) and Windows then
+                // scales that down for the taskbar — which looks tiny.
+                // By requesting a 48px decode, WPF selects the 48x48 frame
+                // (tight-cropped glyph) so the taskbar renders it densely.
                 var windowIcon = new System.Windows.Media.Imaging.BitmapImage();
                 windowIcon.BeginInit();
                 windowIcon.UriSource = new Uri(icoPath, UriKind.Absolute);
+                windowIcon.DecodePixelWidth = 48;
+                windowIcon.DecodePixelHeight = 48;
                 windowIcon.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
                 windowIcon.EndInit();
                 Icon = windowIcon;
@@ -227,6 +234,14 @@ public partial class MainWindow : FluentWindow
             }
 
             await _viewModel.RestoreSessionAsync();
+
+            // Open any files passed on the command line (e.g. Explorer "Open
+            // with FastEdit"). Done after session restore so these files end
+            // up on top and become the selected tab.
+            foreach (var path in App.StartupFiles)
+            {
+                await _viewModel.OpenFileCommand.ExecuteAsync(path);
+            }
 
             // Set command runner working directory
             var folder = _viewModel.FileTree.RootPath;
@@ -452,13 +467,8 @@ public partial class MainWindow : FluentWindow
 
     private void About_Click(object sender, RoutedEventArgs e)
     {
-        var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
-        var versionStr = version != null ? $"{version.Major}.{version.Minor}.{version.Build}" : "1.0.0";
-        System.Windows.MessageBox.Show(
-            $"FastEdit v{versionStr}\n\nA fast, lightweight text and hex editor for Windows.\n\nFeatures:\n- Syntax highlighting for 20+ languages\n- Hex editing for binary files\n- 9 built-in themes\n- Virtual scrolling for large files\n- Session restore with cursor position\n- Find & Replace, Find in Files\n- Command Palette (Ctrl+Shift+P)\n- Auto-complete (Ctrl+Space)\n- Code folding, indent guides\n- Git branch detection\n- Built-in terminal\n- Split editor view\n- File comparison",
-            "About FastEdit",
-            System.Windows.MessageBoxButton.OK,
-            System.Windows.MessageBoxImage.Information);
+        var dlg = new Views.Dialogs.AboutDialog { Owner = this };
+        dlg.ShowDialog();
     }
 
     private void FileTreeView_MouseDoubleClick(object sender, MouseButtonEventArgs e)

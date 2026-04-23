@@ -15,9 +15,34 @@ public partial class App : Application
 
     public static IServiceProvider Services { get; private set; } = null!;
 
+    /// <summary>Command-line file paths passed to the app (e.g. from Explorer "Open with").</summary>
+    public static IReadOnlyList<string> StartupFiles { get; private set; } = Array.Empty<string>();
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        // Capture any file paths passed on the command line (e.g. Explorer
+        // "Open with FastEdit" passes the clicked file as the first arg).
+        // Filter to args that look like existing files — anything else is
+        // either a switch or malformed and should be ignored silently.
+        if (e.Args is { Length: > 0 })
+        {
+            var files = new List<string>(e.Args.Length);
+            foreach (var arg in e.Args)
+            {
+                if (string.IsNullOrWhiteSpace(arg)) continue;
+                if (arg.StartsWith('-') || arg.StartsWith('/')) continue;
+                try
+                {
+                    var full = System.IO.Path.GetFullPath(arg);
+                    if (System.IO.File.Exists(full))
+                        files.Add(full);
+                }
+                catch { /* invalid path — ignore */ }
+            }
+            StartupFiles = files;
+        }
 
         // Global exception handlers for debugging
         DispatcherUnhandledException += (s, args) =>
