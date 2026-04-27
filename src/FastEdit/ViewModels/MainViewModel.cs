@@ -248,7 +248,7 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void GoToLine()
     {
-        if (SelectedTab == null || SelectedTab.IsBinaryMode) return;
+        if (SelectedTab == null || SelectedTab.Mode != FileOpenMode.Text) return;
         GoToLineRequested?.Invoke(SelectedTab.Line);
     }
 
@@ -457,7 +457,7 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void ConvertLineEndings(string? target)
     {
-        if (SelectedTab == null || SelectedTab.IsBinaryMode || string.IsNullOrEmpty(target)) return;
+        if (SelectedTab == null || SelectedTab.Mode != FileOpenMode.Text || string.IsNullOrEmpty(target)) return;
 
         var targetType = target switch
         {
@@ -732,7 +732,7 @@ public partial class MainViewModel : ObservableObject
     private void OnSelectedTabPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
         if (sender is EditorTabViewModel tab &&
-            (e.PropertyName == nameof(EditorTabViewModel.IsBinaryMode) ||
+            (e.PropertyName == nameof(EditorTabViewModel.Mode) ||
              e.PropertyName == nameof(EditorTabViewModel.Line) ||
              e.PropertyName == nameof(EditorTabViewModel.Column)))
         {
@@ -742,9 +742,14 @@ public partial class MainViewModel : ObservableObject
 
     private void UpdateStatusForTab(EditorTabViewModel tab)
     {
-        if (tab.IsBinaryMode)
+        if (tab.Mode == FileOpenMode.Binary)
         {
             StatusText = $"Hex Mode - {tab.FileSize:N0} bytes";
+            LineEnding = "";
+        }
+        else if (tab.Mode == FileOpenMode.LargeText)
+        {
+            StatusText = $"Large Text Mode - {tab.FileSize:N0} bytes";
             LineEnding = "";
         }
         else
@@ -857,12 +862,12 @@ public partial class MainViewModel : ObservableObject
             {
                 FilePath = string.IsNullOrEmpty(tab.FilePath) ? tab.FileName : tab.FilePath,
                 IsUntitled = string.IsNullOrEmpty(tab.FilePath),
-                IsBinaryMode = tab.IsBinaryMode,
+                IsBinaryMode = tab.Mode == FileOpenMode.Binary,
                 CursorOffset = tab.CursorOffset,
                 ScrollOffset = tab.ScrollOffset
             };
 
-            if (sessionFile.IsUntitled && !tab.IsBinaryMode)
+            if (sessionFile.IsUntitled && tab.Mode == FileOpenMode.Text)
             {
                 var tempPath = Path.Combine(tempDir, $"{Guid.NewGuid():N}_{tab.FileName}.tmp");
                 try

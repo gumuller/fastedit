@@ -7,7 +7,7 @@
     <converters:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter"/>
     <converters:InverseBoolToVisibilityConverter x:Key="InverseBoolToVisibilityConverter"/>
     <converters:CountToVisibilityConverter x:Key="CountToVisibilityConverter"/>
-    <converters:BoolToModeConverter x:Key="BoolToModeConverter"/>
+    <converters:FileOpenModeToDisplayConverter x:Key="FileOpenModeToDisplayConverter"/>
     <converters:NullToCollapsedConverter x:Key="NullToCollapsedConverter"/>
     <converters:EqualityConverter x:Key="EqualityConverter"/>
     <converters:StringToBrushConverter x:Key="StringToBrushConverter"/>

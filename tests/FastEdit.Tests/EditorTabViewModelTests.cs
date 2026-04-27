@@ -34,7 +34,9 @@ public class EditorTabViewModelTests
             Assert.Equal("hello world", sut.Content);
             Assert.Equal(Path.GetFileName(tempFile), sut.FileName);
             Assert.Equal(tempFile, sut.FilePath);
+            Assert.Equal(FileOpenMode.Text, sut.Mode);
             Assert.False(sut.IsBinaryMode);
+            Assert.False(sut.IsLargeFileMode);
             Assert.False(sut.IsModified);
         }
         finally
@@ -250,15 +252,33 @@ public class EditorTabViewModelTests
 
     // --- ToggleMode ---
 
+    [Theory]
+    [InlineData(FileOpenMode.Text, false, false)]
+    [InlineData(FileOpenMode.Binary, true, false)]
+    [InlineData(FileOpenMode.LargeText, false, true)]
+    public void Mode_UpdatesCompatibilityProperties(
+        FileOpenMode mode,
+        bool expectedBinaryMode,
+        bool expectedLargeFileMode)
+    {
+        var sut = CreateSut();
+
+        sut.Mode = mode;
+
+        Assert.Equal(expectedBinaryMode, sut.IsBinaryMode);
+        Assert.Equal(expectedLargeFileMode, sut.IsLargeFileMode);
+    }
+
     [Fact]
     public async Task ToggleMode_UntitledFile_DoesNothing()
     {
         var sut = CreateSut();
         sut.FilePath = "";
-        sut.IsBinaryMode = false;
+        sut.Mode = FileOpenMode.Text;
 
         await sut.ToggleModeCommand.ExecuteAsync(null);
 
+        Assert.Equal(FileOpenMode.Text, sut.Mode);
         Assert.False(sut.IsBinaryMode);
     }
 
@@ -268,10 +288,11 @@ public class EditorTabViewModelTests
         var sut = CreateSut();
         sut.FilePath = @"C:\test.txt";
         sut.IsModified = true;
-        sut.IsBinaryMode = false;
+        sut.Mode = FileOpenMode.Text;
 
         await sut.ToggleModeCommand.ExecuteAsync(null);
 
+        Assert.Equal(FileOpenMode.Text, sut.Mode);
         Assert.False(sut.IsBinaryMode);
     }
 

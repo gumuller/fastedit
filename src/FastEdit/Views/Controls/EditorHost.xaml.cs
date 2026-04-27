@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -240,7 +241,7 @@ public partial class EditorHost : UserControl
 
         // Route to hex search when in binary mode
         var vm = DataContext as EditorTabViewModel;
-        if (vm?.IsBinaryMode == true)
+        if (IsBinaryMode(vm))
         {
             HexEditor.ShowSearch();
             return;
@@ -350,7 +351,7 @@ public partial class EditorHost : UserControl
     // --- Line Operations ---
     private void OnDuplicateLineRequested()
     {
-        if (!IsActiveEditorHost() || _currentVm?.IsBinaryMode == true) return;
+        if (!IsActiveEditorHost() || !IsTextMode(_currentVm)) return;
         DuplicateLine();
     }
 
@@ -370,7 +371,7 @@ public partial class EditorHost : UserControl
 
     private void OnMoveLineRequested(bool moveUp)
     {
-        if (!IsActiveEditorHost() || _currentVm?.IsBinaryMode == true) return;
+        if (!IsActiveEditorHost() || !IsTextMode(_currentVm)) return;
         if (moveUp) MoveLineUp(); else MoveLineDown();
     }
 
@@ -423,7 +424,7 @@ public partial class EditorHost : UserControl
     // --- Format / Minify ---
     private void OnFormatDocumentRequested()
     {
-        if (!IsActiveEditorHost() || _currentVm?.IsBinaryMode == true) return;
+        if (!IsActiveEditorHost() || !IsTextMode(_currentVm)) return;
         var lang = _currentVm?.SyntaxLanguage ?? "";
 
         (string result, string? error) output;
@@ -443,7 +444,7 @@ public partial class EditorHost : UserControl
 
     private void OnMinifyDocumentRequested()
     {
-        if (!IsActiveEditorHost() || _currentVm?.IsBinaryMode == true) return;
+        if (!IsActiveEditorHost() || !IsTextMode(_currentVm)) return;
         var lang = _currentVm?.SyntaxLanguage ?? "";
 
         (string result, string? error) output;
@@ -464,7 +465,7 @@ public partial class EditorHost : UserControl
     // --- Text Tools ---
     private void OnTextToolRequested(TextToolOperation operation)
     {
-        if (!IsActiveEditorHost() || _currentVm?.IsBinaryMode == true) return;
+        if (!IsActiveEditorHost() || !IsTextMode(_currentVm)) return;
 
         if (_textToolsService == null) return;
 
@@ -516,7 +517,7 @@ public partial class EditorHost : UserControl
 
     private void OnSelectNextOccurrence()
     {
-        if (!IsActiveEditorHost() || _currentVm?.IsBinaryMode == true) return;
+        if (!IsActiveEditorHost() || !IsTextMode(_currentVm)) return;
 
         var selectedText = TextEditor.SelectedText;
         if (string.IsNullOrEmpty(selectedText))
@@ -559,7 +560,7 @@ public partial class EditorHost : UserControl
 
     private void OnSelectAllOccurrences()
     {
-        if (!IsActiveEditorHost() || _currentVm?.IsBinaryMode == true) return;
+        if (!IsActiveEditorHost() || !IsTextMode(_currentVm)) return;
 
         var selectedText = TextEditor.SelectedText;
         if (string.IsNullOrEmpty(selectedText))
@@ -685,8 +686,9 @@ public partial class EditorHost : UserControl
     // --- Code Folding ---
     private void InstallFolding()
     {
-        if (_currentVm == null || _currentVm.IsBinaryMode) return;
-        _foldingManager = FoldingHelper.Install(TextEditor, _currentVm.SyntaxLanguage);
+        var vm = _currentVm;
+        if (!IsTextMode(vm)) return;
+        _foldingManager = FoldingHelper.Install(TextEditor, vm.SyntaxLanguage);
     }
 
     private void UninstallFolding()
@@ -813,7 +815,7 @@ public partial class EditorHost : UserControl
             _isFilterFoldingActive = false;
             UninstallFolding();
 
-            if (_currentVm != null && !_currentVm.IsBinaryMode)
+            if (IsTextMode(_currentVm))
             {
                 InstallFolding();
                 UpdateFoldings();
@@ -886,7 +888,7 @@ public partial class EditorHost : UserControl
     // --- Bookmarks ---
     private void OnToggleBookmark()
     {
-        if (!IsActiveEditorHost() || _currentVm?.IsBinaryMode == true) return;
+        if (!IsActiveEditorHost() || !IsTextMode(_currentVm)) return;
         int line = TextEditor.TextArea.Caret.Line;
         if (_bookmarks.Contains(line))
             _bookmarks.Remove(line);
@@ -920,7 +922,7 @@ public partial class EditorHost : UserControl
     // --- Minimap ---
     private void UpdateMinimapVisibility(bool visible)
     {
-        if (visible && !_currentVm?.IsBinaryMode == true)
+        if (visible && IsTextMode(_currentVm))
         {
             MinimapColumn.Width = new GridLength(100);
             DocumentMap.Visibility = Visibility.Visible;
@@ -974,6 +976,10 @@ public partial class EditorHost : UserControl
     {
         return _mainViewModel?.SelectedTab != null && _mainViewModel.SelectedTab == _currentVm;
     }
+
+    private static bool IsBinaryMode([NotNullWhen(true)] EditorTabViewModel? vm) => vm?.Mode == FileOpenMode.Binary;
+
+    private static bool IsTextMode([NotNullWhen(true)] EditorTabViewModel? vm) => vm?.Mode == FileOpenMode.Text;
 
     private void OnThemeChanged(object? sender, ThemeDefinition theme)
     {
@@ -1106,12 +1112,12 @@ public partial class EditorHost : UserControl
 
         if (e.PropertyName == nameof(EditorTabViewModel.Content))
         {
-            if (!vm.IsBinaryMode && TextEditor.Text != vm.Content)
+            if (IsTextMode(vm) && TextEditor.Text != vm.Content)
             {
                 TextEditor.Text = vm.Content;
             }
         }
-        else if (e.PropertyName == nameof(EditorTabViewModel.IsBinaryMode))
+        else if (e.PropertyName == nameof(EditorTabViewModel.Mode))
         {
             UpdateEditor(vm);
         }
@@ -1161,7 +1167,7 @@ public partial class EditorHost : UserControl
 
     private void UpdateEditor(EditorTabViewModel vm)
     {
-        if (vm.IsBinaryMode)
+        if (IsBinaryMode(vm))
         {
             TextEditor.Visibility = Visibility.Collapsed;
             HexEditor.Visibility = Visibility.Visible;
@@ -1169,6 +1175,18 @@ public partial class EditorHost : UserControl
 
             Panel.SetZIndex(HexEditor, 1);
             Panel.SetZIndex(TextEditor, 0);
+
+            UninstallFolding();
+            DocumentMap.DetachEditor();
+            _fileWatcher.StopWatching();
+        }
+        else if (!IsTextMode(vm))
+        {
+            TextEditor.Visibility = Visibility.Collapsed;
+            HexEditor.Visibility = Visibility.Collapsed;
+
+            Panel.SetZIndex(TextEditor, 0);
+            Panel.SetZIndex(HexEditor, 0);
 
             UninstallFolding();
             DocumentMap.DetachEditor();
@@ -1233,9 +1251,10 @@ public partial class EditorHost : UserControl
 
     private void TextEditor_TextChanged(object? sender, EventArgs e)
     {
-        if (_currentVm != null && !_currentVm.IsBinaryMode)
+        var vm = _currentVm;
+        if (IsTextMode(vm))
         {
-            _currentVm.Content = TextEditor.Text;
+            vm.Content = TextEditor.Text;
 
             // Refresh filter cache if filters are active
             if (_lineFilterService?.HasActiveFilters == true)
@@ -1342,7 +1361,8 @@ public partial class EditorHost : UserControl
     // --- Breadcrumb Bar ---
     private void UpdateBreadcrumbs()
     {
-        if (_mainViewModel?.IsBreadcrumbVisible != true || _currentVm == null || _currentVm.IsBinaryMode)
+        var vm = _currentVm;
+        if (_mainViewModel?.IsBreadcrumbVisible != true || !IsTextMode(vm))
         {
             BreadcrumbBar.Visibility = Visibility.Collapsed;
             return;
@@ -1350,7 +1370,7 @@ public partial class EditorHost : UserControl
 
         var text = TextEditor.Text;
         var caretLine = TextEditor.TextArea.Caret.Line;
-        var language = _currentVm.SyntaxLanguage;
+        var language = vm.SyntaxLanguage;
 
         var items = BreadcrumbHelper.GetBreadcrumbs(text, caretLine, language);
 

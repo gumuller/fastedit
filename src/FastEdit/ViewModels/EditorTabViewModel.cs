@@ -52,18 +52,15 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     private string _fileName = string.Empty;
 
     [ObservableProperty]
-    private bool _isBinaryMode;
-
-    [ObservableProperty]
-    private bool _isLargeFileMode;
-
-    [ObservableProperty]
     private FileOpenMode _mode = FileOpenMode.Text;
+
+    public bool IsBinaryMode => Mode == FileOpenMode.Binary;
+    public bool IsLargeFileMode => Mode == FileOpenMode.LargeText;
 
     partial void OnModeChanged(FileOpenMode value)
     {
-        IsBinaryMode = value == FileOpenMode.Binary;
-        IsLargeFileMode = value == FileOpenMode.LargeText;
+        OnPropertyChanged(nameof(IsBinaryMode));
+        OnPropertyChanged(nameof(IsLargeFileMode));
     }
 
     [ObservableProperty]
@@ -119,8 +116,12 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
 
     public async Task LoadFileAsync(string filePath)
     {
+        ReleaseLoadedResources();
+
         FilePath = filePath;
         FileName = Path.GetFileName(filePath);
+        Content = string.Empty;
+        SyntaxLanguage = string.Empty;
 
         var fileInfo = new FileInfo(filePath);
         FileSize = fileInfo.Length;
@@ -179,7 +180,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     [RelayCommand]
     private async Task<bool> SaveAsync()
     {
-        if (IsBinaryMode)
+        if (Mode == FileOpenMode.Binary)
         {
             if (_byteBuffer != null)
             {
@@ -188,6 +189,11 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
                 return true;
             }
             return false;
+        }
+
+        if (Mode == FileOpenMode.LargeText)
+        {
+            return true;
         }
 
         var savePath = FilePath;
@@ -207,7 +213,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         // Update metadata after successful save
         FilePath = savePath;
         FileName = Path.GetFileName(savePath);
-        SyntaxLanguage = GetSyntaxLanguage(savePath);
+        SyntaxLanguage = Mode == FileOpenMode.Text ? GetSyntaxLanguage(savePath) : string.Empty;
         IsModified = false;
         return true;
     }
@@ -222,7 +228,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         if (string.IsNullOrEmpty(savePath))
             return false;
 
-        if (IsBinaryMode)
+        if (Mode == FileOpenMode.Binary)
         {
             if (_byteBuffer != null)
             {
@@ -234,6 +240,21 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
             else
             {
                 return false;
+            }
+        }
+        else if (Mode == FileOpenMode.LargeText)
+        {
+            if (string.IsNullOrEmpty(FilePath))
+                return false;
+
+            if (!string.Equals(savePath, FilePath, StringComparison.OrdinalIgnoreCase))
+            {
+                _fileSystemService.CopyFile(FilePath, savePath, overwrite: true);
+
+                _largeFileDoc?.Dispose();
+                _largeFileDoc = new LargeFileDocument(savePath);
+                Encoding = _largeFileDoc.EncodingDisplayName;
+                await _largeFileDoc.BuildIndexAsync(null, CancellationToken.None);
             }
         }
         else
@@ -257,12 +278,25 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         // Block toggle when there are unsaved edits
         if (IsModified) return;
 
-        if (IsBinaryMode)
+        if (Mode == FileOpenMode.Binary)
         {
             // Binary → Text: dispose buffer, reload as text
             _byteBuffer?.Dispose();
             _byteBuffer = null;
-            IsBinaryMode = false;
+
+            _largeFileDoc?.Dispose();
+            _largeFileDoc = null;
+
+            Mode = FileSize >= LargeFileThresholdBytes ? FileOpenMode.LargeText : FileOpenMode.Text;
+            if (Mode == FileOpenMode.LargeText)
+            {
+                _largeFileDoc = new LargeFileDocument(FilePath);
+                Encoding = _largeFileDoc.EncodingDisplayName;
+                SyntaxLanguage = string.Empty;
+                await _largeFileDoc.BuildIndexAsync(null, CancellationToken.None);
+                return;
+            }
+
             var result = await _fileService.ReadFileWithEncodingAsync(FilePath);
             Content = result.Content;
             _fileEncoding = result.Encoding;
@@ -270,11 +304,14 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
             Encoding = GetEncodingDisplayName(result.Encoding, result.HasBom);
             SyntaxLanguage = GetSyntaxLanguage(FilePath);
         }
-        else
+        else if (Mode == FileOpenMode.Text || Mode == FileOpenMode.LargeText)
         {
             // Text → Binary: create byte buffer
-            IsBinaryMode = true;
+            _largeFileDoc?.Dispose();
+            _largeFileDoc = null;
+            Mode = FileOpenMode.Binary;
             Content = string.Empty;
+            Encoding = "Binary";
             SyntaxLanguage = string.Empty;
             _byteBuffer = new VirtualizedByteBuffer(FilePath);
             _byteBuffer.ModificationsChanged += (s, e) =>
@@ -344,9 +381,18 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         if (_disposed) return;
         _disposed = true;
 
-        _byteBuffer?.Dispose();
+        ReleaseLoadedResources();
         Content = string.Empty;
 
         GC.SuppressFinalize(this);
+    }
+
+    private void ReleaseLoadedResources()
+    {
+        _byteBuffer?.Dispose();
+        _byteBuffer = null;
+
+        _largeFileDoc?.Dispose();
+        _largeFileDoc = null;
     }
 }

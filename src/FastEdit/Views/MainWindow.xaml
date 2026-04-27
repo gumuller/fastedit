@@ -428,7 +428,7 @@
                                 </Setter.Value>
                             </Setter>
                             <Style.Triggers>
-                                <DataTrigger Binding="{Binding SelectedTab.IsLargeFileMode}" Value="True">
+                                <DataTrigger Binding="{Binding SelectedTab.Mode}" Value="{x:Static vm:FileOpenMode.LargeText}">
                                     <Setter Property="ContentTemplate">
                                         <Setter.Value>
                                             <DataTemplate>
@@ -524,7 +524,7 @@
                                ToolTip="Line ending type"/>
                     <TextBlock Text="{Binding SelectedTab.Encoding}" Foreground="{DynamicResource StatusBarForegroundBrush}" Margin="0,0,16,0"/>
                     <TextBlock Text="{Binding SelectedTab.IndentInfo}" Foreground="{DynamicResource StatusBarForegroundBrush}" Margin="0,0,16,0"/>
-                    <Button Content="{Binding SelectedTab.IsBinaryMode, Converter={StaticResource BoolToModeConverter}}"
+                    <Button Content="{Binding SelectedTab.Mode, Converter={StaticResource FileOpenModeToDisplayConverter}}"
                             Command="{Binding SelectedTab.ToggleModeAsyncCommand}"
                             Foreground="{DynamicResource StatusBarForegroundBrush}"
                             Background="Transparent"

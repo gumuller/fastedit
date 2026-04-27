@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Windows;
 using System.Windows.Data;
+using FastEdit.ViewModels;
 
 namespace FastEdit.Infrastructure.Converters;
 
@@ -64,11 +65,18 @@ public class CountToVisibilityConverter : IValueConverter
     }
 }
 
-public class BoolToModeConverter : IValueConverter
+public class FileOpenModeToDisplayConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
     {
-        return value is true ? "Hex" : "Text";
+        return value switch
+        {
+            FileOpenMode.Binary => "Hex",
+            FileOpenMode.LargeText => "Large",
+            FileOpenMode.Text => "Text",
+            bool isBinaryMode => isBinaryMode ? "Hex" : "Text",
+            _ => "Text"
+        };
     }
 
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
