@@ -130,9 +130,10 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         var detector = new BinaryDetector();
         var analysis = await detector.AnalyzeFileAsync(filePath);
 
-        if (analysis.IsBinary)
+        Mode = FileOpenModeRouter.SelectOpenMode(FileSize, analysis);
+
+        if (Mode == FileOpenMode.Binary)
         {
-            Mode = FileOpenMode.Binary;
             Encoding = analysis.DetectedEncoding ?? "Binary";
             _byteBuffer = new VirtualizedByteBuffer(filePath);
             _byteBuffer.ModificationsChanged += (s, e) =>
@@ -140,9 +141,8 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
                 IsModified = _byteBuffer.HasModifications;
             };
         }
-        else if (FileSize >= LargeFileThresholdBytes)
+        else if (Mode == FileOpenMode.LargeText)
         {
-            Mode = FileOpenMode.LargeText;
             _largeFileDoc = new LargeFileDocument(filePath);
             Encoding = _largeFileDoc.EncodingDisplayName;
             SyntaxLanguage = string.Empty; // no highlighting for huge files
@@ -287,7 +287,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
             _largeFileDoc?.Dispose();
             _largeFileDoc = null;
 
-            Mode = FileSize >= LargeFileThresholdBytes ? FileOpenMode.LargeText : FileOpenMode.Text;
+            Mode = FileOpenModeRouter.SelectTextMode(FileSize);
             if (Mode == FileOpenMode.LargeText)
             {
                 _largeFileDoc = new LargeFileDocument(FilePath);
