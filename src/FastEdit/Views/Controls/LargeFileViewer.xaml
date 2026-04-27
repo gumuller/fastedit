@@ -12,35 +12,12 @@
              Focusable="True">
     <Grid>
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- Find bar -->
-        <Border x:Name="FindBar" Grid.Row="0" Background="{DynamicResource PanelBackgroundBrush}"
-                BorderBrush="{DynamicResource PanelBorderBrush}"
-                BorderThickness="0,0,0,1" Padding="6,4"
-                Visibility="Collapsed">
-            <StackPanel Orientation="Horizontal">
-                <TextBox x:Name="FindBox" Width="260" VerticalAlignment="Center"
-                         Padding="4,2" KeyDown="FindBox_KeyDown"
-                         ToolTip="Find (Enter = next, Shift+Enter = previous, Esc = close)"/>
-                <CheckBox x:Name="CaseSensitiveBox" Content="Aa" Margin="6,0,0,0"
-                          VerticalAlignment="Center" ToolTip="Match case"/>
-                <Button Content="▲" Margin="6,0,0,0" Padding="6,2" Click="FindPrev_Click" ToolTip="Previous (Shift+Enter)"/>
-                <Button Content="▼" Margin="2,0,0,0" Padding="6,2" Click="FindNext_Click" ToolTip="Next (Enter)"/>
-                <Button Content="✕" Margin="6,0,0,0" Padding="6,2" Click="CloseFindBar_Click" ToolTip="Close (Esc)"/>
-                <TextBlock x:Name="FindStatusText" Margin="8,0,0,0" VerticalAlignment="Center"
-                           Foreground="{DynamicResource StatusForegroundBrush}"/>
-                <Separator Margin="8,0" Width="1"/>
-                <TextBlock Text="Go to line:" VerticalAlignment="Center" Margin="4,0"/>
-                <TextBox x:Name="GotoBox" Width="80" Padding="4,2" VerticalAlignment="Center" KeyDown="GotoBox_KeyDown"/>
-            </StackPanel>
-        </Border>
-
         <!-- Viewer + scrollbar -->
-        <Grid Grid.Row="1">
+        <Grid Grid.Row="0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
@@ -57,10 +34,113 @@
                        Width="16" Minimum="0" Maximum="100" Value="0"
                        SmallChange="1" LargeChange="10"
                        Scroll="VScroll_Scroll"/>
+
+            <!-- Find and Go To overlay -->
+            <Border x:Name="FindBar"
+                    Grid.Column="0"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Top"
+                    Background="{DynamicResource PanelBackgroundBrush}"
+                    BorderBrush="{DynamicResource PanelBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="6"
+                    Padding="8,6"
+                    Margin="0,8,20,0"
+                    Visibility="Collapsed">
+                <StackPanel Orientation="Vertical">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="6"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="4"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="4"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="8"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="6"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBox x:Name="FindBox"
+                                 Grid.Column="0"
+                                 Style="{StaticResource FastEditSearchTextBoxStyle}"
+                                 KeyDown="FindBox_KeyDown"
+                                 ToolTip="Find (Enter = next, Shift+Enter = previous, Esc = close)"/>
+
+                        <CheckBox x:Name="CaseSensitiveBox"
+                                  Grid.Column="2"
+                                  Content="Aa"
+                                  Foreground="{DynamicResource WindowForegroundBrush}"
+                                  VerticalAlignment="Center"
+                                  ToolTip="Match case"/>
+
+                        <Button Grid.Column="4"
+                                Style="{StaticResource FastEditSearchButtonStyle}"
+                                Click="FindPrev_Click"
+                                ToolTip="Previous (Shift+Enter)">
+                            <Path Data="M 8 1 L 3 6 L 8 11"
+                                  Stroke="{DynamicResource WindowForegroundBrush}"
+                                  StrokeThickness="1.8"
+                                  StrokeStartLineCap="Round"
+                                  StrokeEndLineCap="Round"/>
+                        </Button>
+
+                        <Button Grid.Column="6"
+                                Style="{StaticResource FastEditSearchButtonStyle}"
+                                Click="FindNext_Click"
+                                ToolTip="Next (Enter)">
+                            <Path Data="M 3 1 L 8 6 L 3 11"
+                                  Stroke="{DynamicResource WindowForegroundBrush}"
+                                  StrokeThickness="1.8"
+                                  StrokeStartLineCap="Round"
+                                  StrokeEndLineCap="Round"/>
+                        </Button>
+
+                        <Button Grid.Column="8"
+                                Style="{StaticResource FastEditSearchButtonStyle}"
+                                Width="24"
+                                Height="24"
+                                Click="CloseFindBar_Click"
+                                ToolTip="Close (Escape)">
+                            <Path Data="M 2 2 L 10 10 M 10 2 L 2 10"
+                                  Stroke="{DynamicResource WindowForegroundBrush}"
+                                  StrokeThickness="1.8"
+                                  StrokeStartLineCap="Round"
+                                  StrokeEndLineCap="Round"/>
+                        </Button>
+
+                        <TextBlock x:Name="FindStatusText"
+                                   Grid.Column="10"
+                                   VerticalAlignment="Center"
+                                   Foreground="{DynamicResource TabForegroundBrush}"
+                                   FontSize="11"/>
+                    </Grid>
+
+                    <Grid Margin="0,6,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="6"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="Go to line"
+                                   VerticalAlignment="Center"
+                                   Foreground="{DynamicResource TabForegroundBrush}"
+                                   FontSize="11"/>
+                        <TextBox x:Name="GotoBox"
+                                 Grid.Column="2"
+                                 Style="{StaticResource FastEditSearchTextBoxStyle}"
+                                 Width="88"
+                                 MinWidth="88"
+                                 KeyDown="GotoBox_KeyDown"/>
+                    </Grid>
+                </StackPanel>
+            </Border>
         </Grid>
 
         <!-- Footer status -->
-        <Border Grid.Row="2" Background="{DynamicResource StatusBarBackgroundBrush}"
+        <Border Grid.Row="1" Background="{DynamicResource StatusBarBackgroundBrush}"
                 BorderBrush="{DynamicResource PanelBorderBrush}"
                 BorderThickness="0,1,0,0" Padding="8,3">
             <TextBlock x:Name="FooterText"

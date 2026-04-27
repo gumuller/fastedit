@@ -24,9 +24,8 @@ public partial class LargeFileViewer : UserControl
 {
     private LargeFileDocument? _doc;
     private RenderCanvas? _canvas;
-    private long _topLine = 1;
+    private readonly LargeFileViewerViewport _viewport = new();
     private double _lineHeight = 16;
-    private int _visibleLineCount = 10;
     private List<LargeFileDocument.SearchMatch>? _searchMatches;
     private int _currentMatchIndex = -1;
     private CancellationTokenSource? _searchCts;
@@ -35,7 +34,6 @@ public partial class LargeFileViewer : UserControl
 
     // Filter support
     private IReadOnlyList<LineFilter>? _filters;
-    private List<long>? _showOnlyLines; // when non-null: showing only matching lines
     private CancellationTokenSource? _filterScanCts;
 
     public LargeFileViewer()
@@ -78,6 +76,44 @@ public partial class LargeFileViewer : UserControl
             GotoBox.SelectAll();
             e.Handled = true;
         }
+        else if (e.OriginalSource is TextBox)
+        {
+            return;
+        }
+        else if (e.Key == Key.Down)
+        {
+            ScrollBy(1);
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Up)
+        {
+            ScrollBy(-1);
+            e.Handled = true;
+        }
+        else if (e.Key == Key.PageDown)
+        {
+            ScrollBy(_viewport.VisibleLineCount);
+            e.Handled = true;
+        }
+        else if (e.Key == Key.PageUp)
+        {
+            ScrollBy(-_viewport.VisibleLineCount);
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Home)
+        {
+            _viewport.MoveToStart();
+            UpdateScrollBar();
+            Render();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.End)
+        {
+            _viewport.MoveToEnd();
+            UpdateScrollBar();
+            Render();
+            e.Handled = true;
+        }
     }
 
     private void ToggleFindBar(bool show)
@@ -87,6 +123,23 @@ public partial class LargeFileViewer : UserControl
     }
 
     private void CloseFindBar_Click(object sender, RoutedEventArgs e) => ToggleFindBar(false);
+
+    private (int column, int length)? GetCurrentSearchMatchForLine(long lineNumber, string line)
+    {
+        if (_searchMatches == null ||
+            _currentMatchIndex < 0 ||
+            _currentMatchIndex >= _searchMatches.Count ||
+            string.IsNullOrEmpty(FindBox.Text))
+            return null;
+
+        var match = _searchMatches[_currentMatchIndex];
+        if (match.LineNumber != lineNumber)
+            return null;
+
+        var column = Math.Min(Math.Max(0, match.ColumnInLine), line.Length);
+        var length = Math.Min(FindBox.Text.Length, line.Length - column);
+        return length > 0 ? (column, length) : null;
+    }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
@@ -136,7 +189,7 @@ public partial class LargeFileViewer : UserControl
             }
             else
             {
-                if (_showOnlyLines != null) ClearShowOnly();
+                if (_viewport.IsFiltered) ClearShowOnly();
                 Render();
             }
         });
@@ -144,14 +197,25 @@ public partial class LargeFileViewer : UserControl
 
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
-        if (DataContext is EditorTabViewModel tab && tab.LargeFileDoc != null)
-        {
-            _doc = tab.LargeFileDoc;
-            _topLine = 1;
-            UpdateScrollBar();
-            UpdateFooter();
-            Render();
-        }
+        SetDocument((e.NewValue as EditorTabViewModel)?.LargeFileDoc);
+    }
+
+    private void SetDocument(LargeFileDocument? document)
+    {
+        if (ReferenceEquals(_doc, document))
+            return;
+
+        _searchCts?.Cancel();
+        _filterScanCts?.Cancel();
+        _doc = document;
+        _searchMatches = null;
+        _currentMatchIndex = -1;
+        _viewport.Configure(_doc?.TotalLines ?? 0, _viewport.VisibleLineCount);
+        _viewport.SetTopLine(1);
+        _viewport.ClearShowOnly();
+        UpdateScrollBar();
+        UpdateFooter();
+        Render();
     }
 
     private void UpdateMetrics()
@@ -160,35 +224,38 @@ public partial class LargeFileViewer : UserControl
         var ft = new FormattedText("Mg", CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
             typeface, FontSize, Brushes.Black, VisualTreeHelper.GetDpi(this).PixelsPerDip);
         _lineHeight = Math.Ceiling(ft.Height);
-        _visibleLineCount = Math.Max(1, (int)(RenderHost.ActualHeight / _lineHeight));
+        var visibleLines = Math.Max(1, (int)(RenderHost.ActualHeight / _lineHeight));
+        _viewport.Configure(_doc?.TotalLines ?? 0, visibleLines);
     }
 
     private void UpdateScrollBar()
     {
-        if (_doc == null) { VScroll.Maximum = 0; return; }
-        long total = EffectiveLineCount();
+        if (_doc == null)
+        {
+            VScroll.Minimum = 0;
+            VScroll.Maximum = 0;
+            VScroll.ViewportSize = 1;
+            VScroll.LargeChange = 1;
+            VScroll.Value = 0;
+            return;
+        }
+
         VScroll.Minimum = 1;
-        VScroll.Maximum = Math.Max(1, total);
-        VScroll.ViewportSize = _visibleLineCount;
-        VScroll.LargeChange = Math.Max(1, _visibleLineCount - 1);
-        VScroll.Value = _topLine;
+        VScroll.Maximum = _viewport.MaxTopLine;
+        VScroll.ViewportSize = _viewport.VisibleLineCount;
+        VScroll.LargeChange = Math.Max(1, _viewport.VisibleLineCount - 1);
+        VScroll.Value = _viewport.TopLine;
     }
 
-    private long EffectiveLineCount() =>
-        _showOnlyLines != null ? _showOnlyLines.Count : (_doc?.TotalLines ?? 0);
+    private long EffectiveLineCount() => _viewport.EffectiveLineCount;
 
-    private long ResolvePhysicalLine(long logicalIndex1Based)
-    {
-        if (_showOnlyLines == null) return logicalIndex1Based;
-        long idx = logicalIndex1Based - 1;
-        if (idx < 0 || idx >= _showOnlyLines.Count) return 0;
-        return _showOnlyLines[(int)idx];
-    }
+    private long ResolvePhysicalLine(long logicalIndex1Based) =>
+        _viewport.ResolvePhysicalLine(logicalIndex1Based);
 
     private void UpdateFooter()
     {
         if (_doc == null) { FooterText.Text = ""; return; }
-        string mode = _showOnlyLines != null ? $"Filtered: {_showOnlyLines.Count:N0} / " : "";
+        string mode = _viewport.IsFiltered ? $"Filtered: {_viewport.FilteredLineCount:N0} / " : "";
         FooterText.Text = $"{mode}{_doc.TotalLines:N0} lines • {FormatBytes(_doc.FileSize)} • {_doc.EncodingDisplayName} • Read-only (large file viewer)";
     }
 
@@ -221,26 +288,16 @@ public partial class LargeFileViewer : UserControl
 
     private void VScroll_Scroll(object sender, System.Windows.Controls.Primitives.ScrollEventArgs e)
     {
-        _topLine = (long)Math.Round(VScroll.Value);
-        ClampTopLine();
+        _viewport.SetTopLine((long)Math.Round(e.NewValue));
+        UpdateScrollBar();
         Render();
     }
 
     private void ScrollBy(int deltaLines)
     {
-        _topLine += deltaLines;
-        ClampTopLine();
-        VScroll.Value = _topLine;
+        _viewport.ScrollBy(deltaLines);
+        UpdateScrollBar();
         Render();
-    }
-
-    private void ClampTopLine()
-    {
-        long total = EffectiveLineCount();
-        if (total == 0) { _topLine = 1; return; }
-        long max = Math.Max(1, total - _visibleLineCount + 1);
-        if (_topLine > max) _topLine = max;
-        if (_topLine < 1) _topLine = 1;
     }
 
     private void GotoBox_KeyDown(object sender, KeyEventArgs e)
@@ -255,19 +312,7 @@ public partial class LargeFileViewer : UserControl
     public void GoToLine(long lineNumber)
     {
         if (_doc == null) return;
-        lineNumber = Math.Max(1, Math.Min(_doc.TotalLines, lineNumber));
-        if (_showOnlyLines != null)
-        {
-            // find index in filtered list
-            int idx = _showOnlyLines.BinarySearch(lineNumber);
-            if (idx < 0) idx = ~idx;
-            _topLine = Math.Max(1, idx + 1);
-        }
-        else
-        {
-            _topLine = lineNumber;
-        }
-        ClampTopLine();
+        _viewport.GoToPhysicalLine(lineNumber);
         UpdateScrollBar();
         Render();
     }
@@ -348,7 +393,9 @@ public partial class LargeFileViewer : UserControl
         if (activeFilters.Count == 0) return;
 
         long total = _doc.TotalLines;
-        long start = _topLine;
+        long start = _viewport.IsFiltered
+            ? Math.Max(1, ResolvePhysicalLine(_viewport.TopLine))
+            : _viewport.TopLine;
         long end = forward ? total : 1;
         int step = forward ? 1 : -1;
 
@@ -403,8 +450,7 @@ public partial class LargeFileViewer : UserControl
                 onProgress: footerProgress,
                 ct: ct);
 
-            _showOnlyLines = result;
-            _topLine = 1;
+            _viewport.ShowOnly(result);
             UpdateScrollBar();
             UpdateFooter();
             Render();
@@ -417,7 +463,7 @@ public partial class LargeFileViewer : UserControl
 
     public void ClearShowOnly()
     {
-        _showOnlyLines = null;
+        _viewport.ClearShowOnly();
         UpdateScrollBar();
         UpdateFooter();
         Render();
@@ -508,7 +554,7 @@ public partial class LargeFileViewer : UserControl
             int visible = (int)Math.Ceiling(ActualHeight / lineH) + 1;
             for (int i = 0; i < visible; i++)
             {
-                long logical = _owner._topLine + i;
+                long logical = _owner._viewport.TopLine + i;
                 if (logical > totalEff) break;
                 long physical = _owner.ResolvePhysicalLine(logical);
                 if (physical == 0) break;
@@ -531,8 +577,35 @@ public partial class LargeFileViewer : UserControl
 
                 var textFt = new FormattedText(line, CultureInfo.InvariantCulture,
                     FlowDirection.LeftToRight, typeface, _owner.FontSize, textBrush, dpi);
-                dc.DrawText(textFt, new Point(gutterW + 6, y));
+                var textOrigin = new Point(gutterW + 6, y);
+                DrawCurrentSearchMatch(dc, line, physical, textOrigin, typeface, textBrush, dpi, lineH);
+                dc.DrawText(textFt, textOrigin);
             }
+        }
+
+        private void DrawCurrentSearchMatch(
+            DrawingContext dc,
+            string line,
+            long lineNumber,
+            Point textOrigin,
+            Typeface typeface,
+            Brush textBrush,
+            double dpi,
+            double lineHeight)
+        {
+            var match = _owner.GetCurrentSearchMatchForLine(lineNumber, line);
+            if (match == null)
+                return;
+
+            var prefix = match.Value.column == 0 ? string.Empty : line.Substring(0, match.Value.column);
+            var matchText = line.Substring(match.Value.column, match.Value.length);
+            var prefixText = new FormattedText(prefix, CultureInfo.InvariantCulture,
+                FlowDirection.LeftToRight, typeface, _owner.FontSize, textBrush, dpi);
+            var matchFormattedText = new FormattedText(matchText, CultureInfo.InvariantCulture,
+                FlowDirection.LeftToRight, typeface, _owner.FontSize, textBrush, dpi);
+            var highlightBrush = TryGetBrush("EditorFindHighlightBrush", new SolidColorBrush(Color.FromArgb(120, 255, 200, 0)));
+            var x = textOrigin.X + prefixText.WidthIncludingTrailingWhitespace;
+            dc.DrawRectangle(highlightBrush, null, new Rect(x, textOrigin.Y, matchFormattedText.WidthIncludingTrailingWhitespace, lineHeight));
         }
 
         private Brush TryGetBrush(string key, Brush fallback)
