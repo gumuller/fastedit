@@ -182,10 +182,11 @@ public partial class LargeFileViewer : UserControl
         {
             if (_filterService == null) return;
             _filters = _filterService.Filters.ToList();
+            var activeFilters = LargeFileFilterPolicy.GetActiveFilters(_filters);
 
-            if (_filterService.ShowOnlyFilteredLines && _filters.Any(f => f.IsEnabled && !string.IsNullOrEmpty(f.Pattern)))
+            if (_filterService.ShowOnlyFilteredLines && activeFilters.Count > 0)
             {
-                _ = ShowOnlyFilteredAsync(_filters);
+                _ = ShowOnlyFilteredAsync(activeFilters);
             }
             else
             {
@@ -389,8 +390,19 @@ public partial class LargeFileViewer : UserControl
     private void NavigateFilterMatch(bool forward)
     {
         if (_doc == null || _filters == null) return;
-        var activeFilters = _filters.Where(f => f.IsEnabled && !string.IsNullOrEmpty(f.Pattern) && !f.IsExcluding).ToList();
-        if (activeFilters.Count == 0) return;
+        var activeFilters = LargeFileFilterPolicy.GetActiveFilters(_filters);
+        if (!LargeFileFilterPolicy.HasNavigationFilter(activeFilters)) return;
+
+        if (_viewport.FilteredPhysicalLines != null &&
+            LargeFileFilterPolicy.TryFindAdjacentMatch(
+                _viewport.FilteredPhysicalLines,
+                Math.Max(1, ResolvePhysicalLine(_viewport.TopLine)),
+                forward,
+                out var filteredTarget))
+        {
+            GoToLine(filteredTarget);
+            return;
+        }
 
         long total = _doc.TotalLines;
         long start = _viewport.IsFiltered
@@ -408,13 +420,10 @@ public partial class LargeFileViewer : UserControl
             for (long ln = from; forward ? ln <= to : ln >= to; ln += step)
             {
                 var text = _doc.GetLine(ln);
-                foreach (var f in activeFilters)
+                if (LargeFileFilterPolicy.MatchesNavigationFilter(text, activeFilters))
                 {
-                    if (f.Matches(text))
-                    {
-                        GoToLine(ln);
-                        return;
-                    }
+                    GoToLine(ln);
+                    return;
                 }
             }
         }
@@ -430,25 +439,32 @@ public partial class LargeFileViewer : UserControl
     public async Task ShowOnlyFilteredAsync(IReadOnlyList<LineFilter> filters, IProgress<double>? progress = null)
     {
         if (_doc == null) return;
-        var activeFilters = filters.Where(f => f.IsEnabled && !string.IsNullOrEmpty(f.Pattern)).ToList();
+        var activeFilters = LargeFileFilterPolicy.GetActiveFilters(filters);
         if (activeFilters.Count == 0) { ClearShowOnly(); return; }
 
         _filterScanCts?.Cancel();
-        _filterScanCts = new CancellationTokenSource();
-        var ct = _filterScanCts.Token;
+        var scanCts = new CancellationTokenSource();
+        _filterScanCts = scanCts;
+        var ct = scanCts.Token;
         _filters = filters;
 
         FooterText.Text = "Scanning for filter matches… 0%";
         var footerProgress = new Progress<double>(p =>
-            FooterText.Text = $"Scanning for filter matches… {p * 100:0}%");
+        {
+            FooterText.Text = $"Scanning for filter matches… {p * 100:0}%";
+            progress?.Report(p);
+        });
 
         try
         {
             var result = await _doc.FindMatchingLinesAsync(
-                predicate: line => LineMatchesAnyFilter(line, activeFilters),
+                predicate: line => LargeFileFilterPolicy.ShouldShowLine(line, activeFilters),
                 maxResults: int.MaxValue,
                 onProgress: footerProgress,
                 ct: ct);
+
+            if (!ReferenceEquals(_filterScanCts, scanCts))
+                return;
 
             _viewport.ShowOnly(result);
             UpdateScrollBar();
@@ -469,44 +485,26 @@ public partial class LargeFileViewer : UserControl
         Render();
     }
 
-    private static bool LineMatchesAnyFilter(string line, IReadOnlyList<LineFilter> filters)
-    {
-        bool included = false;
-        bool hasIncluder = false;
-        foreach (var f in filters)
-        {
-            if (!f.IsEnabled || string.IsNullOrEmpty(f.Pattern)) continue;
-            bool m = f.Matches(line);
-            if (f.IsExcluding)
-            {
-                if (m) return false;
-            }
-            else
-            {
-                hasIncluder = true;
-                if (m) included = true;
-            }
-        }
-        return hasIncluder ? included : true;
-    }
-
     private (Brush bg, Brush fg)? GetFilterBrushesFor(string line)
     {
-        if (_filters == null) return null;
-        foreach (var f in _filters)
+        var filter = LargeFileFilterPolicy.FirstVisibleLineFilter(line, _filters);
+        if (filter == null) return null;
+
+        try
         {
-            if (!f.IsEnabled || f.IsExcluding || string.IsNullOrEmpty(f.Pattern)) continue;
-            if (f.Matches(line))
-            {
-                try
-                {
-                    var c = (Color)ColorConverter.ConvertFromString(f.BackgroundColor);
-                    return (new SolidColorBrush(c), ContrastingTextBrush(c));
-                }
-                catch { return null; }
-            }
+            if (ColorConverter.ConvertFromString(filter.BackgroundColor) is not Color color)
+                return null;
+
+            return (new SolidColorBrush(color), ContrastingTextBrush(color));
         }
-        return null;
+        catch (FormatException)
+        {
+            return null;
+        }
+        catch (NotSupportedException)
+        {
+            return null;
+        }
     }
 
     private static Brush ContrastingTextBrush(Color bg)
