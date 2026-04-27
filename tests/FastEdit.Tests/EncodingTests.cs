@@ -123,6 +123,58 @@ public class EncodingTests
         finally { File.Delete(path); }
     }
 
+    [Fact]
+    public async Task ReadFile_ContentBeyondDetectionSample_IsReadCompletely()
+    {
+        var path = Path.GetTempFileName();
+        var content = new string('a', 4096) + "tail text beyond sample";
+        try
+        {
+            await File.WriteAllTextAsync(path, content, new UTF8Encoding(false));
+
+            var result = await _fileService.ReadFileWithEncodingAsync(path);
+
+            Assert.Equal(content, result.Content);
+            Assert.False(result.HasBom);
+            Assert.Equal("utf-8", result.Encoding.WebName);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public async Task ReadFile_Utf8SequenceCrossingDetectionSampleBoundary_RemainsUtf8()
+    {
+        var path = Path.GetTempFileName();
+        var content = new string('a', 4095) + "é after boundary";
+        try
+        {
+            await File.WriteAllTextAsync(path, content, new UTF8Encoding(false));
+
+            var result = await _fileService.ReadFileWithEncodingAsync(path);
+
+            Assert.Equal(content, result.Content);
+            Assert.Equal("utf-8", result.Encoding.WebName);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public async Task ReadFile_InvalidUtf8Sample_FallsBackToWindows1252()
+    {
+        var path = Path.GetTempFileName();
+        try
+        {
+            await File.WriteAllBytesAsync(path, [0x48, 0xE9, 0x6C, 0x6C, 0x6F]);
+
+            var result = await _fileService.ReadFileWithEncodingAsync(path);
+
+            Assert.Equal("Héllo", result.Content);
+            Assert.False(result.HasBom);
+            Assert.Equal("windows-1252", result.Encoding.WebName);
+        }
+        finally { File.Delete(path); }
+    }
+
     private static string CreateTempFile(string content, Encoding encoding)
     {
         var path = Path.GetTempFileName();
