@@ -11,7 +11,7 @@ namespace FastEdit.Core.LargeFile;
 /// <summary>
 /// Memory-mapped, read-only document for multi-GB text files.
 /// Builds a hybrid sparse line index (every N lines or M bytes, whichever first)
-/// and decodes lines on demand. Handles UTF-8 / UTF-16 BOM / Windows-1252 fallback.
+/// and decodes lines on demand. Handles UTF-8 / UTF-16 BOM / ISO-8859-1 fallback.
 /// </summary>
 public sealed class LargeFileDocument : IDisposable
 {
@@ -25,7 +25,7 @@ public sealed class LargeFileDocument : IDisposable
     private readonly MemoryMappedViewAccessor _accessor;
 
     private long _totalLines;
-    private long[] _lineCheckpoints = Array.Empty<long>();
+    private LineCheckpoint[] _lineCheckpoints = Array.Empty<LineCheckpoint>();
 
     public string FilePath { get; }
     public long FileSize { get; }
@@ -103,8 +103,7 @@ public sealed class LargeFileDocument : IDisposable
             return;
         }
 
-        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
-        Encoding = Encoding.GetEncoding(1252);
+        Encoding = Encoding.Latin1;
         BomLength = 0;
     }
 
@@ -140,16 +139,16 @@ public sealed class LargeFileDocument : IDisposable
         if (FileSize == 0 || _accessor == null)
         {
             _totalLines = 0;
-            _lineCheckpoints = new long[] { 0 };
+            _lineCheckpoints = new[] { new LineCheckpoint(1, 0) };
             HasBuiltIndex = true;
             onProgress?.Report(1.0);
             return;
         }
 
-        var checkpoints = new List<long>(1024);
+        var checkpoints = new List<LineCheckpoint>(1024);
         long pos = BomLength;
         long lineCount = 1;
-        checkpoints.Add(pos);
+        checkpoints.Add(new LineCheckpoint(lineCount, pos));
 
         long lastCheckpointBytes = pos;
         long linesSinceCheckpoint = 0;
@@ -189,7 +188,7 @@ public sealed class LargeFileDocument : IDisposable
 
                     if (lineCheckpoint || byteCheckpoint)
                     {
-                        checkpoints.Add(absPos);
+                        checkpoints.Add(new LineCheckpoint(lineCount, absPos));
                         lastCheckpointBytes = absPos;
                         linesSinceCheckpoint = 0;
                     }
@@ -218,11 +217,9 @@ public sealed class LargeFileDocument : IDisposable
         if (!HasBuiltIndex || lineNumber < 1 || lineNumber > _totalLines)
             return string.Empty;
 
-        long approxIdx = (lineNumber - 1) / LineCheckpointInterval;
-        if (approxIdx >= _lineCheckpoints.Length) approxIdx = _lineCheckpoints.Length - 1;
-
-        long pos = _lineCheckpoints[approxIdx];
-        long currentLine = approxIdx * LineCheckpointInterval + 1;
+        var checkpoint = FindCheckpointForLine(lineNumber);
+        long pos = checkpoint.ByteOffset;
+        long currentLine = checkpoint.LineNumber;
 
         bool isUtf16Le = Encoding.Equals(Encoding.Unicode);
         bool isUtf16Be = Encoding.Equals(Encoding.BigEndianUnicode);
@@ -296,9 +293,7 @@ public sealed class LargeFileDocument : IDisposable
         var buf = new byte[byteLen];
         _accessor.ReadArray(lineStart, buf, 0, byteLen);
 
-        int trim = 0;
-        if (!isUtf16Le && !isUtf16Be && byteLen > 0 && buf[byteLen - 1] == 0x0D) trim = 1;
-
+        var trim = GetTrailingCarriageReturnByteCount(buf, 0, byteLen, isUtf16Le, isUtf16Be);
         string text = Encoding.GetString(buf, 0, byteLen - trim);
 
         if (text.Length > MaxDisplayLineChars)
@@ -310,6 +305,33 @@ public sealed class LargeFileDocument : IDisposable
     }
 
     public readonly record struct SearchMatch(long LineNumber, int ColumnInLine);
+
+    private readonly record struct LineCheckpoint(long LineNumber, long ByteOffset);
+
+    private LineCheckpoint FindCheckpointForLine(long lineNumber)
+    {
+        var low = 0;
+        var high = _lineCheckpoints.Length - 1;
+        var best = _lineCheckpoints[0];
+
+        while (low <= high)
+        {
+            var mid = low + ((high - low) / 2);
+            var checkpoint = _lineCheckpoints[mid];
+
+            if (checkpoint.LineNumber <= lineNumber)
+            {
+                best = checkpoint;
+                low = mid + 1;
+            }
+            else
+            {
+                high = mid - 1;
+            }
+        }
+
+        return best;
+    }
 
     public async Task<List<long>> FindMatchingLinesAsync(
         Func<string, bool> predicate,
@@ -413,10 +435,32 @@ public sealed class LargeFileDocument : IDisposable
 
     private string DecodeLine(byte[] buf, int offset, int length, int stride, bool isUtf16Le, bool isUtf16Be)
     {
-        // Strip trailing CR for LF-terminated single-byte lines.
-        if (!isUtf16Le && !isUtf16Be && length > 0 && buf[offset + length - 1] == 0x0D) length--;
+        length -= GetTrailingCarriageReturnByteCount(buf, offset, length, isUtf16Le, isUtf16Be);
         if (length <= 0) return string.Empty;
         return Encoding.GetString(buf, offset, length);
+    }
+
+    private static int GetTrailingCarriageReturnByteCount(
+        byte[] buf,
+        int offset,
+        int length,
+        bool isUtf16Le,
+        bool isUtf16Be)
+    {
+        if (length <= 0)
+            return 0;
+
+        if (!isUtf16Le && !isUtf16Be)
+            return buf[offset + length - 1] == 0x0D ? 1 : 0;
+
+        if (length < 2)
+            return 0;
+
+        var last = offset + length - 2;
+        if (isUtf16Le)
+            return buf[last] == 0x0D && buf[last + 1] == 0x00 ? 2 : 0;
+
+        return buf[last] == 0x00 && buf[last + 1] == 0x0D ? 2 : 0;
     }
 
 

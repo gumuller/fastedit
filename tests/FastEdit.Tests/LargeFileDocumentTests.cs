@@ -92,6 +92,17 @@ public class LargeFileDocumentTests : IDisposable
     }
 
     [Fact]
+    public async Task Detects_Iso88591_Fallback_For_Invalid_Utf8()
+    {
+        var path = CreateTempFile(new byte[] { 0x48, 0xE9, 0x6C, 0x6C, 0x6F });
+        using var doc = new LargeFileDocument(path);
+        await doc.BuildIndexAsync(null, CancellationToken.None);
+
+        Assert.Equal("iso-8859-1", doc.Encoding.WebName);
+        Assert.Equal("Héllo", doc.GetLine(1));
+    }
+
+    [Fact]
     public async Task BuildIndex_Counts_Lines_Correctly()
     {
         var content = "line1\nline2\nline3\nline4\nline5";
@@ -172,6 +183,18 @@ public class LargeFileDocumentTests : IDisposable
     }
 
     [Fact]
+    public async Task GetLine_Strips_CR_From_UTF16_CRLF()
+    {
+        var path = CreateTextFile("one\r\ntwo\r\nthree", Encoding.Unicode, includeBom: true);
+        using var doc = new LargeFileDocument(path);
+        await doc.BuildIndexAsync(null, CancellationToken.None);
+
+        Assert.Equal("one", doc.GetLine(1));
+        Assert.Equal("two", doc.GetLine(2));
+        Assert.Equal("three", doc.GetLine(3));
+    }
+
+    [Fact]
     public async Task GetLine_Returns_Empty_For_Invalid_Line()
     {
         var path = CreateTextFile("only\nline", new UTF8Encoding(false), false);
@@ -249,6 +272,20 @@ public class LargeFileDocumentTests : IDisposable
     }
 
     [Fact]
+    public async Task Search_Can_Be_Cancelled()
+    {
+        var path = CreateTextFile("needle\nother", new UTF8Encoding(false), false);
+        using var doc = new LargeFileDocument(path);
+        await doc.BuildIndexAsync(null, CancellationToken.None);
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await doc.SearchAsync("needle", false, 100, null, cts.Token));
+    }
+
+    [Fact]
     public async Task Empty_File_Has_Zero_Lines()
     {
         var path = CreateTempFile(Array.Empty<byte>());
@@ -318,6 +355,24 @@ public class LargeFileDocumentTests : IDisposable
         Assert.Equal("line-1024", doc.GetLine(1024));
         Assert.Equal("line-1999", doc.GetLine(1999));
         Assert.Equal("line-2000", doc.GetLine(2000));
+    }
+
+    [Fact]
+    public async Task GetLine_Works_When_Byte_Checkpoints_Precede_Line_Checkpoints()
+    {
+        var sb = new StringBuilder();
+        var padding = new string('x', 5_200);
+        for (int i = 1; i <= 600; i++)
+        {
+            sb.Append($"line-{i:0000}:").Append(padding).Append('\n');
+        }
+
+        var path = CreateTextFile(sb.ToString(), new UTF8Encoding(false), false);
+        using var doc = new LargeFileDocument(path);
+        await doc.BuildIndexAsync(null, CancellationToken.None);
+
+        Assert.StartsWith("line-0513:", doc.GetLine(513));
+        Assert.StartsWith("line-0600:", doc.GetLine(600));
     }
 
     [Fact]
