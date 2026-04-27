@@ -446,7 +446,7 @@ public partial class EditorHost : UserControl
     }
 
     // --- Text Tools ---
-    private void OnTextToolRequested(string operation)
+    private void OnTextToolRequested(TextToolOperation operation)
     {
         if (!IsActiveEditorHost() || _currentVm?.IsBinaryMode == true) return;
 
@@ -457,33 +457,8 @@ public partial class EditorHost : UserControl
         bool hasSelection = TextEditor.SelectionLength > 0;
         string input = hasSelection ? TextEditor.SelectedText : TextEditor.Text;
 
-        // Checksums are non-mutating — show result in status bar
-        bool isChecksum = operation is "MD5" or "SHA1" or "SHA256" or "SHA512";
-
-        TextToolResult result = operation switch
-        {
-            "UpperCase" => textTools.ToUpperCase(input),
-            "LowerCase" => textTools.ToLowerCase(input),
-            "TitleCase" => textTools.ToTitleCase(input),
-            "InvertCase" => textTools.InvertCase(input),
-            "RemoveDuplicateLines" => textTools.RemoveDuplicateLines(input),
-            "SortLinesAsc" => textTools.SortLinesAscending(input),
-            "SortLinesDesc" => textTools.SortLinesDescending(input),
-            "TrimTrailing" => textTools.TrimTrailingWhitespace(input),
-            "TrimLeading" => textTools.TrimLeadingWhitespace(input),
-            "TrimAll" => textTools.TrimAllWhitespace(input),
-            "TabsToSpaces" => textTools.TabsToSpaces(input),
-            "SpacesToTabs" => textTools.SpacesToTabs(input),
-            "Base64Encode" => textTools.Base64Encode(input),
-            "Base64Decode" => textTools.Base64Decode(input),
-            "UrlEncode" => textTools.UrlEncode(input),
-            "UrlDecode" => textTools.UrlDecode(input),
-            "MD5" => textTools.ComputeMd5(input),
-            "SHA1" => textTools.ComputeSha1(input),
-            "SHA256" => textTools.ComputeSha256(input),
-            "SHA512" => textTools.ComputeSha512(input),
-            _ => TextToolResult.Fail($"Unknown text tool: {operation}")
-        };
+        bool isChecksum = operation.IsChecksum();
+        TextToolResult result = TextToolOperationRunner.Execute(textTools, operation, input);
 
         if (!result.Success)
         {
@@ -712,8 +687,8 @@ public partial class EditorHost : UserControl
                 OnMoveLineRequested(false);
                 break;
             case MacroAction.TextTool:
-                if (step.Parameter != null)
-                    OnTextToolRequested(step.Parameter);
+                if (step.Parameter != null && TextToolOperationRunner.TryParseLegacyName(step.Parameter, out var operation))
+                    OnTextToolRequested(operation);
                 break;
         }
     }

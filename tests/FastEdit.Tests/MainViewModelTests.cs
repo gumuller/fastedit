@@ -61,6 +61,28 @@ public class MainViewModelTests
         return tab;
     }
 
+    [Fact]
+    public void TextToUpperCaseCommand_RaisesTextToolOperation()
+    {
+        TextToolOperation? operation = null;
+        _sut.TextToolRequested += requestedOperation => operation = requestedOperation;
+
+        _sut.TextToUpperCaseCommand.Execute(null);
+
+        Assert.Equal(TextToolOperation.UpperCase, operation);
+    }
+
+    [Fact]
+    public void TextChecksumMd5Command_RaisesChecksumOperation()
+    {
+        TextToolOperation? operation = null;
+        _sut.TextToolRequested += requestedOperation => operation = requestedOperation;
+
+        _sut.TextChecksumMd5Command.Execute(null);
+
+        Assert.Equal(TextToolOperation.ComputeMd5, operation);
+    }
+
     // --- NewFile ---
 
     [Fact]

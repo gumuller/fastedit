@@ -105,7 +105,7 @@ public partial class MainViewModel : ObservableObject
     public event Action? ShowCompletionRequested;
     public event Action? OpenSettingsRequested;
     public event Action? ToggleSplitViewRequested;
-    public event Action<string>? TextToolRequested;
+    public event Action<TextToolOperation>? TextToolRequested;
     public event Action? PrintRequested;
     public event Action? SelectNextOccurrenceRequested;
     public event Action? SelectAllOccurrencesRequested;
@@ -310,27 +310,26 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void MinifyDocument() => MinifyDocumentRequested?.Invoke();
 
-    // Text tools — each invokes TextToolRequested with the operation name
-    [RelayCommand] private void TextToUpperCase() => TextToolRequested?.Invoke("UpperCase");
-    [RelayCommand] private void TextToLowerCase() => TextToolRequested?.Invoke("LowerCase");
-    [RelayCommand] private void TextToTitleCase() => TextToolRequested?.Invoke("TitleCase");
-    [RelayCommand] private void TextInvertCase() => TextToolRequested?.Invoke("InvertCase");
-    [RelayCommand] private void TextRemoveDuplicateLines() => TextToolRequested?.Invoke("RemoveDuplicateLines");
-    [RelayCommand] private void TextSortLinesAsc() => TextToolRequested?.Invoke("SortLinesAsc");
-    [RelayCommand] private void TextSortLinesDesc() => TextToolRequested?.Invoke("SortLinesDesc");
-    [RelayCommand] private void TextTrimTrailing() => TextToolRequested?.Invoke("TrimTrailing");
-    [RelayCommand] private void TextTrimLeading() => TextToolRequested?.Invoke("TrimLeading");
-    [RelayCommand] private void TextTrimAll() => TextToolRequested?.Invoke("TrimAll");
-    [RelayCommand] private void TextTabsToSpaces() => TextToolRequested?.Invoke("TabsToSpaces");
-    [RelayCommand] private void TextSpacesToTabs() => TextToolRequested?.Invoke("SpacesToTabs");
-    [RelayCommand] private void TextBase64Encode() => TextToolRequested?.Invoke("Base64Encode");
-    [RelayCommand] private void TextBase64Decode() => TextToolRequested?.Invoke("Base64Decode");
-    [RelayCommand] private void TextUrlEncode() => TextToolRequested?.Invoke("UrlEncode");
-    [RelayCommand] private void TextUrlDecode() => TextToolRequested?.Invoke("UrlDecode");
-    [RelayCommand] private void TextChecksumMd5() => TextToolRequested?.Invoke("MD5");
-    [RelayCommand] private void TextChecksumSha1() => TextToolRequested?.Invoke("SHA1");
-    [RelayCommand] private void TextChecksumSha256() => TextToolRequested?.Invoke("SHA256");
-    [RelayCommand] private void TextChecksumSha512() => TextToolRequested?.Invoke("SHA512");
+    [RelayCommand] private void TextToUpperCase() => TextToolRequested?.Invoke(TextToolOperation.UpperCase);
+    [RelayCommand] private void TextToLowerCase() => TextToolRequested?.Invoke(TextToolOperation.LowerCase);
+    [RelayCommand] private void TextToTitleCase() => TextToolRequested?.Invoke(TextToolOperation.TitleCase);
+    [RelayCommand] private void TextInvertCase() => TextToolRequested?.Invoke(TextToolOperation.InvertCase);
+    [RelayCommand] private void TextRemoveDuplicateLines() => TextToolRequested?.Invoke(TextToolOperation.RemoveDuplicateLines);
+    [RelayCommand] private void TextSortLinesAsc() => TextToolRequested?.Invoke(TextToolOperation.SortLinesAsc);
+    [RelayCommand] private void TextSortLinesDesc() => TextToolRequested?.Invoke(TextToolOperation.SortLinesDesc);
+    [RelayCommand] private void TextTrimTrailing() => TextToolRequested?.Invoke(TextToolOperation.TrimTrailing);
+    [RelayCommand] private void TextTrimLeading() => TextToolRequested?.Invoke(TextToolOperation.TrimLeading);
+    [RelayCommand] private void TextTrimAll() => TextToolRequested?.Invoke(TextToolOperation.TrimAll);
+    [RelayCommand] private void TextTabsToSpaces() => TextToolRequested?.Invoke(TextToolOperation.TabsToSpaces);
+    [RelayCommand] private void TextSpacesToTabs() => TextToolRequested?.Invoke(TextToolOperation.SpacesToTabs);
+    [RelayCommand] private void TextBase64Encode() => TextToolRequested?.Invoke(TextToolOperation.Base64Encode);
+    [RelayCommand] private void TextBase64Decode() => TextToolRequested?.Invoke(TextToolOperation.Base64Decode);
+    [RelayCommand] private void TextUrlEncode() => TextToolRequested?.Invoke(TextToolOperation.UrlEncode);
+    [RelayCommand] private void TextUrlDecode() => TextToolRequested?.Invoke(TextToolOperation.UrlDecode);
+    [RelayCommand] private void TextChecksumMd5() => TextToolRequested?.Invoke(TextToolOperation.ComputeMd5);
+    [RelayCommand] private void TextChecksumSha1() => TextToolRequested?.Invoke(TextToolOperation.ComputeSha1);
+    [RelayCommand] private void TextChecksumSha256() => TextToolRequested?.Invoke(TextToolOperation.ComputeSha256);
+    [RelayCommand] private void TextChecksumSha512() => TextToolRequested?.Invoke(TextToolOperation.ComputeSha512);
 
     [RelayCommand]
     private void ToggleFolding() => IsFoldingEnabled = !IsFoldingEnabled;
