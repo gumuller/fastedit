@@ -1,4 +1,5 @@
 using System.Windows;
+using System.Diagnostics;
 using FastEdit.Helpers;
 using FastEdit.Services;
 using FastEdit.Services.Interfaces;
@@ -17,10 +18,12 @@ public partial class App : Application
 
     /// <summary>Command-line file paths passed to the app (e.g. from Explorer "Open with").</summary>
     public static IReadOnlyList<string> StartupFiles { get; private set; } = Array.Empty<string>();
+    public static bool HasAnotherRunningInstance { get; private set; }
 
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        HasAnotherRunningInstance = DetectAnotherRunningInstance();
 
         // Capture any file paths passed on the command line (e.g. Explorer
         // "Open with FastEdit" passes the clicked file as the first arg).
@@ -114,6 +117,36 @@ public partial class App : Application
         var mainVm = Services.GetRequiredService<MainViewModel>();
         autoSave.SetEntryProvider(() => mainVm.GetAutoSaveEntries());
         autoSave.Start();
+    }
+
+    private static bool DetectAnotherRunningInstance()
+    {
+        using var currentProcess = Process.GetCurrentProcess();
+
+        foreach (var process in Process.GetProcessesByName(currentProcess.ProcessName))
+        {
+            using (process)
+            {
+                if (process.Id == currentProcess.Id)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    if (!process.HasExited && process.MainWindowHandle != IntPtr.Zero)
+                    {
+                        return true;
+                    }
+                }
+                catch (InvalidOperationException ex)
+                {
+                    Trace.TraceWarning("Failed to inspect running FastEdit process '{0}': {1}", process.Id, ex.Message);
+                }
+            }
+        }
+
+        return false;
     }
 
     protected override void OnExit(ExitEventArgs e)

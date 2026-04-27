@@ -140,7 +140,8 @@ public partial class MainWindow : FluentWindow
         {
             // Check for crash recovery first
             var autoSave = App.Services.GetService<IAutoSaveService>();
-            if (autoSave != null && autoSave.HasRecoveryFiles())
+            if (autoSave != null &&
+                CrashRecoveryStartupPolicy.ShouldPromptForRecovery(autoSave.HasRecoveryFiles(), App.HasAnotherRunningInstance))
             {
                 var dialogService = App.Services.GetRequiredService<IDialogService>();
                 var result = dialogService.ShowMessage(
