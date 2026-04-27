@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
@@ -19,6 +20,8 @@ public class CommandRunnerService : IDisposable
     private int _commandId;
     private readonly StringBuilder _outputBuffer = new();
     private System.Timers.Timer? _flushTimer;
+    private Task? _outputReaderTask;
+    private Task? _errorReaderTask;
 
     private const string SentinelPrefix = "##FASTEDIT_SENTINEL##";
 
@@ -33,8 +36,18 @@ public class CommandRunnerService : IDisposable
     {
         get
         {
-            try { return _shellProcess != null && !_shellProcess.HasExited; }
-            catch { return false; }
+            try
+            {
+                return _shellProcess != null && !_shellProcess.HasExited;
+            }
+            catch (ObjectDisposedException)
+            {
+                return false;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
         }
     }
     public bool IsBusy => !_isReady;
@@ -77,9 +90,8 @@ public class CommandRunnerService : IDisposable
             return;
         }
 
-        // Start reading output/error streams
-        Task.Run(() => ReadOutputStream());
-        Task.Run(() => ReadErrorStream());
+        _outputReaderTask = ReadOutputStreamAsync();
+        _errorReaderTask = ReadErrorStreamAsync();
 
         // Set up output batching timer (flush every 50ms)
         _flushTimer = new System.Timers.Timer(50);
@@ -100,12 +112,18 @@ public class CommandRunnerService : IDisposable
 
     public void ExecuteCommand(string command)
     {
+        if (string.IsNullOrWhiteSpace(command)) return;
+
         if (_shellProcess == null || _shellProcess.HasExited)
         {
             StartShell();
         }
 
-        if (string.IsNullOrWhiteSpace(command)) return;
+        if (!IsRunning)
+        {
+            OutputReceived?.Invoke("Shell is not running.\r\n");
+            return;
+        }
 
         _commandHistory.Add(command);
         _historyIndex = _commandHistory.Count;
@@ -147,7 +165,8 @@ public class CommandRunnerService : IDisposable
         // Kill the shell and restart it
         if (_shellProcess != null && !_shellProcess.HasExited)
         {
-            try { _shellProcess.Kill(entireProcessTree: true); } catch { }
+            KillShellProcess("stop current command");
+            WaitForReaderTasks();
             _shellProcess = null;
         }
         _isReady = true;
@@ -185,10 +204,21 @@ public class CommandRunnerService : IDisposable
             _shellProcess.StandardInput.WriteLine(text);
             _shellProcess.StandardInput.Flush();
         }
-        catch { }
+        catch (ObjectDisposedException ex) when (!_disposed)
+        {
+            Trace.TraceWarning("Failed to send command to shell: {0}", ex.Message);
+        }
+        catch (InvalidOperationException ex) when (!_disposed)
+        {
+            Trace.TraceWarning("Failed to send command to shell: {0}", ex.Message);
+        }
+        catch (IOException ex) when (!_disposed)
+        {
+            Trace.TraceWarning("Failed to send command to shell: {0}", ex.Message);
+        }
     }
 
-    private async Task ReadOutputStream()
+    private async Task ReadOutputStreamAsync()
     {
         if (_shellProcess == null) return;
         var reader = _shellProcess.StandardOutput;
@@ -197,16 +227,27 @@ public class CommandRunnerService : IDisposable
         try
         {
             int bytesRead;
-            while ((bytesRead = await reader.ReadAsync(buffer, 0, buffer.Length)) > 0)
+            while ((bytesRead = await reader.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false)) > 0)
             {
                 var text = new string(buffer, 0, bytesRead);
                 ProcessOutput(text);
             }
         }
-        catch { }
+        catch (ObjectDisposedException ex) when (!_disposed)
+        {
+            Trace.TraceWarning("Command runner output stream failed: {0}", ex.Message);
+        }
+        catch (InvalidOperationException ex) when (!_disposed)
+        {
+            Trace.TraceWarning("Command runner output stream failed: {0}", ex.Message);
+        }
+        catch (IOException ex) when (!_disposed)
+        {
+            Trace.TraceWarning("Command runner output stream failed: {0}", ex.Message);
+        }
     }
 
-    private async Task ReadErrorStream()
+    private async Task ReadErrorStreamAsync()
     {
         if (_shellProcess == null) return;
         var reader = _shellProcess.StandardError;
@@ -215,7 +256,7 @@ public class CommandRunnerService : IDisposable
         try
         {
             int bytesRead;
-            while ((bytesRead = await reader.ReadAsync(buffer, 0, buffer.Length)) > 0)
+            while ((bytesRead = await reader.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false)) > 0)
             {
                 var text = new string(buffer, 0, bytesRead);
                 var cleaned = StripAnsiCodes(text);
@@ -228,7 +269,18 @@ public class CommandRunnerService : IDisposable
                 }
             }
         }
-        catch { }
+        catch (ObjectDisposedException ex) when (!_disposed)
+        {
+            Trace.TraceWarning("Command runner error stream failed: {0}", ex.Message);
+        }
+        catch (InvalidOperationException ex) when (!_disposed)
+        {
+            Trace.TraceWarning("Command runner error stream failed: {0}", ex.Message);
+        }
+        catch (IOException ex) when (!_disposed)
+        {
+            Trace.TraceWarning("Command runner error stream failed: {0}", ex.Message);
+        }
     }
 
     private void ProcessOutput(string text)
@@ -327,7 +379,10 @@ public class CommandRunnerService : IDisposable
                 if (File.Exists(pwsh)) return pwsh;
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Trace.TraceWarning("Failed to inspect PATH for PowerShell: {0}", ex.Message);
+        }
 
         return "powershell.exe";
     }
@@ -355,13 +410,70 @@ public class CommandRunnerService : IDisposable
                 if (!_shellProcess.WaitForExit(2000))
                     _shellProcess.Kill(entireProcessTree: true);
             }
-            catch
+            catch (InvalidOperationException ex)
             {
-                try { _shellProcess.Kill(entireProcessTree: true); } catch { }
+                Trace.TraceWarning("Failed to stop command runner shell gracefully: {0}", ex.Message);
+                KillShellProcess("dispose command runner");
+            }
+            catch (IOException ex)
+            {
+                Trace.TraceWarning("Failed to stop command runner shell gracefully: {0}", ex.Message);
+                KillShellProcess("dispose command runner");
+            }
+            catch (Win32Exception ex)
+            {
+                Trace.TraceWarning("Failed to stop command runner shell gracefully: {0}", ex.Message);
+                KillShellProcess("dispose command runner");
             }
         }
 
+        WaitForReaderTasks();
         _shellProcess?.Dispose();
         GC.SuppressFinalize(this);
+    }
+
+    private void WaitForReaderTasks()
+    {
+        WaitForReaderTask(_outputReaderTask, "output");
+        WaitForReaderTask(_errorReaderTask, "error");
+    }
+
+    private static void WaitForReaderTask(Task? readerTask, string streamName)
+    {
+        if (readerTask == null) return;
+
+        try
+        {
+            readerTask.Wait(TimeSpan.FromMilliseconds(500));
+        }
+        catch (AggregateException ex)
+        {
+            Trace.TraceWarning(
+                "Command runner {0} reader ended with an error: {1}",
+                streamName,
+                ex.InnerException?.Message ?? ex.Message);
+        }
+    }
+
+    private void KillShellProcess(string action)
+    {
+        if (_shellProcess == null) return;
+
+        try
+        {
+            _shellProcess.Kill(entireProcessTree: true);
+        }
+        catch (InvalidOperationException ex)
+        {
+            Trace.TraceWarning("Failed to kill shell while trying to {0}: {1}", action, ex.Message);
+        }
+        catch (Win32Exception ex)
+        {
+            Trace.TraceWarning("Failed to kill shell while trying to {0}: {1}", action, ex.Message);
+        }
+        catch (NotSupportedException ex)
+        {
+            Trace.TraceWarning("Failed to kill shell while trying to {0}: {1}", action, ex.Message);
+        }
     }
 }

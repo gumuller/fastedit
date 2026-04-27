@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text;
 using FastEdit.Services;
 using Xunit;
 
@@ -67,6 +68,20 @@ public class CommandRunnerServiceTests
         var next = sut.GetNextHistoryItem();
         Assert.Equal(string.Empty, next);
         sut.Dispose();
+    }
+
+    [Fact]
+    public void ExecuteCommand_Whitespace_DoesNotStartShellOrAddHistory()
+    {
+        var sut = CreateSut();
+        var started = false;
+        sut.CommandStarted += () => started = true;
+
+        sut.ExecuteCommand("   ");
+
+        Assert.Empty(sut.History);
+        Assert.False(started);
+        Assert.False(sut.IsRunning);
     }
 
     // --- Working Directory ---
@@ -149,6 +164,45 @@ public class CommandRunnerServiceTests
         // Should have restarted
         Assert.True(sut.IsRunning);
         sut.Dispose();
+    }
+
+    [Fact]
+    public async Task ExecuteCommand_EmitsOutputAndCompletes()
+    {
+        var sut = CreateSut();
+        try
+        {
+            var output = new StringBuilder();
+            var outputSeen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var commandCompleted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var commandSent = false;
+
+            sut.OutputReceived += text =>
+            {
+                output.Append(text);
+                if (output.ToString().Contains("fastedit-async-ok"))
+                    outputSeen.TrySetResult();
+            };
+            sut.CommandCompleted += () =>
+            {
+                if (commandSent)
+                    commandCompleted.TrySetResult();
+            };
+
+            sut.StartShell();
+            commandSent = true;
+            sut.ExecuteCommand("Write-Output 'fastedit-async-ok'");
+
+            await Task.WhenAll(outputSeen.Task, commandCompleted.Task)
+                .WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.Contains("fastedit-async-ok", output.ToString());
+            Assert.False(sut.IsBusy);
+        }
+        finally
+        {
+            sut.Dispose();
+        }
     }
 
     // --- StripAnsiCodes ---
