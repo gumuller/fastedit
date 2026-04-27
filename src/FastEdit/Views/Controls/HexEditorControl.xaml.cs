@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using FastEdit.Core.HexEngine;
 using FastEdit.ViewModels;
 
 namespace FastEdit.Views.Controls;
@@ -500,30 +501,7 @@ public partial class HexEditorControl : UserControl
 
     private byte[]? ParseSearchQuery(string query)
     {
-        query = query.Trim();
-        if (string.IsNullOrEmpty(query)) return null;
-
-        // Quoted string → search as ASCII/UTF-8 text
-        if (query.StartsWith('"') && query.EndsWith('"') && query.Length >= 2)
-        {
-            var text = query[1..^1];
-            return System.Text.Encoding.UTF8.GetBytes(text);
-        }
-
-        // Otherwise parse as hex bytes (space-separated or continuous)
-        try
-        {
-            var hex = query.Replace(" ", "").Replace("-", "");
-            if (hex.Length % 2 != 0) return null;
-            var bytes = new byte[hex.Length / 2];
-            for (int i = 0; i < bytes.Length; i++)
-                bytes[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
-            return bytes;
-        }
-        catch
-        {
-            return null;
-        }
+        return HexSearchQueryParser.Parse(query);
     }
 
     private void PerformSearch()
