@@ -4,6 +4,7 @@ using System.IO;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using FastEdit.Helpers;
+using FastEdit.Infrastructure;
 using FastEdit.Services.Interfaces;
 using FastEdit.Theming;
 
@@ -228,10 +229,22 @@ public partial class MainViewModel : ObservableObject
     private void Print() => PrintRequested?.Invoke();
 
     [RelayCommand]
-    private void SelectNextOccurrence() => SelectNextOccurrenceRequested?.Invoke();
+    private void SelectNextOccurrence()
+    {
+        if (!IsSelectedTabFeatureEnabled(gate => gate.OccurrenceHighlightingEnabled))
+            return;
+
+        SelectNextOccurrenceRequested?.Invoke();
+    }
 
     [RelayCommand]
-    private void SelectAllOccurrences() => SelectAllOccurrencesRequested?.Invoke();
+    private void SelectAllOccurrences()
+    {
+        if (!IsSelectedTabFeatureEnabled(gate => gate.OccurrenceHighlightingEnabled))
+            return;
+
+        SelectAllOccurrencesRequested?.Invoke();
+    }
 
     [RelayCommand]
     private void MacroStartRecording() => MacroStartRecordingRequested?.Invoke();
@@ -396,7 +409,13 @@ public partial class MainViewModel : ObservableObject
     private void CommandPalette() => CommandPaletteRequested?.Invoke();
 
     [RelayCommand]
-    private void ShowCompletion() => ShowCompletionRequested?.Invoke();
+    private void ShowCompletion()
+    {
+        if (!IsSelectedTabFeatureEnabled(gate => gate.CompletionEnabled))
+            return;
+
+        ShowCompletionRequested?.Invoke();
+    }
 
     [RelayCommand]
     private void OpenSettings() => OpenSettingsRequested?.Invoke();
@@ -733,6 +752,7 @@ public partial class MainViewModel : ObservableObject
     {
         if (sender is EditorTabViewModel tab &&
             (e.PropertyName == nameof(EditorTabViewModel.Mode) ||
+             e.PropertyName == nameof(EditorTabViewModel.FileSize) ||
              e.PropertyName == nameof(EditorTabViewModel.Line) ||
              e.PropertyName == nameof(EditorTabViewModel.Column)))
         {
@@ -754,9 +774,29 @@ public partial class MainViewModel : ObservableObject
         }
         else
         {
+            var gate = EditorFeatureGatePolicy.Create(tab.Mode, tab.FileSize);
             StatusText = $"Ln {tab.Line}, Col {tab.Column} | {tab.Encoding}";
+            if (gate.StatusMessage != null)
+            {
+                StatusText = $"{gate.StatusMessage} | {StatusText}";
+            }
             LineEnding = LineEndingHelper.ToDisplayString(LineEndingHelper.Detect(tab.Content));
         }
+    }
+
+    private bool IsSelectedTabFeatureEnabled(Func<EditorFeatureGate, bool> isEnabled)
+    {
+        if (SelectedTab == null)
+            return false;
+
+        var gate = EditorFeatureGatePolicy.Create(SelectedTab.Mode, SelectedTab.FileSize);
+        if (isEnabled(gate))
+            return true;
+
+        if (gate.StatusMessage != null)
+            StatusText = gate.StatusMessage;
+
+        return false;
     }
 
     public async Task RestoreSessionAsync()

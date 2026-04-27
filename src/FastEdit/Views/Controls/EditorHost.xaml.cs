@@ -4,6 +4,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using FastEdit.Helpers;
+using FastEdit.Infrastructure;
 using FastEdit.Services;
 using FastEdit.Services.Interfaces;
 using FastEdit.Theming;
@@ -196,7 +197,7 @@ public partial class EditorHost : UserControl
                 TextEditor.FontSize = vm.EditorFontSize;
                 break;
             case nameof(MainViewModel.IsFoldingEnabled):
-                if (vm.IsFoldingEnabled)
+                if (vm.IsFoldingEnabled && GetCurrentFeatureGate().FoldingEnabled)
                     InstallFolding();
                 else
                     UninstallFolding();
@@ -517,7 +518,7 @@ public partial class EditorHost : UserControl
 
     private void OnSelectNextOccurrence()
     {
-        if (!IsActiveEditorHost() || !IsTextMode(_currentVm)) return;
+        if (!CanUseTextFeature(gate => gate.OccurrenceHighlightingEnabled)) return;
 
         var selectedText = TextEditor.SelectedText;
         if (string.IsNullOrEmpty(selectedText))
@@ -560,7 +561,7 @@ public partial class EditorHost : UserControl
 
     private void OnSelectAllOccurrences()
     {
-        if (!IsActiveEditorHost() || !IsTextMode(_currentVm)) return;
+        if (!CanUseTextFeature(gate => gate.OccurrenceHighlightingEnabled)) return;
 
         var selectedText = TextEditor.SelectedText;
         if (string.IsNullOrEmpty(selectedText))
@@ -687,7 +688,7 @@ public partial class EditorHost : UserControl
     private void InstallFolding()
     {
         var vm = _currentVm;
-        if (!IsTextMode(vm)) return;
+        if (!IsTextMode(vm) || !GetCurrentFeatureGate().FoldingEnabled) return;
         _foldingManager = FoldingHelper.Install(TextEditor, vm.SyntaxLanguage);
     }
 
@@ -881,6 +882,12 @@ public partial class EditorHost : UserControl
     private void OnCaretPositionChangedForBrackets(object? sender, EventArgs e)
     {
         if (_bracketRenderer == null) return;
+        if (!GetCurrentFeatureGate().BracketMatchingEnabled)
+        {
+            _bracketRenderer.SetHighlight(null);
+            return;
+        }
+
         var result = BracketSearcher.FindMatchingBracket(TextEditor.Document, TextEditor.CaretOffset);
         _bracketRenderer.SetHighlight(result);
     }
@@ -922,7 +929,7 @@ public partial class EditorHost : UserControl
     // --- Minimap ---
     private void UpdateMinimapVisibility(bool visible)
     {
-        if (visible && IsTextMode(_currentVm))
+        if (visible && IsTextMode(_currentVm) && GetCurrentFeatureGate().MinimapEnabled)
         {
             MinimapColumn.Width = new GridLength(100);
             DocumentMap.Visibility = Visibility.Visible;
@@ -980,6 +987,20 @@ public partial class EditorHost : UserControl
     private static bool IsBinaryMode([NotNullWhen(true)] EditorTabViewModel? vm) => vm?.Mode == FileOpenMode.Binary;
 
     private static bool IsTextMode([NotNullWhen(true)] EditorTabViewModel? vm) => vm?.Mode == FileOpenMode.Text;
+
+    private EditorFeatureGate GetCurrentFeatureGate()
+    {
+        return _currentVm == null
+            ? EditorFeatureGatePolicy.Create(FileOpenMode.Text, fileSize: 0)
+            : EditorFeatureGatePolicy.Create(_currentVm.Mode, _currentVm.FileSize);
+    }
+
+    private bool CanUseTextFeature(Func<EditorFeatureGate, bool> isEnabled)
+    {
+        return IsActiveEditorHost() &&
+               IsTextMode(_currentVm) &&
+               isEnabled(GetCurrentFeatureGate());
+    }
 
     private void OnThemeChanged(object? sender, ThemeDefinition theme)
     {
@@ -1214,12 +1235,14 @@ public partial class EditorHost : UserControl
             TextEditor.TextChanged -= TextEditor_TextChanged;
             TextEditor.TextChanged += TextEditor_TextChanged;
 
-            // Apply syntax highlighting
-            var highlighting = GetHighlightingForLanguage(vm.SyntaxLanguage);
-            TextEditor.SyntaxHighlighting = highlighting;
+            var featureGate = EditorFeatureGatePolicy.Create(vm.Mode, vm.FileSize);
+
+            TextEditor.SyntaxHighlighting = featureGate.SyntaxHighlightingEnabled
+                ? GetHighlightingForLanguage(vm.SyntaxLanguage)
+                : null;
 
             // Apply theme syntax colors on top of default highlighting
-            if (_themeService?.CurrentTheme != null)
+            if (featureGate.SyntaxHighlightingEnabled && _themeService?.CurrentTheme != null)
             {
                 ApplySyntaxThemeColors(_themeService.CurrentTheme);
             }
@@ -1229,14 +1252,23 @@ public partial class EditorHost : UserControl
             TextEditor.TextArea.Caret.PositionChanged += Caret_PositionChanged;
 
             ApplyEditorThemeBrushes();
+            UpdateIndentGuides(_mainViewModel?.IsIndentGuidesEnabled == true);
 
             // Install code folding
-            if (_mainViewModel?.IsFoldingEnabled == true)
+            if (_mainViewModel?.IsFoldingEnabled == true && featureGate.FoldingEnabled)
                 InstallFolding();
 
             // Minimap
-            if (_mainViewModel?.IsMinimapVisible == true)
+            if (_mainViewModel?.IsMinimapVisible == true && featureGate.MinimapEnabled)
                 UpdateMinimapVisibility(true);
+            else
+                UpdateMinimapVisibility(false);
+
+            if (!featureGate.OccurrenceHighlightingEnabled)
+                _occurrenceRenderer?.Clear();
+
+            if (!featureGate.BracketMatchingEnabled)
+                _bracketRenderer?.SetHighlight(null);
 
             // Auto-reload
             if (_mainViewModel?.IsAutoReloadEnabled == true && !string.IsNullOrEmpty(vm.FilePath))
@@ -1283,6 +1315,11 @@ public partial class EditorHost : UserControl
     private void OnSelectionChangedForOccurrences(object? sender, EventArgs e)
     {
         if (_occurrenceRenderer == null || !IsActiveEditorHost()) return;
+        if (!GetCurrentFeatureGate().OccurrenceHighlightingEnabled)
+        {
+            _occurrenceRenderer.Clear();
+            return;
+        }
 
         var selectedText = TextEditor.SelectedText?.Trim();
         if (!string.IsNullOrEmpty(selectedText) && !selectedText.Contains('\n'))
@@ -1298,10 +1335,11 @@ public partial class EditorHost : UserControl
     // --- Auto-Complete ---
     private void OnShowCompletion()
     {
-        if (!IsActiveEditorHost() || _currentVm == null) return;
+        var vm = _currentVm;
+        if (vm == null || !CanUseTextFeature(gate => gate.CompletionEnabled)) return;
 
         var completions = CompletionHelper.GetCompletions(
-            _currentVm.SyntaxLanguage,
+            vm.SyntaxLanguage,
             TextEditor.Document,
             TextEditor.CaretOffset);
 
@@ -1345,8 +1383,9 @@ public partial class EditorHost : UserControl
     private void UpdateIndentGuides(bool enabled)
     {
         if (_indentGuideRenderer == null) return;
+        var effectiveEnabled = enabled && IsTextMode(_currentVm) && GetCurrentFeatureGate().IndentGuidesEnabled;
 
-        if (enabled)
+        if (effectiveEnabled)
         {
             if (!TextEditor.TextArea.TextView.BackgroundRenderers.Contains(_indentGuideRenderer))
                 TextEditor.TextArea.TextView.BackgroundRenderers.Add(_indentGuideRenderer);

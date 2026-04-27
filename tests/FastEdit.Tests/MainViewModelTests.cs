@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.IO;
 using FastEdit.Helpers;
+using FastEdit.Infrastructure;
 using FastEdit.Services.Interfaces;
 using FastEdit.Theming;
 using FastEdit.ViewModels;
@@ -81,6 +82,35 @@ public class MainViewModelTests
         _sut.TextChecksumMd5Command.Execute(null);
 
         Assert.Equal(TextToolOperation.ComputeMd5, operation);
+    }
+
+    [Fact]
+    public void ShowCompletionCommand_SmallTextFile_RaisesCompletionEvent()
+    {
+        var tab = CreateMockTab();
+        tab.FileSize = 1024;
+        _sut.SelectedTab = tab;
+        var wasRaised = false;
+        _sut.ShowCompletionRequested += () => wasRaised = true;
+
+        _sut.ShowCompletionCommand.Execute(null);
+
+        Assert.True(wasRaised);
+    }
+
+    [Fact]
+    public void ShowCompletionCommand_LargeTextFile_IsBlockedByFeatureGate()
+    {
+        var tab = CreateMockTab();
+        tab.FileSize = EditorFeatureGatePolicy.DisableAdvancedFeaturesThresholdBytes;
+        _sut.SelectedTab = tab;
+        var wasRaised = false;
+        _sut.ShowCompletionRequested += () => wasRaised = true;
+
+        _sut.ShowCompletionCommand.Execute(null);
+
+        Assert.False(wasRaised);
+        Assert.Contains("disabled for performance", _sut.StatusText);
     }
 
     // --- NewFile ---
