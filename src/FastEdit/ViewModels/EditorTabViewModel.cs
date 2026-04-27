@@ -114,7 +114,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         _dialogService = dialogService;
     }
 
-    public async Task LoadFileAsync(string filePath)
+    public async Task LoadFileAsync(string filePath, IProgress<double>? indexProgress = null)
     {
         ReleaseLoadedResources();
 
@@ -146,7 +146,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
             _largeFileDoc = new LargeFileDocument(filePath);
             Encoding = _largeFileDoc.EncodingDisplayName;
             SyntaxLanguage = string.Empty; // no highlighting for huge files
-            await _largeFileDoc.BuildIndexAsync(null, CancellationToken.None);
+            await _largeFileDoc.BuildIndexAsync(indexProgress, CancellationToken.None);
         }
         else
         {

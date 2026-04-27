@@ -51,13 +51,18 @@ public class MainViewModelTests
             _fileTree);
     }
 
-    private EditorTabViewModel CreateMockTab(string fileName = "test.txt", string filePath = "", bool isModified = false)
+    private EditorTabViewModel CreateMockTab(
+        string fileName = "test.txt",
+        string filePath = "",
+        bool isModified = false,
+        FileOpenMode mode = FileOpenMode.Text)
     {
         var tab = new EditorTabViewModel(_fileService.Object, _fileSystemService.Object, _dialogService.Object)
         {
             FileName = fileName,
             FilePath = filePath,
-            IsModified = isModified
+            IsModified = isModified,
+            Mode = mode
         };
         return tab;
     }
@@ -71,6 +76,30 @@ public class MainViewModelTests
         _sut.TextToUpperCaseCommand.Execute(null);
 
         Assert.Equal(TextToolOperation.UpperCase, operation);
+    }
+
+    [Fact]
+    public void TextToUpperCaseCommand_LargeTextMode_DoesNotRaiseTextToolOperation()
+    {
+        _sut.SelectedTab = CreateMockTab(mode: FileOpenMode.LargeText);
+        var wasRaised = false;
+        _sut.TextToolRequested += _ => wasRaised = true;
+
+        _sut.TextToUpperCaseCommand.Execute(null);
+
+        Assert.False(wasRaised);
+        Assert.Contains("Large file viewer", _sut.StatusText);
+        Assert.Contains("read-only", _sut.StatusText);
+    }
+
+    [Fact]
+    public async Task SaveCommand_LargeTextMode_ReportsReadOnlyStatus()
+    {
+        _sut.SelectedTab = CreateMockTab(mode: FileOpenMode.LargeText);
+
+        await _sut.SaveCommand.ExecuteAsync(null);
+
+        Assert.Equal("Large file viewer is read-only; original file unchanged.", _sut.StatusText);
     }
 
     [Fact]
@@ -111,6 +140,18 @@ public class MainViewModelTests
 
         Assert.False(wasRaised);
         Assert.Contains("disabled for performance", _sut.StatusText);
+    }
+
+    [Fact]
+    public void SelectedTab_LargeTextMode_Shows_LargeFileViewer_Status()
+    {
+        var tab = CreateMockTab(mode: FileOpenMode.LargeText);
+        tab.FileSize = 123L * 1024 * 1024;
+        tab.Encoding = "UTF-8";
+
+        _sut.SelectedTab = tab;
+
+        Assert.Equal("Large file viewer: indexing lines, read-only | 123 MB | UTF-8", _sut.StatusText);
     }
 
     // --- NewFile ---
@@ -664,6 +705,19 @@ public class MainViewModelTests
         _sut.FormatDocumentRequested += () => raised = true;
         _sut.FormatDocumentCommand.Execute(null);
         Assert.True(raised);
+    }
+
+    [Fact]
+    public void FormatDocumentCommand_BinaryMode_DoesNotRaiseEvent()
+    {
+        _sut.SelectedTab = CreateMockTab(mode: FileOpenMode.Binary);
+        bool raised = false;
+        _sut.FormatDocumentRequested += () => raised = true;
+
+        _sut.FormatDocumentCommand.Execute(null);
+
+        Assert.False(raised);
+        Assert.Contains("Hex mode", _sut.StatusText);
     }
 
     [Fact]

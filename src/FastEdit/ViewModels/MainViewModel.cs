@@ -173,13 +173,18 @@ public partial class MainViewModel : ObservableObject
         try
         {
             var tab = _tabFactory.Create();
-            await tab.LoadFileAsync(filePath);
+            var fileName = Path.GetFileName(filePath);
+            var indexProgress = new Progress<double>(progress =>
+                StatusText = EditorStatusFormatter.FormatLargeFileIndexingStatus(fileName, progress));
+            await tab.LoadFileAsync(filePath, indexProgress);
 
             Tabs.Add(tab);
             SelectedTab = tab;
 
             AddToRecentFiles(filePath);
-            StatusText = $"Opened: {Path.GetFileName(filePath)}";
+            StatusText = tab.Mode == FileOpenMode.LargeText
+                ? EditorStatusFormatter.FormatTabStatus(tab)
+                : $"Opened: {fileName}";
         }
         catch (Exception ex)
         {
@@ -194,6 +199,12 @@ public partial class MainViewModel : ObservableObject
 
         try
         {
+            if (SelectedTab.Mode == FileOpenMode.LargeText)
+            {
+                StatusText = "Large file viewer is read-only; original file unchanged.";
+                return;
+            }
+
             await SelectedTab.SaveCommand.ExecuteAsync(null);
             StatusText = $"Saved: {SelectedTab.FileName}";
         }
@@ -261,7 +272,8 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void GoToLine()
     {
-        if (SelectedTab == null || SelectedTab.Mode != FileOpenMode.Text) return;
+        if (SelectedTab == null) return;
+        if (!IsTextCommandAvailable()) return;
         GoToLineRequested?.Invoke(SelectedTab.Line);
     }
 
@@ -310,40 +322,60 @@ public partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void DuplicateLine() => DuplicateLineRequested?.Invoke();
+    private void DuplicateLine()
+    {
+        if (IsTextCommandAvailable())
+            DuplicateLineRequested?.Invoke();
+    }
 
     [RelayCommand]
-    private void MoveLineUp() => MoveLineRequested?.Invoke(true);
+    private void MoveLineUp()
+    {
+        if (IsTextCommandAvailable())
+            MoveLineRequested?.Invoke(true);
+    }
 
     [RelayCommand]
-    private void MoveLineDown() => MoveLineRequested?.Invoke(false);
+    private void MoveLineDown()
+    {
+        if (IsTextCommandAvailable())
+            MoveLineRequested?.Invoke(false);
+    }
 
     [RelayCommand]
-    private void FormatDocument() => FormatDocumentRequested?.Invoke();
+    private void FormatDocument()
+    {
+        if (IsTextCommandAvailable())
+            FormatDocumentRequested?.Invoke();
+    }
 
     [RelayCommand]
-    private void MinifyDocument() => MinifyDocumentRequested?.Invoke();
+    private void MinifyDocument()
+    {
+        if (IsTextCommandAvailable())
+            MinifyDocumentRequested?.Invoke();
+    }
 
-    [RelayCommand] private void TextToUpperCase() => TextToolRequested?.Invoke(TextToolOperation.UpperCase);
-    [RelayCommand] private void TextToLowerCase() => TextToolRequested?.Invoke(TextToolOperation.LowerCase);
-    [RelayCommand] private void TextToTitleCase() => TextToolRequested?.Invoke(TextToolOperation.TitleCase);
-    [RelayCommand] private void TextInvertCase() => TextToolRequested?.Invoke(TextToolOperation.InvertCase);
-    [RelayCommand] private void TextRemoveDuplicateLines() => TextToolRequested?.Invoke(TextToolOperation.RemoveDuplicateLines);
-    [RelayCommand] private void TextSortLinesAsc() => TextToolRequested?.Invoke(TextToolOperation.SortLinesAsc);
-    [RelayCommand] private void TextSortLinesDesc() => TextToolRequested?.Invoke(TextToolOperation.SortLinesDesc);
-    [RelayCommand] private void TextTrimTrailing() => TextToolRequested?.Invoke(TextToolOperation.TrimTrailing);
-    [RelayCommand] private void TextTrimLeading() => TextToolRequested?.Invoke(TextToolOperation.TrimLeading);
-    [RelayCommand] private void TextTrimAll() => TextToolRequested?.Invoke(TextToolOperation.TrimAll);
-    [RelayCommand] private void TextTabsToSpaces() => TextToolRequested?.Invoke(TextToolOperation.TabsToSpaces);
-    [RelayCommand] private void TextSpacesToTabs() => TextToolRequested?.Invoke(TextToolOperation.SpacesToTabs);
-    [RelayCommand] private void TextBase64Encode() => TextToolRequested?.Invoke(TextToolOperation.Base64Encode);
-    [RelayCommand] private void TextBase64Decode() => TextToolRequested?.Invoke(TextToolOperation.Base64Decode);
-    [RelayCommand] private void TextUrlEncode() => TextToolRequested?.Invoke(TextToolOperation.UrlEncode);
-    [RelayCommand] private void TextUrlDecode() => TextToolRequested?.Invoke(TextToolOperation.UrlDecode);
-    [RelayCommand] private void TextChecksumMd5() => TextToolRequested?.Invoke(TextToolOperation.ComputeMd5);
-    [RelayCommand] private void TextChecksumSha1() => TextToolRequested?.Invoke(TextToolOperation.ComputeSha1);
-    [RelayCommand] private void TextChecksumSha256() => TextToolRequested?.Invoke(TextToolOperation.ComputeSha256);
-    [RelayCommand] private void TextChecksumSha512() => TextToolRequested?.Invoke(TextToolOperation.ComputeSha512);
+    [RelayCommand] private void TextToUpperCase() => RequestTextTool(TextToolOperation.UpperCase);
+    [RelayCommand] private void TextToLowerCase() => RequestTextTool(TextToolOperation.LowerCase);
+    [RelayCommand] private void TextToTitleCase() => RequestTextTool(TextToolOperation.TitleCase);
+    [RelayCommand] private void TextInvertCase() => RequestTextTool(TextToolOperation.InvertCase);
+    [RelayCommand] private void TextRemoveDuplicateLines() => RequestTextTool(TextToolOperation.RemoveDuplicateLines);
+    [RelayCommand] private void TextSortLinesAsc() => RequestTextTool(TextToolOperation.SortLinesAsc);
+    [RelayCommand] private void TextSortLinesDesc() => RequestTextTool(TextToolOperation.SortLinesDesc);
+    [RelayCommand] private void TextTrimTrailing() => RequestTextTool(TextToolOperation.TrimTrailing);
+    [RelayCommand] private void TextTrimLeading() => RequestTextTool(TextToolOperation.TrimLeading);
+    [RelayCommand] private void TextTrimAll() => RequestTextTool(TextToolOperation.TrimAll);
+    [RelayCommand] private void TextTabsToSpaces() => RequestTextTool(TextToolOperation.TabsToSpaces);
+    [RelayCommand] private void TextSpacesToTabs() => RequestTextTool(TextToolOperation.SpacesToTabs);
+    [RelayCommand] private void TextBase64Encode() => RequestTextTool(TextToolOperation.Base64Encode);
+    [RelayCommand] private void TextBase64Decode() => RequestTextTool(TextToolOperation.Base64Decode);
+    [RelayCommand] private void TextUrlEncode() => RequestTextTool(TextToolOperation.UrlEncode);
+    [RelayCommand] private void TextUrlDecode() => RequestTextTool(TextToolOperation.UrlDecode);
+    [RelayCommand] private void TextChecksumMd5() => RequestTextTool(TextToolOperation.ComputeMd5);
+    [RelayCommand] private void TextChecksumSha1() => RequestTextTool(TextToolOperation.ComputeSha1);
+    [RelayCommand] private void TextChecksumSha256() => RequestTextTool(TextToolOperation.ComputeSha256);
+    [RelayCommand] private void TextChecksumSha512() => RequestTextTool(TextToolOperation.ComputeSha512);
 
     [RelayCommand]
     private void ToggleFolding() => IsFoldingEnabled = !IsFoldingEnabled;
@@ -373,13 +405,25 @@ public partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void ToggleBookmark() => ToggleBookmarkRequested?.Invoke();
+    private void ToggleBookmark()
+    {
+        if (IsTextCommandAvailable())
+            ToggleBookmarkRequested?.Invoke();
+    }
 
     [RelayCommand]
-    private void NextBookmark() => NextBookmarkRequested?.Invoke();
+    private void NextBookmark()
+    {
+        if (IsTextCommandAvailable())
+            NextBookmarkRequested?.Invoke();
+    }
 
     [RelayCommand]
-    private void PrevBookmark() => PrevBookmarkRequested?.Invoke();
+    private void PrevBookmark()
+    {
+        if (IsTextCommandAvailable())
+            PrevBookmarkRequested?.Invoke();
+    }
 
     [RelayCommand]
     private void FindInFiles() => FindInFilesRequested?.Invoke();
@@ -443,7 +487,11 @@ public partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void ToggleSplitView() => ToggleSplitViewRequested?.Invoke();
+    private void ToggleSplitView()
+    {
+        if (IsTextCommandAvailable())
+            ToggleSplitViewRequested?.Invoke();
+    }
 
     [RelayCommand]
     private void ToggleSideBySide()
@@ -476,7 +524,9 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void ConvertLineEndings(string? target)
     {
-        if (SelectedTab == null || SelectedTab.Mode != FileOpenMode.Text || string.IsNullOrEmpty(target)) return;
+        if (string.IsNullOrEmpty(target)) return;
+        if (SelectedTab == null) return;
+        if (!IsTextCommandAvailable()) return;
 
         var targetType = target switch
         {
@@ -762,26 +812,32 @@ public partial class MainViewModel : ObservableObject
 
     private void UpdateStatusForTab(EditorTabViewModel tab)
     {
-        if (tab.Mode == FileOpenMode.Binary)
+        StatusText = EditorStatusFormatter.FormatTabStatus(tab);
+        if (tab.Mode == FileOpenMode.Text)
         {
-            StatusText = $"Hex Mode - {tab.FileSize:N0} bytes";
-            LineEnding = "";
-        }
-        else if (tab.Mode == FileOpenMode.LargeText)
-        {
-            StatusText = $"Large Text Mode - {tab.FileSize:N0} bytes";
-            LineEnding = "";
-        }
-        else
-        {
-            var gate = EditorFeatureGatePolicy.Create(tab.Mode, tab.FileSize);
-            StatusText = $"Ln {tab.Line}, Col {tab.Column} | {tab.Encoding}";
-            if (gate.StatusMessage != null)
-            {
-                StatusText = $"{gate.StatusMessage} | {StatusText}";
-            }
             LineEnding = LineEndingHelper.ToDisplayString(LineEndingHelper.Detect(tab.Content));
+            return;
         }
+
+        LineEnding = "";
+    }
+
+    private void RequestTextTool(TextToolOperation operation)
+    {
+        if (IsTextCommandAvailable())
+            TextToolRequested?.Invoke(operation);
+    }
+
+    private bool IsTextCommandAvailable()
+    {
+        if (SelectedTab == null)
+            return true;
+
+        if (SelectedTab.Mode == FileOpenMode.Text)
+            return true;
+
+        StatusText = EditorStatusFormatter.FormatTextCommandUnavailable(SelectedTab.Mode);
+        return false;
     }
 
     private bool IsSelectedTabFeatureEnabled(Func<EditorFeatureGate, bool> isEnabled)
