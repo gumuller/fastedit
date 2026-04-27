@@ -43,6 +43,12 @@ public partial class EditorHost : UserControl
     private FilterBackgroundRenderer? _filterRenderer;
     private FilterDimTransformer? _filterDimTransformer;
     private ILineFilterService? _lineFilterService;
+    private IThemeService? _themeService;
+    private ISettingsService? _settingsService;
+    private ITextToolsService? _textToolsService;
+    private IMacroService? _macroService;
+    private IDialogService? _dialogService;
+    private MainViewModel? _mainViewModel;
     private Dictionary<int, Models.LineFilterResult> _filterCache = new();
     private bool _isFilterFoldingActive;
 
@@ -55,6 +61,8 @@ public partial class EditorHost : UserControl
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
+        ResolveServices();
+
         // Install search panel with explicit style to bypass WPF UI's implicit TextBox style
         _searchPanel = SearchPanel.Install(TextEditor);
         _searchPanel.Style = (Style)FindResource("FastEditSearchPanelStyle");
@@ -93,12 +101,11 @@ public partial class EditorHost : UserControl
         TextEditor.TextArea.SelectionChanged += OnSelectionChangedForOccurrences;
 
         // Install filter renderers
-        _lineFilterService = App.Services.GetRequiredService<ILineFilterService>();
         _filterRenderer = new FilterBackgroundRenderer(TextEditor.TextArea.TextView);
         TextEditor.TextArea.TextView.BackgroundRenderers.Add(_filterRenderer);
         _filterDimTransformer = new FilterDimTransformer();
         TextEditor.TextArea.TextView.LineTransformers.Add(_filterDimTransformer);
-        _lineFilterService.FiltersChanged += OnLineFiltersChanged;
+        _lineFilterService!.FiltersChanged += OnLineFiltersChanged;
 
         // Folding update timer
         _foldingTimer = new System.Windows.Threading.DispatcherTimer
@@ -118,42 +125,57 @@ public partial class EditorHost : UserControl
         ApplyCaretStyle();
 
         // Subscribe to theme changes
-        var themeService = App.Services.GetService<IThemeService>();
-        if (themeService != null)
+        if (_themeService != null)
         {
-            themeService.ThemeChanged += OnThemeChanged;
+            _themeService.ThemeChanged += OnThemeChanged;
         }
 
         // Subscribe to ViewModel events for editor actions
-        var mainVm = App.Services.GetService<MainViewModel>();
-        if (mainVm != null)
+        if (_mainViewModel != null)
         {
-            mainVm.FindRequested += OnFindRequested;
-            mainVm.ReplaceRequested += OnReplaceRequested;
-            mainVm.GoToLineRequested += OnGoToLineRequested;
-            mainVm.DuplicateLineRequested += OnDuplicateLineRequested;
-            mainVm.MoveLineRequested += OnMoveLineRequested;
-            mainVm.FormatDocumentRequested += OnFormatDocumentRequested;
-            mainVm.MinifyDocumentRequested += OnMinifyDocumentRequested;
-            mainVm.ToggleBookmarkRequested += OnToggleBookmark;
-            mainVm.NextBookmarkRequested += OnNextBookmark;
-            mainVm.PrevBookmarkRequested += OnPrevBookmark;
-            mainVm.ShowCompletionRequested += OnShowCompletion;
-            mainVm.ToggleSplitViewRequested += OnToggleSplitView;
-            mainVm.TextToolRequested += OnTextToolRequested;
-            mainVm.PrintRequested += OnPrintRequested;
-            mainVm.SelectNextOccurrenceRequested += OnSelectNextOccurrence;
-            mainVm.SelectAllOccurrencesRequested += OnSelectAllOccurrences;
-            mainVm.MacroStartRecordingRequested += OnMacroStartRecording;
-            mainVm.MacroStopRecordingRequested += OnMacroStopRecording;
-            mainVm.MacroPlaybackRequested += OnMacroPlayback;
-            mainVm.PropertyChanged += OnMainVmPropertyChanged;
+            _mainViewModel.FindRequested += OnFindRequested;
+            _mainViewModel.ReplaceRequested += OnReplaceRequested;
+            _mainViewModel.GoToLineRequested += OnGoToLineRequested;
+            _mainViewModel.DuplicateLineRequested += OnDuplicateLineRequested;
+            _mainViewModel.MoveLineRequested += OnMoveLineRequested;
+            _mainViewModel.FormatDocumentRequested += OnFormatDocumentRequested;
+            _mainViewModel.MinifyDocumentRequested += OnMinifyDocumentRequested;
+            _mainViewModel.ToggleBookmarkRequested += OnToggleBookmark;
+            _mainViewModel.NextBookmarkRequested += OnNextBookmark;
+            _mainViewModel.PrevBookmarkRequested += OnPrevBookmark;
+            _mainViewModel.ShowCompletionRequested += OnShowCompletion;
+            _mainViewModel.ToggleSplitViewRequested += OnToggleSplitView;
+            _mainViewModel.TextToolRequested += OnTextToolRequested;
+            _mainViewModel.PrintRequested += OnPrintRequested;
+            _mainViewModel.SelectNextOccurrenceRequested += OnSelectNextOccurrence;
+            _mainViewModel.SelectAllOccurrencesRequested += OnSelectAllOccurrences;
+            _mainViewModel.MacroStartRecordingRequested += OnMacroStartRecording;
+            _mainViewModel.MacroStopRecordingRequested += OnMacroStopRecording;
+            _mainViewModel.MacroPlaybackRequested += OnMacroPlayback;
+            _mainViewModel.PropertyChanged += OnMainVmPropertyChanged;
         }
 
         if (_currentVm != null)
         {
             UpdateEditor(_currentVm);
         }
+    }
+
+    private void ResolveServices()
+    {
+        _lineFilterService ??= App.Services.GetRequiredService<ILineFilterService>();
+        _themeService ??= App.Services.GetService<IThemeService>();
+        _settingsService ??= App.Services.GetService<ISettingsService>();
+        _textToolsService ??= App.Services.GetService<ITextToolsService>();
+        _macroService ??= App.Services.GetService<IMacroService>();
+        _dialogService ??= App.Services.GetService<IDialogService>();
+        _mainViewModel ??= App.Services.GetService<MainViewModel>();
+    }
+
+    private void SetStatus(string statusText)
+    {
+        if (_mainViewModel != null)
+            _mainViewModel.StatusText = statusText;
     }
 
     private void OnMainVmPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
@@ -195,22 +217,20 @@ public partial class EditorHost : UserControl
 
     private void ApplyEditorSettings()
     {
-        var mainVm = App.Services.GetService<MainViewModel>();
-        if (mainVm == null) return;
+        if (_mainViewModel == null) return;
 
-        TextEditor.WordWrap = mainVm.IsWordWrapEnabled;
-        TextEditor.FontSize = mainVm.EditorFontSize;
-        TextEditor.Options.ShowTabs = mainVm.IsWhitespaceVisible;
-        TextEditor.Options.ShowSpaces = mainVm.IsWhitespaceVisible;
-        TextEditor.Options.ShowEndOfLine = mainVm.IsWhitespaceVisible;
+        TextEditor.WordWrap = _mainViewModel.IsWordWrapEnabled;
+        TextEditor.FontSize = _mainViewModel.EditorFontSize;
+        TextEditor.Options.ShowTabs = _mainViewModel.IsWhitespaceVisible;
+        TextEditor.Options.ShowSpaces = _mainViewModel.IsWhitespaceVisible;
+        TextEditor.Options.ShowEndOfLine = _mainViewModel.IsWhitespaceVisible;
     }
 
     private void ApplyCaretStyle()
     {
         if (_caretAdorner == null) return;
-        var settings = App.Services.GetService<ISettingsService>();
-        if (settings != null)
-            _caretAdorner.CaretStyle = settings.CursorStyle;
+        if (_settingsService != null)
+            _caretAdorner.CaretStyle = _settingsService.CursorStyle;
     }
 
     // --- Find & Replace ---
@@ -307,9 +327,7 @@ public partial class EditorHost : UserControl
         }
         doc.EndUpdate();
 
-        var mainVm = App.Services.GetService<MainViewModel>();
-        if (mainVm != null)
-            mainVm.StatusText = $"Replaced {count} occurrence(s)";
+        SetStatus($"Replaced {count} occurrence(s)");
     }
 
     // --- Go To Line ---
@@ -417,8 +435,7 @@ public partial class EditorHost : UserControl
 
         if (output.error != null)
         {
-            var mainVm = App.Services.GetService<MainViewModel>();
-            if (mainVm != null) mainVm.StatusText = output.error;
+            SetStatus(output.error);
             return;
         }
         TextEditor.Document.Text = output.result;
@@ -438,8 +455,7 @@ public partial class EditorHost : UserControl
 
         if (output.error != null)
         {
-            var mainVm = App.Services.GetService<MainViewModel>();
-            if (mainVm != null) mainVm.StatusText = output.error;
+            SetStatus(output.error);
             return;
         }
         TextEditor.Document.Text = output.result;
@@ -450,14 +466,12 @@ public partial class EditorHost : UserControl
     {
         if (!IsActiveEditorHost() || _currentVm?.IsBinaryMode == true) return;
 
-        var textTools = App.Services.GetService<ITextToolsService>();
-        if (textTools == null) return;
+        if (_textToolsService == null) return;
 
-        var mainVm = App.Services.GetService<MainViewModel>();
         bool hasSelection = TextEditor.SelectionLength > 0;
         string input = hasSelection ? TextEditor.SelectedText : TextEditor.Text;
 
-        TextToolResult result = TextToolOperationRunner.Execute(textTools, operation, input);
+        TextToolResult result = TextToolOperationRunner.Execute(_textToolsService, operation, input);
         var plan = TextToolApplicationPlanner.Create(operation, result, hasSelection);
 
         if (plan.Target == TextToolApplicationTarget.Selection)
@@ -469,8 +483,8 @@ public partial class EditorHost : UserControl
             TextEditor.Document.Text = plan.ReplacementText ?? "";
         }
 
-        if (mainVm != null && plan.StatusText != null)
-            mainVm.StatusText = plan.StatusText;
+        if (plan.StatusText != null)
+            SetStatus(plan.StatusText);
     }
 
     // --- Print ---
@@ -494,8 +508,7 @@ public partial class EditorHost : UserControl
             ((System.Windows.Documents.IDocumentPaginatorSource)flowDoc).DocumentPaginator,
             $"FastEdit - {title}");
 
-        var mainVm = App.Services.GetService<MainViewModel>();
-        if (mainVm != null) mainVm.StatusText = $"Printed: {title}";
+        SetStatus($"Printed: {title}");
     }
 
     // --- Occurrence Selection ---
@@ -540,8 +553,7 @@ public partial class EditorHost : UserControl
             TextEditor.ScrollTo(TextEditor.Document.GetLineByOffset(nextIndex).LineNumber, 0);
             _lastSelectNextOffset = nextIndex;
 
-            var mainVm = App.Services.GetService<MainViewModel>();
-            if (mainVm != null) mainVm.StatusText = $"Selected occurrence at offset {nextIndex}";
+            SetStatus($"Selected occurrence at offset {nextIndex}");
         }
     }
 
@@ -568,9 +580,7 @@ public partial class EditorHost : UserControl
             index += selectedText.Length;
         }
 
-        var mainVm = App.Services.GetService<MainViewModel>();
-        if (mainVm != null)
-            mainVm.StatusText = $"Found {count} occurrences of \"{(selectedText.Length > 30 ? selectedText[..27] + "..." : selectedText)}\"";
+        SetStatus($"Found {count} occurrences of \"{(selectedText.Length > 30 ? selectedText[..27] + "..." : selectedText)}\"");
 
         // Since AvalonEdit doesn't support true multi-cursor,
         // highlight all occurrences and open Find/Replace pre-filled for batch operations
@@ -583,69 +593,58 @@ public partial class EditorHost : UserControl
     private void OnMacroStartRecording()
     {
         if (!IsActiveEditorHost()) return;
-        var macroService = App.Services.GetService<IMacroService>();
-        if (macroService == null) return;
+        if (_macroService == null) return;
 
-        macroService.StartRecording();
+        _macroService.StartRecording();
 
         // Hook into text input for recording
         TextEditor.TextArea.TextEntering += OnMacroTextEntering;
 
-        var mainVm = App.Services.GetService<MainViewModel>();
-        if (mainVm != null) mainVm.StatusText = "🔴 Recording macro...";
+        SetStatus("🔴 Recording macro...");
     }
 
     private void OnMacroStopRecording()
     {
         if (!IsActiveEditorHost()) return;
-        var macroService = App.Services.GetService<IMacroService>();
-        if (macroService == null) return;
+        if (_macroService == null) return;
 
-        macroService.StopRecording();
+        _macroService.StopRecording();
         TextEditor.TextArea.TextEntering -= OnMacroTextEntering;
 
-        var mainVm = App.Services.GetService<MainViewModel>();
-        if (mainVm != null)
-            mainVm.StatusText = $"Macro recorded: {macroService.RecordedStepCount} step(s)";
+        SetStatus($"Macro recorded: {_macroService.RecordedStepCount} step(s)");
     }
 
     private void OnMacroTextEntering(object? sender, System.Windows.Input.TextCompositionEventArgs e)
     {
-        var macroService = App.Services.GetService<IMacroService>();
-        if (macroService?.IsRecording == true && !string.IsNullOrEmpty(e.Text))
+        if (_macroService?.IsRecording == true && !string.IsNullOrEmpty(e.Text))
         {
-            macroService.RecordStep(new MacroStep(MacroAction.TypeText, e.Text));
+            _macroService.RecordStep(new MacroStep(MacroAction.TypeText, e.Text));
         }
     }
 
     private void OnMacroPlayback(int count)
     {
         if (!IsActiveEditorHost()) return;
-        var macroService = App.Services.GetService<IMacroService>();
-        if (macroService == null || !macroService.HasMacro) return;
+        if (_macroService == null || !_macroService.HasMacro) return;
 
         if (count == 0)
         {
             // Prompt for count
-            var dialogService = App.Services.GetService<IDialogService>();
-            var input = dialogService?.ShowInputDialog("Playback Macro", "Number of times to play:", "1");
+            var input = _dialogService?.ShowInputDialog("Playback Macro", "Number of times to play:", "1");
             if (string.IsNullOrEmpty(input) || !int.TryParse(input, out count) || count <= 0) return;
         }
 
-        var steps = macroService.GetRecordedSteps();
-        var textTools = App.Services.GetService<ITextToolsService>();
+        var steps = _macroService.GetRecordedSteps();
 
         for (int i = 0; i < count; i++)
         {
             foreach (var step in steps)
             {
-                ExecuteMacroStep(step, textTools);
+                ExecuteMacroStep(step, _textToolsService);
             }
         }
 
-        var mainVm = App.Services.GetService<MainViewModel>();
-        if (mainVm != null)
-            mainVm.StatusText = $"Macro played {count} time(s)";
+        SetStatus($"Macro played {count} time(s)");
     }
 
     private void ExecuteMacroStep(MacroStep step, ITextToolsService? textTools)
@@ -895,11 +894,9 @@ public partial class EditorHost : UserControl
             _bookmarks.Add(line);
 
         _bookmarks.Sort();
-        var mainVm = App.Services.GetService<MainViewModel>();
-        if (mainVm != null)
-            mainVm.StatusText = _bookmarks.Contains(line)
-                ? $"Bookmark set at line {line}"
-                : $"Bookmark removed from line {line}";
+        SetStatus(_bookmarks.Contains(line)
+            ? $"Bookmark set at line {line}"
+            : $"Bookmark removed from line {line}");
     }
 
     private void OnNextBookmark()
@@ -967,9 +964,7 @@ public partial class EditorHost : UserControl
                 // Scroll to bottom (tail mode)
                 TextEditor.ScrollToEnd();
 
-                var mainVm = App.Services.GetService<MainViewModel>();
-                if (mainVm != null)
-                    mainVm.StatusText = $"Auto-reloaded: {System.IO.Path.GetFileName(filePath)}";
+                SetStatus($"Auto-reloaded: {System.IO.Path.GetFileName(filePath)}");
             }
             catch { /* file may be locked */ }
         });
@@ -977,8 +972,7 @@ public partial class EditorHost : UserControl
 
     private bool IsActiveEditorHost()
     {
-        var mainVm = App.Services.GetService<MainViewModel>();
-        return mainVm?.SelectedTab != null && mainVm.SelectedTab == _currentVm;
+        return _mainViewModel?.SelectedTab != null && _mainViewModel.SelectedTab == _currentVm;
     }
 
     private void OnThemeChanged(object? sender, ThemeDefinition theme)
@@ -1154,13 +1148,12 @@ public partial class EditorHost : UserControl
     {
         if (System.Windows.Input.Keyboard.Modifiers == System.Windows.Input.ModifierKeys.Control)
         {
-            var mainVm = App.Services.GetService<MainViewModel>();
-            if (mainVm == null) return;
+            if (_mainViewModel == null) return;
 
             if (e.Delta > 0)
-                mainVm.ZoomInCommand.Execute(null);
+                _mainViewModel.ZoomInCommand.Execute(null);
             else
-                mainVm.ZoomOutCommand.Execute(null);
+                _mainViewModel.ZoomOutCommand.Execute(null);
 
             e.Handled = true;
         }
@@ -1208,10 +1201,9 @@ public partial class EditorHost : UserControl
             TextEditor.SyntaxHighlighting = highlighting;
 
             // Apply theme syntax colors on top of default highlighting
-            var themeService = App.Services.GetService<IThemeService>();
-            if (themeService?.CurrentTheme != null)
+            if (_themeService?.CurrentTheme != null)
             {
-                ApplySyntaxThemeColors(themeService.CurrentTheme);
+                ApplySyntaxThemeColors(_themeService.CurrentTheme);
             }
 
             // Track caret position - remove old handler first
@@ -1221,16 +1213,15 @@ public partial class EditorHost : UserControl
             ApplyEditorThemeBrushes();
 
             // Install code folding
-            var mainVm = App.Services.GetService<MainViewModel>();
-            if (mainVm?.IsFoldingEnabled == true)
+            if (_mainViewModel?.IsFoldingEnabled == true)
                 InstallFolding();
 
             // Minimap
-            if (mainVm?.IsMinimapVisible == true)
+            if (_mainViewModel?.IsMinimapVisible == true)
                 UpdateMinimapVisibility(true);
 
             // Auto-reload
-            if (mainVm?.IsAutoReloadEnabled == true && !string.IsNullOrEmpty(vm.FilePath))
+            if (_mainViewModel?.IsAutoReloadEnabled == true && !string.IsNullOrEmpty(vm.FilePath))
                 _fileWatcher.StartWatching(vm.FilePath);
             else
                 _fileWatcher.StopWatching();
@@ -1351,8 +1342,7 @@ public partial class EditorHost : UserControl
     // --- Breadcrumb Bar ---
     private void UpdateBreadcrumbs()
     {
-        var mainVm = App.Services.GetService<MainViewModel>();
-        if (mainVm?.IsBreadcrumbVisible != true || _currentVm == null || _currentVm.IsBinaryMode)
+        if (_mainViewModel?.IsBreadcrumbVisible != true || _currentVm == null || _currentVm.IsBinaryMode)
         {
             BreadcrumbBar.Visibility = Visibility.Collapsed;
             return;
