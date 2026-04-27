@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 using FastEdit.Services.Interfaces;
@@ -58,9 +59,9 @@ public class AutoSaveService : IAutoSaveService
             if (entries.Count > 0)
                 SaveNow(entries);
         }
-        catch
+        catch (Exception ex)
         {
-            // Silently ignore auto-save failures
+            Trace.TraceWarning("Auto-save timer failed: {0}", ex.Message);
         }
     }
 
@@ -130,8 +131,9 @@ public class AutoSaveService : IAutoSaveService
             }
             return entries;
         }
-        catch
+        catch (Exception ex)
         {
+            Trace.TraceWarning("Failed to read auto-save recovery manifest: {0}", ex.Message);
             return new();
         }
     }
@@ -144,13 +146,23 @@ public class AutoSaveService : IAutoSaveService
         {
             foreach (var file in _fileSystem.GetFiles(_autoSaveDir, "*.txt"))
             {
-                try { _fileSystem.DeleteFile(file); } catch { }
+                try
+                {
+                    _fileSystem.DeleteFile(file);
+                }
+                catch (Exception ex)
+                {
+                    Trace.TraceWarning("Failed to delete auto-save recovery file '{0}': {1}", file, ex.Message);
+                }
             }
             var manifestPath = Path.Combine(_autoSaveDir, "manifest.json");
             if (_fileSystem.FileExists(manifestPath))
                 _fileSystem.DeleteFile(manifestPath);
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Trace.TraceWarning("Failed to clear auto-save recovery files: {0}", ex.Message);
+        }
     }
 
     private class AutoSaveManifestEntry

@@ -107,6 +107,21 @@ public class BinaryDetectorTests
         finally { File.Delete(path); }
     }
 
+    [Fact]
+    public async Task AnalyzeFileAsync_UnreadableFile_LogsWarningAndReturnsConservativeBinaryResult()
+    {
+        using var trace = new TraceCapture();
+        var path = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.missing");
+
+        var result = await _detector.AnalyzeFileAsync(path);
+        System.Diagnostics.Trace.Flush();
+
+        Assert.True(result.IsBinary);
+        Assert.Equal(0.5, result.Confidence);
+        Assert.Contains("Failed to analyze file", trace.Messages);
+        Assert.Contains(path, trace.Messages);
+    }
+
     private static string CreateTempFile(string content)
     {
         var path = Path.GetTempFileName();

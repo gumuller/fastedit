@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.IO;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -687,7 +688,10 @@ public partial class MainViewModel : ObservableObject
                     Tabs.Add(tab);
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning("Failed to restore workspace session file '{0}': {1}", entry.FilePath, ex.Message);
+            }
         }
 
         if (Tabs.Count > 0)
@@ -794,9 +798,9 @@ public partial class MainViewModel : ObservableObject
                     Tabs.Add(tab);
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // Skip files that can't be restored
+                Trace.TraceWarning("Failed to restore session file '{0}': {1}", sessionFile.FilePath, ex.Message);
             }
         }
 
@@ -822,10 +826,20 @@ public partial class MainViewModel : ObservableObject
             {
                 foreach (var file in _fileSystemService.GetFiles(tempDir, "*.tmp"))
                 {
-                    try { _fileSystemService.DeleteFile(file); } catch { }
+                    try
+                    {
+                        _fileSystemService.DeleteFile(file);
+                    }
+                    catch (Exception ex)
+                    {
+                        Trace.TraceWarning("Failed to delete temp session file '{0}': {1}", file, ex.Message);
+                    }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning("Failed to clean temp session files: {0}", ex.Message);
+            }
         }
     }
 

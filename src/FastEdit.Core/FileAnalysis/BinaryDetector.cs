@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace FastEdit.Core.FileAnalysis;
 
 public class BinaryDetector
@@ -96,8 +98,9 @@ public class BinaryDetector
 
             return AnalyzeBuffer(buffer);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            Trace.TraceWarning("Failed to analyze file '{0}': {1}", filePath, ex.Message);
             return new BinaryAnalysisResult
             {
                 IsBinary = true,

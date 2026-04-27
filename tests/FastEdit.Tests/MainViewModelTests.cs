@@ -531,6 +531,31 @@ public class MainViewModelTests
         Assert.Empty(_sut.Tabs);
     }
 
+    [Fact]
+    public async Task RestoreSession_LoadFailure_LogsWarningAndSkipsTab()
+    {
+        using var trace = new TraceCapture();
+        const string filePath = @"C:\broken.txt";
+        var sessionFiles = new List<SessionFile>
+        {
+            new() { FilePath = filePath, IsUntitled = false }
+        };
+        _settingsService.Setup(s => s.OpenFiles).Returns(sessionFiles);
+        _fileSystemService.Setup(f => f.FileExists(filePath)).Returns(true);
+
+        var tab = CreateMockTab("broken.txt", filePath);
+        _tabFactory.Setup(f => f.Create()).Returns(tab);
+        _fileService.Setup(f => f.ReadFileWithEncodingAsync(filePath))
+            .ThrowsAsync(new IOException("read failed"));
+
+        await _sut.RestoreSessionAsync();
+        System.Diagnostics.Trace.Flush();
+
+        Assert.Empty(_sut.Tabs);
+        Assert.Contains("Failed to restore session file", trace.Messages);
+        Assert.Contains(filePath, trace.Messages);
+    }
+
     // --- Toggle commands ---
 
     [Fact]

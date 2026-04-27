@@ -122,6 +122,20 @@ public class AutoSaveServiceTests
     }
 
     [Fact]
+    public void GetRecoveryEntries_InvalidManifest_LogsWarningAndReturnsEmpty()
+    {
+        using var trace = new TraceCapture();
+        var manifestPath = Path.Combine(_autoSaveDir, "manifest.json");
+        _mockFs.Setup(f => f.FileExists(manifestPath)).Returns(true);
+        _mockFs.Setup(f => f.ReadAllText(manifestPath)).Returns("not json");
+
+        _sut.GetRecoveryEntries().Should().BeEmpty();
+        System.Diagnostics.Trace.Flush();
+
+        trace.Messages.Should().Contain("Failed to read auto-save recovery manifest");
+    }
+
+    [Fact]
     public void GetRecoveryEntries_MissingContentFile_SkipsEntry()
     {
         var manifestPath = Path.Combine(_autoSaveDir, "manifest.json");
@@ -150,6 +164,37 @@ public class AutoSaveServiceTests
         _mockFs.Verify(f => f.DeleteFile(Path.Combine(_autoSaveDir, "id1.txt")), Times.Once);
         _mockFs.Verify(f => f.DeleteFile(Path.Combine(_autoSaveDir, "id2.txt")), Times.Once);
         _mockFs.Verify(f => f.DeleteFile(Path.Combine(_autoSaveDir, "manifest.json")), Times.Once);
+    }
+
+    [Fact]
+    public void ClearRecoveryFiles_DeleteFailure_LogsWarningAndContinues()
+    {
+        using var trace = new TraceCapture();
+        var firstFile = Path.Combine(_autoSaveDir, "id1.txt");
+        var secondFile = Path.Combine(_autoSaveDir, "id2.txt");
+        _mockFs.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _mockFs.Setup(f => f.GetFiles(_autoSaveDir, "*.txt", false)).Returns(new[] { firstFile, secondFile });
+        _mockFs.Setup(f => f.DeleteFile(firstFile)).Throws(new IOException("locked"));
+
+        _sut.ClearRecoveryFiles();
+        System.Diagnostics.Trace.Flush();
+
+        _mockFs.Verify(f => f.DeleteFile(secondFile), Times.Once);
+        trace.Messages.Should().Contain("Failed to delete auto-save recovery file");
+        trace.Messages.Should().Contain(firstFile);
+    }
+
+    [Fact]
+    public void ClearRecoveryFiles_GetFilesFailure_LogsWarning()
+    {
+        using var trace = new TraceCapture();
+        _mockFs.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _mockFs.Setup(f => f.GetFiles(_autoSaveDir, "*.txt", false)).Throws(new IOException("unavailable"));
+
+        _sut.ClearRecoveryFiles();
+        System.Diagnostics.Trace.Flush();
+
+        trace.Messages.Should().Contain("Failed to clear auto-save recovery files");
     }
 
     [Fact]
