@@ -457,30 +457,20 @@ public partial class EditorHost : UserControl
         bool hasSelection = TextEditor.SelectionLength > 0;
         string input = hasSelection ? TextEditor.SelectedText : TextEditor.Text;
 
-        bool isChecksum = operation.IsChecksum();
         TextToolResult result = TextToolOperationRunner.Execute(textTools, operation, input);
+        var plan = TextToolApplicationPlanner.Create(operation, result, hasSelection);
 
-        if (!result.Success)
+        if (plan.Target == TextToolApplicationTarget.Selection)
         {
-            if (mainVm != null) mainVm.StatusText = result.Message ?? "Text tool failed";
-            return;
+            TextEditor.Document.Replace(TextEditor.SelectionStart, TextEditor.SelectionLength, plan.ReplacementText ?? "");
         }
-
-        if (isChecksum)
+        else if (plan.Target == TextToolApplicationTarget.Document)
         {
-            if (mainVm != null) mainVm.StatusText = result.Message ?? result.Text;
-        }
-        else if (hasSelection)
-        {
-            TextEditor.Document.Replace(TextEditor.SelectionStart, TextEditor.SelectionLength, result.Text);
-        }
-        else
-        {
-            TextEditor.Document.Text = result.Text;
+            TextEditor.Document.Text = plan.ReplacementText ?? "";
         }
 
-        if (!isChecksum && mainVm != null && result.Message != null)
-            mainVm.StatusText = result.Message;
+        if (mainVm != null && plan.StatusText != null)
+            mainVm.StatusText = plan.StatusText;
     }
 
     // --- Print ---
