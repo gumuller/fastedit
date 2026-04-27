@@ -408,7 +408,7 @@ public partial class MainWindow : FluentWindow
 
             try
             {
-                var gesture = ParseGesture(kvp.Value);
+                var gesture = KeyGestureParser.Parse(kvp.Value);
                 if (gesture != null)
                     InputBindings.Add(new KeyBinding(command, gesture));
             }
@@ -416,52 +416,6 @@ public partial class MainWindow : FluentWindow
             {
                 // Skip invalid gestures
             }
-        }
-    }
-
-    private static KeyGesture? ParseGesture(string gestureString)
-    {
-        var modifiers = ModifierKeys.None;
-        var parts = gestureString.Split('+');
-        var keyPart = parts[^1].Trim();
-
-        for (int i = 0; i < parts.Length - 1; i++)
-        {
-            var mod = parts[i].Trim();
-            if (mod.Equals("Ctrl", StringComparison.OrdinalIgnoreCase)) modifiers |= ModifierKeys.Control;
-            else if (mod.Equals("Alt", StringComparison.OrdinalIgnoreCase)) modifiers |= ModifierKeys.Alt;
-            else if (mod.Equals("Shift", StringComparison.OrdinalIgnoreCase)) modifiers |= ModifierKeys.Shift;
-        }
-
-        var key = keyPart switch
-        {
-            "Plus" => Key.OemPlus,
-            "Minus" => Key.OemMinus,
-            "`" => Key.OemTilde,
-            "\\" => Key.OemPipe,
-            "," => Key.OemComma,
-            "0" => Key.D0,
-            "1" => Key.D1,
-            "2" => Key.D2,
-            "3" => Key.D3,
-            "4" => Key.D4,
-            "5" => Key.D5,
-            "6" => Key.D6,
-            "7" => Key.D7,
-            "8" => Key.D8,
-            "9" => Key.D9,
-            _ => Enum.TryParse<Key>(keyPart, true, out var k) ? k : (Key?)null
-        };
-
-        if (key == null) return null;
-
-        try
-        {
-            return new KeyGesture(key.Value, modifiers);
-        }
-        catch
-        {
-            return null;
         }
     }
 
