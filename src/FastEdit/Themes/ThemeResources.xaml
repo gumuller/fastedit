@@ -28,6 +28,7 @@
     <SolidColorBrush x:Key="EditorCurrentLineBackgroundBrush" Color="#282828"/>
     <SolidColorBrush x:Key="EditorSelectionBackgroundBrush" Color="#264f78"/>
     <SolidColorBrush x:Key="EditorSelectionForegroundBrush" Color="#ffffff"/>
+    <SolidColorBrush x:Key="EditorFindHighlightBrush" Color="#78ffc800"/>
 
     <!-- Hex Editor -->
     <SolidColorBrush x:Key="HexOffsetForegroundBrush" Color="#569cd6"/>
@@ -223,10 +224,10 @@
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Root" Property="Background" Value="#22FFFFFF"/>
+                            <Setter TargetName="Root" Property="Background" Value="{DynamicResource ButtonHoverBackgroundBrush}"/>
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
-                            <Setter TargetName="Root" Property="Background" Value="#33FFFFFF"/>
+                            <Setter TargetName="Root" Property="Background" Value="{DynamicResource TreeViewItemSelectedBrush}"/>
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter Property="Opacity" Value="0.5"/>
@@ -255,10 +256,10 @@
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Root" Property="Background" Value="#22FFFFFF"/>
+                            <Setter TargetName="Root" Property="Background" Value="{DynamicResource ButtonHoverBackgroundBrush}"/>
                         </Trigger>
                         <Trigger Property="IsChecked" Value="True">
-                            <Setter TargetName="Root" Property="Background" Value="#33FFFFFF"/>
+                            <Setter TargetName="Root" Property="Background" Value="{DynamicResource TreeViewItemSelectedBrush}"/>
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter Property="Opacity" Value="0.5"/>

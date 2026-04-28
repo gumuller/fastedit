@@ -9,9 +9,11 @@
         ResizeMode="NoResize"
         ShowInTaskbar="False"
         ExtendsContentIntoTitleBar="True"
-        WindowBackdropType="Mica">
+        WindowBackdropType="Mica"
+        Background="{DynamicResource WindowBackgroundBrush}"
+        Foreground="{DynamicResource WindowForegroundBrush}">
 
-    <Grid Margin="16,36,16,16">
+    <Grid Margin="16,36,16,16" Background="{DynamicResource WindowBackgroundBrush}">
         <Grid.RowDefinitions>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
@@ -35,12 +37,18 @@
                             <Button Content="+" Width="28" Height="28" Click="FontSizeUp_Click" Margin="4,0,0,0"/>
                         </StackPanel>
 
-                        <CheckBox x:Name="WordWrapCheck" Content="Word wrap" Margin="0,4"/>
-                        <CheckBox x:Name="ShowWhitespaceCheck" Content="Show whitespace" Margin="0,4"/>
-                        <CheckBox x:Name="IndentGuidesCheck" Content="Show indent guides" Margin="0,4"/>
-                        <CheckBox x:Name="CodeFoldingCheck" Content="Code folding" Margin="0,4"/>
-                        <CheckBox x:Name="MinimapCheck" Content="Show minimap" Margin="0,4"/>
-                        <CheckBox x:Name="AutoReloadCheck" Content="Auto-reload files" Margin="0,4"/>
+                        <CheckBox x:Name="WordWrapCheck" Content="Word wrap" Margin="0,4"
+                                  Foreground="{DynamicResource WindowForegroundBrush}"/>
+                        <CheckBox x:Name="ShowWhitespaceCheck" Content="Show whitespace" Margin="0,4"
+                                  Foreground="{DynamicResource WindowForegroundBrush}"/>
+                        <CheckBox x:Name="IndentGuidesCheck" Content="Show indent guides" Margin="0,4"
+                                  Foreground="{DynamicResource WindowForegroundBrush}"/>
+                        <CheckBox x:Name="CodeFoldingCheck" Content="Code folding" Margin="0,4"
+                                  Foreground="{DynamicResource WindowForegroundBrush}"/>
+                        <CheckBox x:Name="MinimapCheck" Content="Show minimap" Margin="0,4"
+                                  Foreground="{DynamicResource WindowForegroundBrush}"/>
+                        <CheckBox x:Name="AutoReloadCheck" Content="Auto-reload files" Margin="0,4"
+                                  Foreground="{DynamicResource WindowForegroundBrush}"/>
 
                         <StackPanel Orientation="Horizontal" Margin="0,8,0,8">
                             <TextBlock Text="Tab size" Width="170" VerticalAlignment="Center"
@@ -52,7 +60,8 @@
                             </ComboBox>
                         </StackPanel>
 
-                        <CheckBox x:Name="UseTabsCheck" Content="Use tabs (instead of spaces)" Margin="0,4"/>
+                        <CheckBox x:Name="UseTabsCheck" Content="Use tabs (instead of spaces)" Margin="0,4"
+                                  Foreground="{DynamicResource WindowForegroundBrush}"/>
 
                         <StackPanel Orientation="Horizontal" Margin="0,8,0,8">
                             <TextBlock Text="Cursor style" Width="170" VerticalAlignment="Center"
@@ -82,7 +91,8 @@
                         <TextBlock Text="General" FontWeight="SemiBold" FontSize="16" Margin="0,12,0,12"
                                    Foreground="{DynamicResource WindowForegroundBrush}"/>
 
-                        <CheckBox x:Name="CheckUpdatesCheck" Content="Check for updates on startup" Margin="0,4"/>
+                        <CheckBox x:Name="CheckUpdatesCheck" Content="Check for updates on startup" Margin="0,4"
+                                  Foreground="{DynamicResource WindowForegroundBrush}"/>
 
                         <StackPanel Orientation="Horizontal" Margin="0,8,0,8">
                             <TextBlock Text="Auto-save interval (s)" Width="170" VerticalAlignment="Center"
@@ -110,6 +120,9 @@
                               SelectionMode="Single"
                               IsReadOnly="True"
                               GridLinesVisibility="Horizontal"
+                              Background="{DynamicResource PanelBackgroundBrush}"
+                              Foreground="{DynamicResource WindowForegroundBrush}"
+                              BorderBrush="{DynamicResource PanelBorderBrush}"
                               BorderThickness="1">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Command" Binding="{Binding Command}" Width="*" IsReadOnly="True"/>

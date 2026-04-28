@@ -82,6 +82,7 @@ public class ThemeService : IThemeService
         resources["EditorCurrentLineBackgroundBrush"] = CreateBrush(colors.EditorCurrentLineBackground);
         resources["EditorSelectionBackgroundBrush"] = CreateBrush(colors.EditorSelectionBackground);
         resources["EditorSelectionForegroundBrush"] = CreateBrush(colors.EditorSelectionForeground);
+        resources["EditorFindHighlightBrush"] = CreateBrushWithAlpha(colors.WarningColor, 0x78);
 
         // Hex Editor
         resources["HexOffsetForegroundBrush"] = CreateBrush(colors.HexOffsetForeground);
@@ -134,6 +135,15 @@ public class ThemeService : IThemeService
     private static SolidColorBrush CreateBrush(string hex)
     {
         var color = (Color)ColorConverter.ConvertFromString(hex);
+        var brush = new SolidColorBrush(color);
+        brush.Freeze();
+        return brush;
+    }
+
+    private static SolidColorBrush CreateBrushWithAlpha(string hex, byte alpha)
+    {
+        var color = (Color)ColorConverter.ConvertFromString(hex);
+        color.A = alpha;
         var brush = new SolidColorBrush(color);
         brush.Freeze();
         return brush;

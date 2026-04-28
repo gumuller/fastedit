@@ -530,7 +530,7 @@ public partial class LargeFileViewer : UserControl
             var bg = TryGetBrush("EditorBackgroundBrush", Brushes.White);
             var fg = TryGetBrush("EditorForegroundBrush", Brushes.Black);
             var gutter = TryGetBrush("PanelBackgroundBrush", Brushes.LightGray);
-            var gutterFg = TryGetBrush("LineNumberForegroundBrush", Brushes.Gray);
+            var gutterFg = TryGetBrush("EditorLineNumbersForegroundBrush", Brushes.Gray);
 
             dc.DrawRectangle(bg, null, new Rect(0, 0, ActualWidth, ActualHeight));
 

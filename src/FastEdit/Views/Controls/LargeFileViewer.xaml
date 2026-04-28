@@ -144,7 +144,7 @@
                 BorderBrush="{DynamicResource PanelBorderBrush}"
                 BorderThickness="0,1,0,0" Padding="8,3">
             <TextBlock x:Name="FooterText"
-                       Foreground="{DynamicResource StatusForegroundBrush}"/>
+                       Foreground="{DynamicResource StatusBarForegroundBrush}"/>
         </Border>
     </Grid>
 </UserControl>

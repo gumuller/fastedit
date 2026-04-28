@@ -169,7 +169,9 @@
         </Grid>
 
         <!-- Menu Bar -->
-        <Menu x:Name="MenuBar" Grid.Row="1" Margin="0,0,0,0">
+        <Menu x:Name="MenuBar" Grid.Row="1" Margin="0,0,0,0"
+              Background="{DynamicResource MenuBackgroundBrush}"
+              Foreground="{DynamicResource MenuForegroundBrush}">
             <MenuItem Header="_File">
                 <MenuItem Header="_New" Command="{Binding NewFileCommand}" InputGestureText="Ctrl+N"/>
                 <MenuItem Header="_Open..." Command="{Binding OpenFileCommand}" InputGestureText="Ctrl+O"/>

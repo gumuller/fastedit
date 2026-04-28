@@ -11,9 +11,11 @@
         ShowInTaskbar="False"
         ExtendsContentIntoTitleBar="True"
         WindowBackdropType="Mica"
+        Background="{DynamicResource WindowBackgroundBrush}"
+        Foreground="{DynamicResource WindowForegroundBrush}"
         KeyDown="Window_KeyDown">
 
-    <Grid Margin="8">
+    <Grid Margin="8" Background="{DynamicResource WindowBackgroundBrush}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
@@ -23,6 +25,9 @@
                  Grid.Row="0"
                  FontSize="16"
                  Margin="0,0,0,4"
+                 Background="{DynamicResource EditorBackgroundBrush}"
+                 Foreground="{DynamicResource WindowForegroundBrush}"
+                 BorderBrush="{DynamicResource PanelBorderBrush}"
                  TextChanged="SearchBox_TextChanged"/>
 
         <ListBox x:Name="CommandList"
@@ -30,6 +35,8 @@
                  MaxHeight="300"
                  MouseDoubleClick="CommandList_MouseDoubleClick"
                  KeyDown="CommandList_KeyDown"
+                 Background="{DynamicResource PanelBackgroundBrush}"
+                 Foreground="{DynamicResource WindowForegroundBrush}"
                  BorderThickness="0">
             <ListBox.ItemTemplate>
                 <DataTemplate>
@@ -39,10 +46,10 @@
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0" Orientation="Horizontal">
-                            <TextBlock Text="{Binding Category}" Foreground="Gray" Margin="0,0,8,0" FontSize="12"/>
-                            <TextBlock Text="{Binding Name}" FontSize="13"/>
+                            <TextBlock Text="{Binding Category}" Foreground="{DynamicResource TabForegroundBrush}" Margin="0,0,8,0" FontSize="12"/>
+                            <TextBlock Text="{Binding Name}" Foreground="{DynamicResource WindowForegroundBrush}" FontSize="13"/>
                         </StackPanel>
-                        <TextBlock Grid.Column="1" Text="{Binding ShortcutText}" Foreground="Gray" FontSize="11"
+                        <TextBlock Grid.Column="1" Text="{Binding ShortcutText}" Foreground="{DynamicResource TabForegroundBrush}" FontSize="11"
                                    VerticalAlignment="Center" Margin="16,0,0,0"/>
                     </Grid>
                 </DataTemplate>

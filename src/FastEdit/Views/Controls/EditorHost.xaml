@@ -75,9 +75,9 @@
 
         <!-- Split Editor (second view of same document) -->
         <GridSplitter x:Name="SplitSplitter" Grid.Row="1" Grid.Column="0"
-                      Height="4" HorizontalAlignment="Stretch" VerticalAlignment="Bottom"
-                      Background="{DynamicResource BorderBrush}"
-                      Visibility="Collapsed"/>
+                       Height="4" HorizontalAlignment="Stretch" VerticalAlignment="Bottom"
+                       Background="{DynamicResource PanelBorderBrush}"
+                       Visibility="Collapsed"/>
         <avalonedit:TextEditor x:Name="SplitEditor"
                                Grid.Column="0" Grid.Row="2"
                                FontFamily="Cascadia Code, Consolas, Courier New"
