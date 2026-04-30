@@ -13,6 +13,95 @@
         Background="{DynamicResource WindowBackgroundBrush}"
         Foreground="{DynamicResource WindowForegroundBrush}">
 
+    <ui:FluentWindow.Resources>
+        <Style x:Key="SettingsStepperButtonStyle" TargetType="{x:Type Button}">
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="Width" Value="32"/>
+            <Setter Property="Height" Value="30"/>
+            <Setter Property="MinWidth" Value="32"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="{DynamicResource WindowForegroundBrush}"/>
+            <Setter Property="Background" Value="{DynamicResource PanelBackgroundBrush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource PanelBorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Button}">
+                        <Border x:Name="Root"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="6"
+                                SnapsToDevicePixels="True">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              RecognizesAccessKey="False"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Root" Property="Background" Value="{DynamicResource ButtonHoverBackgroundBrush}"/>
+                                <Setter TargetName="Root" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Root" Property="Background" Value="{DynamicResource TreeViewItemSelectedBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.5"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="SettingsNumberTextBoxStyle" TargetType="{x:Type TextBox}">
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="Width" Value="54"/>
+            <Setter Property="Height" Value="30"/>
+            <Setter Property="MinWidth" Value="54"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Foreground" Value="{DynamicResource WindowForegroundBrush}"/>
+            <Setter Property="CaretBrush" Value="{DynamicResource WindowForegroundBrush}"/>
+            <Setter Property="Background" Value="{DynamicResource PanelBackgroundBrush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource PanelBorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="TextAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type TextBox}">
+                        <Border x:Name="Root"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="6"
+                                SnapsToDevicePixels="True">
+                            <ScrollViewer x:Name="PART_ContentHost"
+                                          Margin="{TemplateBinding Padding}"
+                                          VerticalAlignment="Center"
+                                          HorizontalScrollBarVisibility="Hidden"
+                                          VerticalScrollBarVisibility="Hidden"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="Root" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Root" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </ui:FluentWindow.Resources>
+
     <Grid Margin="16,36,16,16" Background="{DynamicResource WindowBackgroundBrush}">
         <Grid.RowDefinitions>
             <RowDefinition Height="*"/>
@@ -30,11 +119,32 @@
 
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
                             <TextBlock Text="Font size" Width="170" VerticalAlignment="Center"
-                                       Foreground="{DynamicResource WindowForegroundBrush}"/>
-                            <Button Content="−" Width="28" Height="28" Click="FontSizeDown_Click" Margin="0,0,4,0"/>
-                            <TextBox x:Name="FontSizeBox" Width="50" TextAlignment="Center"
-                                     VerticalContentAlignment="Center" Height="28"/>
-                            <Button Content="+" Width="28" Height="28" Click="FontSizeUp_Click" Margin="4,0,0,0"/>
+                                        Foreground="{DynamicResource WindowForegroundBrush}"/>
+                            <Grid VerticalAlignment="Center">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="32"/>
+                                    <ColumnDefinition Width="6"/>
+                                    <ColumnDefinition Width="54"/>
+                                    <ColumnDefinition Width="6"/>
+                                    <ColumnDefinition Width="32"/>
+                                </Grid.ColumnDefinitions>
+                                <Button Grid.Column="0"
+                                        Content="−"
+                                        ToolTip="Decrease font size"
+                                        AutomationProperties.Name="Decrease font size"
+                                        Style="{StaticResource SettingsStepperButtonStyle}"
+                                        Click="FontSizeDown_Click"/>
+                                <TextBox x:Name="FontSizeBox"
+                                         Grid.Column="2"
+                                         AutomationProperties.Name="Font size"
+                                         Style="{StaticResource SettingsNumberTextBoxStyle}"/>
+                                <Button Grid.Column="4"
+                                        Content="+"
+                                        ToolTip="Increase font size"
+                                        AutomationProperties.Name="Increase font size"
+                                        Style="{StaticResource SettingsStepperButtonStyle}"
+                                        Click="FontSizeUp_Click"/>
+                            </Grid>
                         </StackPanel>
 
                         <CheckBox x:Name="WordWrapCheck" Content="Word wrap" Margin="0,4"
