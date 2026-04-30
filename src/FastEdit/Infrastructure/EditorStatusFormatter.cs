@@ -28,7 +28,7 @@ public static class EditorStatusFormatter
     public static string FormatLargeFileViewerStatus(long? totalLines, long fileSizeBytes, string encoding)
     {
         var lineCount = totalLines.HasValue ? FormatCompactCount(totalLines.Value) : "indexing";
-        return $"Large file viewer: {lineCount} lines, read-only | {FormatBytes(fileSizeBytes)} | {encoding}";
+        return $"Large file viewer: {lineCount} lines, read-only | {ByteSizeFormatter.Format(fileSizeBytes)} | {encoding}";
     }
 
     public static string FormatTextCommandUnavailable(FileOpenMode mode)
@@ -68,17 +68,4 @@ public static class EditorStatusFormatter
         return scaled.ToString("0.#", CultureInfo.InvariantCulture) + suffix;
     }
 
-    private static string FormatBytes(long bytes)
-    {
-        string[] units = { "B", "KB", "MB", "GB", "TB" };
-        double value = bytes;
-        var unitIndex = 0;
-        while (value >= 1024 && unitIndex < units.Length - 1)
-        {
-            value /= 1024;
-            unitIndex++;
-        }
-
-        return value.ToString("0.##", CultureInfo.InvariantCulture) + $" {units[unitIndex]}";
-    }
 }

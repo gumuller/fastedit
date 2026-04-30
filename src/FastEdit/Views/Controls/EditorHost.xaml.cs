@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -13,7 +15,6 @@ using ICSharpCode.AvalonEdit.CodeCompletion;
 using ICSharpCode.AvalonEdit.Folding;
 using ICSharpCode.AvalonEdit.Highlighting;
 using ICSharpCode.AvalonEdit.Search;
-using Microsoft.Extensions.DependencyInjection;
 
 namespace FastEdit.Views.Controls;
 
@@ -50,6 +51,7 @@ public partial class EditorHost : UserControl
     private ITextToolsService? _textToolsService;
     private IMacroService? _macroService;
     private IDialogService? _dialogService;
+    private IFileSystemService? _fileSystemService;
     private MainViewModel? _mainViewModel;
     private Dictionary<int, Models.LineFilterResult> _filterCache = new();
     private bool _isFilterFoldingActive;
@@ -61,9 +63,113 @@ public partial class EditorHost : UserControl
         Loaded += OnLoaded;
     }
 
+    public static readonly DependencyProperty LineFilterServiceProperty =
+        DependencyProperty.Register(
+            nameof(LineFilterService),
+            typeof(ILineFilterService),
+            typeof(EditorHost),
+            new PropertyMetadata(null));
+
+    public ILineFilterService? LineFilterService
+    {
+        get => (ILineFilterService?)GetValue(LineFilterServiceProperty);
+        set => SetValue(LineFilterServiceProperty, value);
+    }
+
+    public static readonly DependencyProperty ThemeServiceProperty =
+        DependencyProperty.Register(
+            nameof(ThemeService),
+            typeof(IThemeService),
+            typeof(EditorHost),
+            new PropertyMetadata(null));
+
+    public IThemeService? ThemeService
+    {
+        get => (IThemeService?)GetValue(ThemeServiceProperty);
+        set => SetValue(ThemeServiceProperty, value);
+    }
+
+    public static readonly DependencyProperty SettingsServiceProperty =
+        DependencyProperty.Register(
+            nameof(SettingsService),
+            typeof(ISettingsService),
+            typeof(EditorHost),
+            new PropertyMetadata(null));
+
+    public ISettingsService? SettingsService
+    {
+        get => (ISettingsService?)GetValue(SettingsServiceProperty);
+        set => SetValue(SettingsServiceProperty, value);
+    }
+
+    public static readonly DependencyProperty TextToolsServiceProperty =
+        DependencyProperty.Register(
+            nameof(TextToolsService),
+            typeof(ITextToolsService),
+            typeof(EditorHost),
+            new PropertyMetadata(null));
+
+    public ITextToolsService? TextToolsService
+    {
+        get => (ITextToolsService?)GetValue(TextToolsServiceProperty);
+        set => SetValue(TextToolsServiceProperty, value);
+    }
+
+    public static readonly DependencyProperty MacroServiceProperty =
+        DependencyProperty.Register(
+            nameof(MacroService),
+            typeof(IMacroService),
+            typeof(EditorHost),
+            new PropertyMetadata(null));
+
+    public IMacroService? MacroService
+    {
+        get => (IMacroService?)GetValue(MacroServiceProperty);
+        set => SetValue(MacroServiceProperty, value);
+    }
+
+    public static readonly DependencyProperty DialogServiceProperty =
+        DependencyProperty.Register(
+            nameof(DialogService),
+            typeof(IDialogService),
+            typeof(EditorHost),
+            new PropertyMetadata(null));
+
+    public IDialogService? DialogService
+    {
+        get => (IDialogService?)GetValue(DialogServiceProperty);
+        set => SetValue(DialogServiceProperty, value);
+    }
+
+    public static readonly DependencyProperty FileSystemServiceProperty =
+        DependencyProperty.Register(
+            nameof(FileSystemService),
+            typeof(IFileSystemService),
+            typeof(EditorHost),
+            new PropertyMetadata(null));
+
+    public IFileSystemService? FileSystemService
+    {
+        get => (IFileSystemService?)GetValue(FileSystemServiceProperty);
+        set => SetValue(FileSystemServiceProperty, value);
+    }
+
+    public static readonly DependencyProperty MainViewModelProperty =
+        DependencyProperty.Register(
+            nameof(MainViewModel),
+            typeof(MainViewModel),
+            typeof(EditorHost),
+            new PropertyMetadata(null));
+
+    public MainViewModel? MainViewModel
+    {
+        get => (MainViewModel?)GetValue(MainViewModelProperty);
+        set => SetValue(MainViewModelProperty, value);
+    }
+
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        ResolveServices();
+        ConfigureServices();
 
         // Install search panel with explicit style to bypass WPF UI's implicit TextBox style
         _searchPanel = SearchPanel.Install(TextEditor);
@@ -163,16 +269,20 @@ public partial class EditorHost : UserControl
         }
     }
 
-    private void ResolveServices()
+    private void ConfigureServices()
     {
-        _lineFilterService ??= App.Services.GetRequiredService<ILineFilterService>();
-        _themeService ??= App.Services.GetService<IThemeService>();
-        _settingsService ??= App.Services.GetService<ISettingsService>();
-        _textToolsService ??= App.Services.GetService<ITextToolsService>();
-        _macroService ??= App.Services.GetService<IMacroService>();
-        _dialogService ??= App.Services.GetService<IDialogService>();
-        _mainViewModel ??= App.Services.GetService<MainViewModel>();
+        _lineFilterService = LineFilterService ?? throw MissingDependency(nameof(LineFilterService));
+        _themeService = ThemeService ?? throw MissingDependency(nameof(ThemeService));
+        _settingsService = SettingsService ?? throw MissingDependency(nameof(SettingsService));
+        _textToolsService = TextToolsService ?? throw MissingDependency(nameof(TextToolsService));
+        _macroService = MacroService ?? throw MissingDependency(nameof(MacroService));
+        _dialogService = DialogService ?? throw MissingDependency(nameof(DialogService));
+        _fileSystemService = FileSystemService ?? throw MissingDependency(nameof(FileSystemService));
+        _mainViewModel = MainViewModel ?? throw MissingDependency(nameof(MainViewModel));
     }
+
+    private static InvalidOperationException MissingDependency(string propertyName) =>
+        new($"EditorHost requires {propertyName} before it is loaded.");
 
     private void SetStatus(string statusText)
     {
@@ -968,14 +1078,23 @@ public partial class EditorHost : UserControl
 
             try
             {
-                var content = await System.IO.File.ReadAllTextAsync(filePath);
+                var content = await _fileSystemService!.ReadAllTextAsync(filePath);
                 TextEditor.Text = content;
                 // Scroll to bottom (tail mode)
                 TextEditor.ScrollToEnd();
 
-                SetStatus($"Auto-reloaded: {System.IO.Path.GetFileName(filePath)}");
+                SetStatus($"Auto-reloaded: {_fileSystemService.GetFileName(filePath)}");
             }
-            catch { /* file may be locked */ }
+            catch (IOException ex)
+            {
+                Trace.TraceWarning($"Auto-reload skipped for '{filePath}': {ex.Message}");
+                SetStatus($"Auto-reload skipped; file is unavailable: {_fileSystemService!.GetFileName(filePath)}");
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                Trace.TraceWarning($"Auto-reload skipped for '{filePath}': {ex.Message}");
+                SetStatus($"Auto-reload skipped; access denied: {_fileSystemService!.GetFileName(filePath)}");
+            }
         });
     }
 

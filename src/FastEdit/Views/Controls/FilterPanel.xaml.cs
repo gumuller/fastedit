@@ -3,14 +3,16 @@ using System.Windows.Controls;
 using FastEdit.Models;
 using FastEdit.Services.Interfaces;
 using FastEdit.Views.Dialogs;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Win32;
 
 namespace FastEdit.Views.Controls;
 
 public partial class FilterPanel : UserControl
 {
+    private const string FilterFileDialogFilter = "Filter Files (*.filters)|*.filters|All Files (*.*)|*.*";
+
     private ILineFilterService? _filterService;
+    private IDialogService? _dialogService;
+    private bool _isSubscribedToFilterService;
 
     public event Action? CloseRequested;
     public event Action? FiltersUpdated;
@@ -21,13 +23,59 @@ public partial class FilterPanel : UserControl
     {
         InitializeComponent();
         Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
+    }
+
+    public void SetServices(ILineFilterService filterService, IDialogService dialogService)
+    {
+        if (ReferenceEquals(_filterService, filterService))
+        {
+            _dialogService = dialogService ?? throw new ArgumentNullException(nameof(dialogService));
+            return;
+        }
+
+        UnsubscribeFromFilterService();
+        _filterService = filterService ?? throw new ArgumentNullException(nameof(filterService));
+        _dialogService = dialogService ?? throw new ArgumentNullException(nameof(dialogService));
+        FilterList.ItemsSource = _filterService.Filters;
+        SubscribeToFilterService();
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        _filterService = App.Services.GetRequiredService<ILineFilterService>();
-        FilterList.ItemsSource = _filterService.Filters;
+        if (_filterService == null || _dialogService == null)
+            throw new InvalidOperationException("FilterPanel requires ILineFilterService and IDialogService before it is loaded.");
+
+        SubscribeToFilterService();
+    }
+
+    private ILineFilterService RequireFilterService() =>
+        _filterService ?? throw new InvalidOperationException("FilterPanel requires ILineFilterService before use.");
+
+    private IDialogService RequireDialogService() =>
+        _dialogService ?? throw new InvalidOperationException("FilterPanel requires IDialogService before use.");
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        UnsubscribeFromFilterService();
+    }
+
+    private void SubscribeToFilterService()
+    {
+        if (_filterService == null || _isSubscribedToFilterService)
+            return;
+
         _filterService.FiltersChanged += OnFiltersChanged;
+        _isSubscribedToFilterService = true;
+    }
+
+    private void UnsubscribeFromFilterService()
+    {
+        if (_filterService == null || !_isSubscribedToFilterService)
+            return;
+
+        _filterService.FiltersChanged -= OnFiltersChanged;
+        _isSubscribedToFilterService = false;
     }
 
     private void OnFiltersChanged()
@@ -47,10 +95,13 @@ public partial class FilterPanel : UserControl
 
     private void Add_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new FilterEditDialog { Owner = Window.GetWindow(this) };
+        var dialogService = RequireDialogService();
+        var filterService = RequireFilterService();
+
+        var dialog = new FilterEditDialog(dialogService) { Owner = Window.GetWindow(this) };
         if (dialog.ShowDialog() == true && dialog.Result != null)
         {
-            _filterService?.AddFilter(dialog.Result);
+            filterService.AddFilter(dialog.Result);
         }
     }
 
@@ -66,9 +117,11 @@ public partial class FilterPanel : UserControl
 
     private void EditSelectedFilter()
     {
-        if (FilterList.SelectedItem is not LineFilter selected || _filterService == null) return;
+        if (FilterList.SelectedItem is not LineFilter selected) return;
 
-        var dialog = new FilterEditDialog(selected) { Owner = Window.GetWindow(this) };
+        var dialogService = RequireDialogService();
+
+        var dialog = new FilterEditDialog(dialogService, selected) { Owner = Window.GetWindow(this) };
         if (dialog.ShowDialog() == true && dialog.Result != null)
         {
             var result = dialog.Result;
@@ -104,42 +157,40 @@ public partial class FilterPanel : UserControl
 
     private void SaveFilters_Click(object sender, RoutedEventArgs e)
     {
-        var dlg = new SaveFileDialog
-        {
-            Filter = "Filter Files (*.filters)|*.filters|All Files (*.*)|*.*",
-            DefaultExt = ".filters",
-            FileName = "filters.filters"
-        };
-        if (dlg.ShowDialog() == true)
+        var dialogService = RequireDialogService();
+        var filterService = RequireFilterService();
+
+        var fileName = dialogService.ShowSaveFileDialog(FilterFileDialogFilter, "filters.filters");
+        if (fileName != null)
         {
             try
             {
-                _filterService?.SaveFilters(dlg.FileName);
+                filterService.SaveFilters(fileName);
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Failed to save filters: {ex.Message}", "Error",
-                    MessageBoxButton.OK, MessageBoxImage.Error);
+                dialogService.ShowMessage($"Failed to save filters: {ex.Message}", "Error",
+                    DialogButtons.Ok, DialogIcon.Error);
             }
         }
     }
 
     private void LoadFilters_Click(object sender, RoutedEventArgs e)
     {
-        var dlg = new OpenFileDialog
-        {
-            Filter = "Filter Files (*.filters)|*.filters|All Files (*.*)|*.*"
-        };
-        if (dlg.ShowDialog() == true)
+        var dialogService = RequireDialogService();
+        var filterService = RequireFilterService();
+
+        var fileName = dialogService.ShowOpenFileDialog(FilterFileDialogFilter);
+        if (fileName != null)
         {
             try
             {
-                _filterService?.LoadFilters(dlg.FileName);
+                filterService.LoadFilters(fileName);
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Failed to load filters: {ex.Message}", "Error",
-                    MessageBoxButton.OK, MessageBoxImage.Error);
+                dialogService.ShowMessage($"Failed to load filters: {ex.Message}", "Error",
+                    DialogButtons.Ok, DialogIcon.Error);
             }
         }
     }

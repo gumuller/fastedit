@@ -13,17 +13,22 @@ public partial class SettingsWindow : Wpf.Ui.Controls.FluentWindow
     private readonly MainViewModel _viewModel;
     private readonly ISettingsService _settingsService;
     private readonly IKeyBindingService _keyBindingService;
+    private readonly IDialogService _dialogService;
     private readonly ObservableCollection<KeyBindingEntry> _shortcutEntries = new();
-    private bool _isRecording;
     private KeyBindingEntry? _recordingEntry;
 
     public bool ShortcutsChanged { get; private set; }
 
-    public SettingsWindow(MainViewModel viewModel, ISettingsService settingsService, IKeyBindingService keyBindingService)
+    public SettingsWindow(
+        MainViewModel viewModel,
+        ISettingsService settingsService,
+        IKeyBindingService keyBindingService,
+        IDialogService dialogService)
     {
-        _viewModel = viewModel;
-        _settingsService = settingsService;
-        _keyBindingService = keyBindingService;
+        _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
+        _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
+        _keyBindingService = keyBindingService ?? throw new ArgumentNullException(nameof(keyBindingService));
+        _dialogService = dialogService ?? throw new ArgumentNullException(nameof(dialogService));
 
         InitializeComponent();
 
@@ -107,12 +112,11 @@ public partial class SettingsWindow : Wpf.Ui.Controls.FluentWindow
     {
         if (ShortcutsGrid.SelectedItem is not KeyBindingEntry entry)
         {
-            MessageBox.Show("Select a command first.", "Record Shortcut",
-                MessageBoxButton.OK, MessageBoxImage.Information);
+            _dialogService.ShowMessage("Select a command first.", "Record Shortcut",
+                DialogButtons.Ok, DialogIcon.Information);
             return;
         }
 
-        _isRecording = true;
         _recordingEntry = entry;
         entry.Gesture = "Press key combination...";
         Title = "Settings — Recording shortcut...";
@@ -165,7 +169,6 @@ public partial class SettingsWindow : Wpf.Ui.Controls.FluentWindow
             ShortcutsGrid.Items.Refresh();
         }
 
-        _isRecording = false;
         _recordingEntry = null;
         Title = "Settings";
         PreviewKeyDown -= OnRecordKeyDown;

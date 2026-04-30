@@ -143,6 +143,29 @@ public class MainViewModelTests
     }
 
     [Fact]
+    public void ToggleFilterPanelCommand_RaisesToggleEventOnce()
+    {
+        var raisedCount = 0;
+        _sut.ToggleFilterPanelRequested += () => raisedCount++;
+
+        _sut.ToggleFilterPanelCommand.Execute(null);
+
+        Assert.True(_sut.IsFilterPanelVisible);
+        Assert.Equal(1, raisedCount);
+    }
+
+    [Fact]
+    public void IsFilterPanelVisibleChanged_RaisesToggleEvent()
+    {
+        var wasRaised = false;
+        _sut.ToggleFilterPanelRequested += () => wasRaised = true;
+
+        _sut.IsFilterPanelVisible = true;
+
+        Assert.True(wasRaised);
+    }
+
+    [Fact]
     public void SelectedTab_LargeTextMode_Shows_LargeFileViewer_Status()
     {
         var tab = CreateMockTab(mode: FileOpenMode.LargeText);
@@ -521,6 +544,41 @@ public class MainViewModelTests
 
         _fileSystemService.Verify(f => f.CreateDirectory(It.IsAny<string>()), Times.Once);
         _fileSystemService.Verify(f => f.WriteAllText(It.IsAny<string>(), "hello world"), Times.Once);
+    }
+
+    [Fact]
+    public async Task LoadSession_RestoresFileTab_Asynchronously()
+    {
+        var tempFile = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(tempFile, "content");
+            var session = new SessionData
+            {
+                ActiveTabIndex = 0,
+                Files =
+                {
+                    new SessionFileEntry { FilePath = tempFile, IsUntitled = false }
+                }
+            };
+            _workspaceService.Setup(w => w.LoadNamedSession("saved")).Returns(session);
+            _fileSystemService.Setup(f => f.FileExists(tempFile)).Returns(true);
+
+            var tab = CreateMockTab("test.txt", tempFile);
+            _tabFactory.Setup(f => f.Create()).Returns(tab);
+            _fileService.Setup(f => f.ReadFileWithEncodingAsync(tempFile))
+                .ReturnsAsync(new FileReadResult("content", System.Text.Encoding.UTF8, false));
+
+            await _sut.LoadSessionCommand.ExecuteAsync("saved");
+
+            Assert.Single(_sut.Tabs);
+            Assert.Equal(tab, _sut.SelectedTab);
+            Assert.Equal("Session loaded: saved", _sut.StatusText);
+        }
+        finally
+        {
+            File.Delete(tempFile);
+        }
     }
 
     // --- RestoreSession ---

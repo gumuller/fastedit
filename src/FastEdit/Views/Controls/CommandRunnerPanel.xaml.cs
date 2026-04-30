@@ -4,6 +4,7 @@ using System.Windows.Controls;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
+using FastEdit.Infrastructure;
 using FastEdit.Services;
 using FastEdit.ViewModels;
 
@@ -115,12 +116,12 @@ public partial class CommandRunnerPanel : UserControl
         if (_tabs.Count <= 1) return;
 
         var idx = _tabs.IndexOf(tab);
+        var wasActive = _activeTab == tab;
         _tabs.Remove(tab);
         tab.Dispose();
 
-        if (_activeTab == tab)
+        if (TerminalTabClosePolicy.TryGetNextActiveIndex(_tabs.Count + 1, idx, wasActive, out var newIdx))
         {
-            var newIdx = Math.Min(idx, _tabs.Count - 1);
             SwitchToTab(_tabs[newIdx]);
         }
 
@@ -476,7 +477,7 @@ public partial class CommandRunnerPanel : UserControl
         if (e.DataObject.GetDataPresent(DataFormats.UnicodeText))
         {
             var text = (string)e.DataObject.GetData(DataFormats.UnicodeText);
-            text = text.Replace("\r\n", " ").Replace("\r", " ").Replace("\n", " ").Trim();
+            text = TerminalPasteNormalizer.NormalizeSingleLine(text);
 
             var dataObj = new DataObject();
             dataObj.SetData(DataFormats.UnicodeText, text);
@@ -539,20 +540,8 @@ public partial class CommandRunnerPanel : UserControl
 
     private void UpdatePromptForTab(TerminalTabInfo tab, string cwd)
     {
-        try
-        {
-            var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            var displayPath = cwd;
-            if (cwd.Equals(userProfile, StringComparison.OrdinalIgnoreCase))
-                displayPath = "~";
-            else if (cwd.StartsWith(userProfile + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-                displayPath = "~" + cwd[userProfile.Length..];
-            tab.CurrentPrompt = $"{displayPath} ❯ ";
-        }
-        catch
-        {
-            tab.CurrentPrompt = "❯ ";
-        }
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        tab.CurrentPrompt = TerminalPromptFormatter.FormatPrompt(cwd, userProfile);
     }
 
     private void Clear_Click(object sender, RoutedEventArgs e)

@@ -1,13 +1,19 @@
 using System.Windows;
+using FastEdit.Infrastructure;
+using FastEdit.Services.Interfaces;
 
 namespace FastEdit.Views;
 
 public partial class GoToLineDialog : Window
 {
+    private readonly IDialogService _dialogService;
+
     public int LineNumber { get; private set; }
 
-    public GoToLineDialog(int currentLine = 1)
+    public GoToLineDialog(int currentLine, IDialogService dialogService)
     {
+        _dialogService = dialogService ?? throw new ArgumentNullException(nameof(dialogService));
+
         InitializeComponent();
         LineNumberBox.Text = currentLine.ToString();
         LineNumberBox.SelectAll();
@@ -16,15 +22,18 @@ public partial class GoToLineDialog : Window
 
     private void Go_Click(object sender, RoutedEventArgs e)
     {
-        if (int.TryParse(LineNumberBox.Text, out var line) && line > 0)
+        if (GoToLineInputParser.TryParse(LineNumberBox.Text, out var line))
         {
             LineNumber = line;
             DialogResult = true;
         }
         else
         {
-            System.Windows.MessageBox.Show("Please enter a valid line number.",
-                "Invalid Input", MessageBoxButton.OK, MessageBoxImage.Warning);
+            _dialogService.ShowMessage(
+                "Please enter a valid line number.",
+                "Invalid Input",
+                DialogButtons.Ok,
+                DialogIcon.Warning);
         }
     }
 

@@ -1,3 +1,4 @@
+using System.IO;
 using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
 using Moq;
@@ -119,6 +120,50 @@ public class FileNodeViewModelTests
         node.LoadChildren(); // Should not reload
 
         _fileSystemService.Verify(f => f.GetDirectories(@"C:\root"), Times.Once);
+    }
+
+    [Fact]
+    public void LoadChildren_DirectoryFailure_RecordsErrorAndStillLoadsFiles()
+    {
+        using var trace = new TraceCapture();
+        _fileSystemService.Setup(f => f.GetDirectories(@"C:\root"))
+            .Throws(new UnauthorizedAccessException("denied"));
+        _fileSystemService.Setup(f => f.GetFiles(@"C:\root", "*", false))
+            .Returns(new[] { @"C:\root\visible.txt" });
+
+        var node = new FileNodeViewModel(@"C:\root", true, _fileSystemService.Object);
+        node.LoadChildren();
+        System.Diagnostics.Trace.Flush();
+
+        Assert.True(node.IsLoaded);
+        Assert.Single(node.Children);
+        Assert.Equal("visible.txt", node.Children[0].Name);
+        Assert.Contains(node.LoadErrors, error => error.Contains("Failed to load directories"));
+        Assert.Contains("Failed to load directories", trace.Messages);
+    }
+
+    [Fact]
+    public void LoadChildren_FileFailure_RecordsErrorAndStillLoadsDirectories()
+    {
+        _fileSystemService.Setup(f => f.GetDirectories(@"C:\root"))
+            .Returns(new[] { @"C:\root\visible" });
+        _fileSystemService.Setup(f => f.GetFiles(@"C:\root", "*", false))
+            .Throws(new IOException("locked"));
+
+        var node = new FileNodeViewModel(@"C:\root", true, _fileSystemService.Object);
+        node.LoadChildren();
+
+        Assert.True(node.IsLoaded);
+        Assert.Single(node.Children);
+        Assert.Equal("visible", node.Children[0].Name);
+        Assert.Contains(node.LoadErrors, error => error.Contains("Failed to load files"));
+    }
+
+    [Fact]
+    public void Constructor_NullFileSystem_Throws()
+    {
+        Assert.Throws<ArgumentNullException>(
+            () => new FileNodeViewModel(@"C:\root", true, null!));
     }
 
     [Fact]

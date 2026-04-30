@@ -4,6 +4,7 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using DiffPlex.DiffBuilder.Model;
 using FastEdit.Services;
+using FastEdit.Services.Interfaces;
 using ICSharpCode.AvalonEdit.Document;
 using ICSharpCode.AvalonEdit.Rendering;
 
@@ -11,11 +12,15 @@ namespace FastEdit.Views.Dialogs;
 
 public partial class CompareFilesWindow : Window
 {
-    private readonly DiffService _diffService = new();
+    private readonly DiffService _diffService;
+    private readonly IFileSystemService _fileSystemService;
     private bool _isSyncingScroll;
 
-    public CompareFilesWindow()
+    public CompareFilesWindow(IFileSystemService fileSystemService)
     {
+        _fileSystemService = fileSystemService ?? throw new ArgumentNullException(nameof(fileSystemService));
+        _diffService = new DiffService();
+
         InitializeComponent();
     }
 
@@ -27,8 +32,8 @@ public partial class CompareFilesWindow : Window
         string leftText, rightText;
         try
         {
-            leftText = File.ReadAllText(leftPath);
-            rightText = File.ReadAllText(rightPath);
+            leftText = _fileSystemService.ReadAllText(leftPath);
+            rightText = _fileSystemService.ReadAllText(rightPath);
         }
         catch (Exception ex)
         {

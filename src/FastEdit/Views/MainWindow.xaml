@@ -172,6 +172,9 @@
         <Menu x:Name="MenuBar" Grid.Row="1" Margin="0,0,0,0"
               Background="{DynamicResource MenuBackgroundBrush}"
               Foreground="{DynamicResource MenuForegroundBrush}">
+            <Menu.Resources>
+                <Style TargetType="{x:Type Separator}" BasedOn="{StaticResource FastEditMenuSeparatorStyle}"/>
+            </Menu.Resources>
             <MenuItem Header="_File">
                 <MenuItem Header="_New" Command="{Binding NewFileCommand}" InputGestureText="Ctrl+N"/>
                 <MenuItem Header="_Open..." Command="{Binding OpenFileCommand}" InputGestureText="Ctrl+O"/>
@@ -297,8 +300,7 @@
                 <MenuItem Header="_Terminal" Command="{Binding ToggleCommandRunnerCommand}" InputGestureText="Ctrl+`"/>
                 <MenuItem Header="_Zen Mode" IsCheckable="True" IsChecked="{Binding IsZenMode, Mode=TwoWay}" InputGestureText="F11"/>
                 <MenuItem Header="Toggle _Explorer" IsCheckable="True" IsChecked="{Binding IsExplorerVisible, Mode=TwoWay}" InputGestureText="Ctrl+B"/>
-                <MenuItem Header="Line _Filters" IsCheckable="True" IsChecked="{Binding IsFilterPanelVisible, Mode=TwoWay}" InputGestureText="Ctrl+L"
-                          Command="{Binding ToggleFilterPanelCommand}"/>
+                <MenuItem Header="Line _Filters" IsCheckable="True" IsChecked="{Binding IsFilterPanelVisible, Mode=TwoWay}" InputGestureText="Ctrl+L"/>
                 <Separator/>
                 <MenuItem Header="_Auto-Reload (Tail)" IsCheckable="True" IsChecked="{Binding IsAutoReloadEnabled, Mode=TwoWay}"/>
                 <MenuItem Header="Compare _Files..." Command="{Binding CompareFilesCommand}"/>
@@ -425,7 +427,16 @@
                             <Setter Property="ContentTemplate">
                                 <Setter.Value>
                                     <DataTemplate>
-                                        <controls:EditorHost DataContext="{Binding}"/>
+                                        <controls:EditorHost
+                                            DataContext="{Binding}"
+                                            LineFilterService="{Binding LineFilterService, RelativeSource={RelativeSource AncestorType={x:Type ui:FluentWindow}}}"
+                                            ThemeService="{Binding ThemeService, RelativeSource={RelativeSource AncestorType={x:Type ui:FluentWindow}}}"
+                                            SettingsService="{Binding SettingsService, RelativeSource={RelativeSource AncestorType={x:Type ui:FluentWindow}}}"
+                                            TextToolsService="{Binding TextToolsService, RelativeSource={RelativeSource AncestorType={x:Type ui:FluentWindow}}}"
+                                            MacroService="{Binding MacroService, RelativeSource={RelativeSource AncestorType={x:Type ui:FluentWindow}}}"
+                                            DialogService="{Binding DialogService, RelativeSource={RelativeSource AncestorType={x:Type ui:FluentWindow}}}"
+                                            FileSystemService="{Binding FileSystemService, RelativeSource={RelativeSource AncestorType={x:Type ui:FluentWindow}}}"
+                                            MainViewModel="{Binding MainViewModel, RelativeSource={RelativeSource AncestorType={x:Type ui:FluentWindow}}}"/>
                                     </DataTemplate>
                                 </Setter.Value>
                             </Setter>
@@ -434,7 +445,9 @@
                                     <Setter Property="ContentTemplate">
                                         <Setter.Value>
                                             <DataTemplate>
-                                                <controls:LargeFileViewer DataContext="{Binding}"/>
+                                                <controls:LargeFileViewer
+                                                    DataContext="{Binding}"
+                                                    FilterService="{Binding LineFilterService, RelativeSource={RelativeSource AncestorType={x:Type ui:FluentWindow}}}"/>
                                             </DataTemplate>
                                         </Setter.Value>
                                     </Setter>
@@ -456,7 +469,16 @@
                                 Visibility="{Binding IsSideBySideMode, Converter={StaticResource BoolToVisibilityConverter}}">
                     <ContentControl.ContentTemplate>
                         <DataTemplate>
-                            <controls:EditorHost DataContext="{Binding}"/>
+                            <controls:EditorHost
+                                DataContext="{Binding}"
+                                LineFilterService="{Binding LineFilterService, RelativeSource={RelativeSource AncestorType={x:Type ui:FluentWindow}}}"
+                                ThemeService="{Binding ThemeService, RelativeSource={RelativeSource AncestorType={x:Type ui:FluentWindow}}}"
+                                SettingsService="{Binding SettingsService, RelativeSource={RelativeSource AncestorType={x:Type ui:FluentWindow}}}"
+                                TextToolsService="{Binding TextToolsService, RelativeSource={RelativeSource AncestorType={x:Type ui:FluentWindow}}}"
+                                MacroService="{Binding MacroService, RelativeSource={RelativeSource AncestorType={x:Type ui:FluentWindow}}}"
+                                DialogService="{Binding DialogService, RelativeSource={RelativeSource AncestorType={x:Type ui:FluentWindow}}}"
+                                FileSystemService="{Binding FileSystemService, RelativeSource={RelativeSource AncestorType={x:Type ui:FluentWindow}}}"
+                                MainViewModel="{Binding MainViewModel, RelativeSource={RelativeSource AncestorType={x:Type ui:FluentWindow}}}"/>
                         </DataTemplate>
                     </ContentControl.ContentTemplate>
                 </ContentControl>

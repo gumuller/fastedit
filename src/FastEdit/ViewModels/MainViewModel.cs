@@ -474,9 +474,10 @@ public partial class MainViewModel : ObservableObject
     private void ToggleExplorer() => IsExplorerVisible = !IsExplorerVisible;
 
     [RelayCommand]
-    private void ToggleFilterPanel()
+    private void ToggleFilterPanel() => IsFilterPanelVisible = !IsFilterPanelVisible;
+
+    partial void OnIsFilterPanelVisibleChanged(bool value)
     {
-        IsFilterPanelVisible = !IsFilterPanelVisible;
         ToggleFilterPanelRequested?.Invoke();
     }
 
@@ -668,7 +669,7 @@ public partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void LoadSession(string? name)
+    private async Task LoadSession(string? name)
     {
         if (string.IsNullOrEmpty(name)) return;
         var session = _workspaceService.LoadNamedSession(name);
@@ -678,7 +679,7 @@ public partial class MainViewModel : ObservableObject
             return;
         }
 
-        RestoreFromSessionData(session);
+        await RestoreFromSessionDataAsync(session);
         StatusText = $"Session loaded: {name}";
     }
 
@@ -732,7 +733,7 @@ public partial class MainViewModel : ObservableObject
         return session;
     }
 
-    private void RestoreFromSessionData(SessionData session)
+    private async Task RestoreFromSessionDataAsync(SessionData session)
     {
         // Close all current tabs
         foreach (var tab in Tabs.ToList())
@@ -753,7 +754,7 @@ public partial class MainViewModel : ObservableObject
                 else if (_fileSystemService.FileExists(entry.FilePath))
                 {
                     var tab = _tabFactory.Create();
-                    tab.LoadFileAsync(entry.FilePath).GetAwaiter().GetResult();
+                    await tab.LoadFileAsync(entry.FilePath);
                     Tabs.Add(tab);
                 }
             }

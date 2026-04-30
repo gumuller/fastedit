@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
@@ -8,11 +9,11 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using FastEdit.Infrastructure;
 using FastEdit.Core.LargeFile;
 using FastEdit.Models;
 using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
-using Microsoft.Extensions.DependencyInjection;
 
 namespace FastEdit.Views.Controls;
 
@@ -30,7 +31,15 @@ public partial class LargeFileViewer : UserControl
     private int _currentMatchIndex = -1;
     private CancellationTokenSource? _searchCts;
 
-    private ILineFilterService? _filterService;
+    public static readonly DependencyProperty FilterServiceProperty =
+        DependencyProperty.Register(
+            nameof(FilterService),
+            typeof(ILineFilterService),
+            typeof(LargeFileViewer),
+            new PropertyMetadata(null, OnFilterServicePropertyChanged));
+
+    private ILineFilterService? _subscribedFilterService;
+    private bool _reportedMissingFilterService;
 
     // Filter support
     private IReadOnlyList<LineFilter>? _filters;
@@ -43,6 +52,12 @@ public partial class LargeFileViewer : UserControl
         Unloaded += OnUnloaded;
         DataContextChanged += OnDataContextChanged;
         PreviewKeyDown += OnPreviewKeyDown;
+    }
+
+    public ILineFilterService? FilterService
+    {
+        get => (ILineFilterService?)GetValue(FilterServiceProperty);
+        set => SetValue(FilterServiceProperty, value);
     }
 
     public void ShowFindBar(bool focusSearch)
@@ -149,17 +164,7 @@ public partial class LargeFileViewer : UserControl
             RenderHost.Child = _canvas;
         }
 
-        // Subscribe to the line-filter service directly (same pattern as EditorHost)
-        if (_filterService == null)
-        {
-            _filterService = App.Services.GetService<ILineFilterService>();
-            if (_filterService != null)
-            {
-                _filterService.FiltersChanged += OnFilterServiceChanged;
-                // Apply current state immediately
-                OnFilterServiceChanged();
-            }
-        }
+        SubscribeToFilterService();
 
         UpdateMetrics();
         Render();
@@ -167,33 +172,71 @@ public partial class LargeFileViewer : UserControl
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
-        if (_filterService != null)
-        {
-            _filterService.FiltersChanged -= OnFilterServiceChanged;
-            _filterService = null;
-        }
+        UnsubscribeFromFilterService();
         _filterScanCts?.Cancel();
         _searchCts?.Cancel();
     }
 
-    private void OnFilterServiceChanged()
+    private static void OnFilterServicePropertyChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        var viewer = (LargeFileViewer)d;
+        viewer.UnsubscribeFromFilterService();
+        viewer.SubscribeToFilterService();
+    }
+
+    private void SubscribeToFilterService()
+    {
+        if (_subscribedFilterService != null)
+            return;
+
+        if (FilterService == null)
+        {
+            if (!_reportedMissingFilterService)
+            {
+                Trace.TraceWarning("LargeFileViewer loaded without an ILineFilterService; line filters are unavailable.");
+                _reportedMissingFilterService = true;
+            }
+            return;
+        }
+
+        _subscribedFilterService = FilterService;
+        _subscribedFilterService.FiltersChanged += OnFilterServiceFiltersChanged;
+        ApplyFilterServiceState();
+    }
+
+    private void UnsubscribeFromFilterService()
+    {
+        if (_subscribedFilterService == null)
+            return;
+
+        _subscribedFilterService.FiltersChanged -= OnFilterServiceFiltersChanged;
+        _subscribedFilterService = null;
+    }
+
+    private void OnFilterServiceFiltersChanged()
     {
         Dispatcher.Invoke(() =>
         {
-            if (_filterService == null) return;
-            _filters = _filterService.Filters.ToList();
-            var activeFilters = LargeFileFilterPolicy.GetActiveFilters(_filters);
-
-            if (_filterService.ShowOnlyFilteredLines && activeFilters.Count > 0)
-            {
-                _ = ShowOnlyFilteredAsync(activeFilters);
-            }
-            else
-            {
-                if (_viewport.IsFiltered) ClearShowOnly();
-                Render();
-            }
+            ApplyFilterServiceState();
         });
+    }
+
+    private void ApplyFilterServiceState()
+    {
+        if (_subscribedFilterService == null) return;
+
+        _filters = _subscribedFilterService.Filters.ToList();
+        var activeFilters = LargeFileFilterPolicy.GetActiveFilters(_filters);
+
+        if (_subscribedFilterService.ShowOnlyFilteredLines && activeFilters.Count > 0)
+        {
+            _ = ShowOnlyFilteredAsync(activeFilters);
+        }
+        else
+        {
+            if (_viewport.IsFiltered) ClearShowOnly();
+            Render();
+        }
     }
 
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
@@ -257,15 +300,7 @@ public partial class LargeFileViewer : UserControl
     {
         if (_doc == null) { FooterText.Text = ""; return; }
         string mode = _viewport.IsFiltered ? $"Filtered: {_viewport.FilteredLineCount:N0} / " : "";
-        FooterText.Text = $"{mode}{_doc.TotalLines:N0} lines • {FormatBytes(_doc.FileSize)} • {_doc.EncodingDisplayName} • Read-only (large file viewer)";
-    }
-
-    private static string FormatBytes(long b)
-    {
-        string[] u = { "B", "KB", "MB", "GB", "TB" };
-        double v = b; int i = 0;
-        while (v >= 1024 && i < u.Length - 1) { v /= 1024; i++; }
-        return $"{v:0.##} {u[i]}";
+        FooterText.Text = $"{mode}{_doc.TotalLines:N0} lines • {ByteSizeFormatter.Format(_doc.FileSize)} • {_doc.EncodingDisplayName} • Read-only (large file viewer)";
     }
 
     internal void Render()

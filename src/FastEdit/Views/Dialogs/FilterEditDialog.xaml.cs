@@ -3,7 +3,9 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Shapes;
+using FastEdit.Infrastructure;
 using FastEdit.Models;
+using FastEdit.Services.Interfaces;
 using Wpf.Ui.Controls;
 
 namespace FastEdit.Views.Dialogs;
@@ -17,11 +19,14 @@ public partial class FilterEditDialog : FluentWindow
     };
 
     private string _selectedColor = "#4488FF";
+    private readonly IDialogService _dialogService;
 
     public LineFilter? Result { get; private set; }
 
-    public FilterEditDialog(LineFilter? existing = null)
+    public FilterEditDialog(IDialogService dialogService, LineFilter? existing = null)
     {
+        _dialogService = dialogService ?? throw new ArgumentNullException(nameof(dialogService));
+
         InitializeComponent();
         BuildColorPalette();
 
@@ -76,32 +81,20 @@ public partial class FilterEditDialog : FluentWindow
 
     private void OK_Click(object sender, RoutedEventArgs e)
     {
-        var pattern = PatternBox.Text.Trim();
-        if (string.IsNullOrEmpty(pattern))
+        var validation = LineFilterInputValidator.Validate(PatternBox.Text, RegexCheck.IsChecked == true);
+        if (!validation.IsValid)
         {
-            System.Windows.MessageBox.Show("Pattern cannot be empty.", "Validation",
-                System.Windows.MessageBoxButton.OK, MessageBoxImage.Warning);
+            _dialogService.ShowMessage(
+                validation.ErrorMessage ?? "Invalid filter.",
+                "Validation",
+                DialogButtons.Ok,
+                DialogIcon.Warning);
             return;
-        }
-
-        // Validate regex if checked
-        if (RegexCheck.IsChecked == true)
-        {
-            try
-            {
-                _ = new System.Text.RegularExpressions.Regex(pattern);
-            }
-            catch (Exception ex)
-            {
-                System.Windows.MessageBox.Show($"Invalid regex: {ex.Message}", "Validation",
-                    System.Windows.MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
         }
 
         Result = new LineFilter
         {
-            Pattern = pattern,
+            Pattern = validation.Pattern,
             IsRegex = RegexCheck.IsChecked == true,
             IsCaseSensitive = CaseCheck.IsChecked == true,
             IsExcluding = ExcludeCheck.IsChecked == true,

@@ -77,6 +77,298 @@
     <SolidColorBrush x:Key="MenuHoverBackgroundBrush" Color="#2a2d2e"/>
     <SolidColorBrush x:Key="MenuBorderBrush" Color="#3c3c3c"/>
 
+    <ControlTemplate x:Key="FastEditTopLevelHeaderMenuItemTemplate" TargetType="{x:Type MenuItem}">
+        <Grid>
+            <Border x:Name="Root"
+                    Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="6"
+                    Padding="{TemplateBinding Padding}">
+                <ContentPresenter ContentSource="Header"
+                                  RecognizesAccessKey="True"
+                                  VerticalAlignment="Center"
+                                  HorizontalAlignment="Center"/>
+            </Border>
+            <Popup x:Name="PART_Popup"
+                   AllowsTransparency="True"
+                   Focusable="False"
+                   IsOpen="{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}}"
+                   Placement="Bottom"
+                   PopupAnimation="Fade">
+                <Border Background="{DynamicResource MenuBackgroundBrush}"
+                        BorderBrush="{DynamicResource MenuBorderBrush}"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        Padding="4"
+                        SnapsToDevicePixels="True">
+                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Cycle"
+                                    KeyboardNavigation.TabNavigation="Cycle"/>
+                </Border>
+            </Popup>
+        </Grid>
+        <ControlTemplate.Triggers>
+            <Trigger Property="IsHighlighted" Value="True">
+                <Setter TargetName="Root" Property="Background" Value="{DynamicResource MenuHoverBackgroundBrush}"/>
+            </Trigger>
+            <Trigger Property="IsSubmenuOpen" Value="True">
+                <Setter TargetName="Root" Property="Background" Value="{DynamicResource MenuHoverBackgroundBrush}"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.45"/>
+            </Trigger>
+        </ControlTemplate.Triggers>
+    </ControlTemplate>
+
+    <ControlTemplate x:Key="FastEditTopLevelItemMenuItemTemplate" TargetType="{x:Type MenuItem}">
+        <Border x:Name="Root"
+                Background="{TemplateBinding Background}"
+                BorderBrush="{TemplateBinding BorderBrush}"
+                BorderThickness="{TemplateBinding BorderThickness}"
+                CornerRadius="6"
+                Padding="{TemplateBinding Padding}">
+            <ContentPresenter ContentSource="Header"
+                              RecognizesAccessKey="True"
+                              VerticalAlignment="Center"
+                              HorizontalAlignment="Center"/>
+        </Border>
+        <ControlTemplate.Triggers>
+            <Trigger Property="IsHighlighted" Value="True">
+                <Setter TargetName="Root" Property="Background" Value="{DynamicResource MenuHoverBackgroundBrush}"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.45"/>
+            </Trigger>
+        </ControlTemplate.Triggers>
+    </ControlTemplate>
+
+    <ControlTemplate x:Key="FastEditSubmenuItemMenuItemTemplate" TargetType="{x:Type MenuItem}">
+        <Border x:Name="Root"
+                Background="{TemplateBinding Background}"
+                BorderBrush="{TemplateBinding BorderBrush}"
+                BorderThickness="{TemplateBinding BorderThickness}"
+                CornerRadius="4"
+                Padding="{TemplateBinding Padding}"
+                SnapsToDevicePixels="True">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <Grid x:Name="IconSlot"
+                      Width="22"
+                      Height="22"
+                      Margin="0,0,6,0"
+                      VerticalAlignment="Center">
+                    <Border x:Name="CheckBox"
+                            Width="22"
+                            Height="22"
+                            BorderBrush="{DynamicResource MenuForegroundBrush}"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            Opacity="0.75"
+                            Visibility="Collapsed"/>
+                    <TextBlock x:Name="CheckGlyph"
+                               Text="&#xE73E;"
+                               FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                               FontSize="11"
+                               Foreground="{DynamicResource MenuForegroundBrush}"
+                               HorizontalAlignment="Center"
+                               VerticalAlignment="Center"
+                               Visibility="Collapsed"/>
+                    <ContentPresenter x:Name="IconPresenter"
+                                      ContentSource="Icon"
+                                      HorizontalAlignment="Center"
+                                      VerticalAlignment="Center"/>
+                </Grid>
+
+                <ContentPresenter Grid.Column="1"
+                                  Margin="0,0,16,0"
+                                  ContentSource="Header"
+                                  RecognizesAccessKey="True"
+                                  VerticalAlignment="Center"/>
+
+                <TextBlock x:Name="InputGestureTextBlock"
+                           Grid.Column="2"
+                           Margin="16,0,2,0"
+                           Text="{TemplateBinding InputGestureText}"
+                           Foreground="{DynamicResource MenuForegroundBrush}"
+                           Opacity="0.72"
+                           FontSize="12"
+                           VerticalAlignment="Center"/>
+            </Grid>
+        </Border>
+        <ControlTemplate.Triggers>
+            <Trigger Property="IsCheckable" Value="True">
+                <Setter TargetName="CheckBox" Property="Visibility" Value="Visible"/>
+            </Trigger>
+            <MultiTrigger>
+                <MultiTrigger.Conditions>
+                    <Condition Property="IsCheckable" Value="False"/>
+                    <Condition Property="Icon" Value="{x:Null}"/>
+                </MultiTrigger.Conditions>
+                <Setter TargetName="IconSlot" Property="Visibility" Value="Collapsed"/>
+            </MultiTrigger>
+            <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="CheckBox" Property="Background" Value="{DynamicResource TreeViewItemSelectedBrush}"/>
+                <Setter TargetName="CheckBox" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                <Setter TargetName="CheckGlyph" Property="Visibility" Value="Visible"/>
+            </Trigger>
+            <Trigger Property="Icon" Value="{x:Null}">
+                <Setter TargetName="IconPresenter" Property="Visibility" Value="Collapsed"/>
+            </Trigger>
+            <Trigger Property="InputGestureText" Value="">
+                <Setter TargetName="InputGestureTextBlock" Property="Visibility" Value="Collapsed"/>
+            </Trigger>
+            <Trigger Property="IsHighlighted" Value="True">
+                <Setter TargetName="Root" Property="Background" Value="{DynamicResource MenuHoverBackgroundBrush}"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.45"/>
+            </Trigger>
+        </ControlTemplate.Triggers>
+    </ControlTemplate>
+
+    <ControlTemplate x:Key="FastEditSubmenuHeaderMenuItemTemplate" TargetType="{x:Type MenuItem}">
+        <Border x:Name="Root"
+                Background="{TemplateBinding Background}"
+                BorderBrush="{TemplateBinding BorderBrush}"
+                BorderThickness="{TemplateBinding BorderThickness}"
+                CornerRadius="4"
+                Padding="{TemplateBinding Padding}"
+                SnapsToDevicePixels="True">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="20"/>
+                </Grid.ColumnDefinitions>
+
+                <ContentPresenter x:Name="HeaderIconPresenter"
+                                  Grid.Column="0"
+                                  Width="22"
+                                  Height="22"
+                                  Margin="0,0,6,0"
+                                  ContentSource="Icon"
+                                  HorizontalAlignment="Center"
+                                  VerticalAlignment="Center"/>
+
+                <ContentPresenter Grid.Column="1"
+                                  Margin="0,0,16,0"
+                                  ContentSource="Header"
+                                  RecognizesAccessKey="True"
+                                  VerticalAlignment="Center"/>
+
+                <TextBlock x:Name="HeaderInputGestureTextBlock"
+                           Grid.Column="2"
+                           Margin="16,0,2,0"
+                           Text="{TemplateBinding InputGestureText}"
+                           Foreground="{DynamicResource MenuForegroundBrush}"
+                           Opacity="0.72"
+                           FontSize="12"
+                           VerticalAlignment="Center"/>
+
+                <TextBlock Grid.Column="3"
+                           Text="&#xE76C;"
+                           FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                           Foreground="{DynamicResource MenuForegroundBrush}"
+                           FontSize="10"
+                           HorizontalAlignment="Right"
+                           VerticalAlignment="Center"/>
+
+                <Popup x:Name="PART_Popup"
+                       AllowsTransparency="True"
+                       Focusable="False"
+                       HorizontalOffset="-2"
+                       IsOpen="{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}}"
+                       Placement="Right"
+                       PopupAnimation="Fade"
+                       VerticalOffset="-4">
+                    <Border Background="{DynamicResource MenuBackgroundBrush}"
+                            BorderBrush="{DynamicResource MenuBorderBrush}"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            Padding="4"
+                            SnapsToDevicePixels="True">
+                        <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Cycle"
+                                        KeyboardNavigation.TabNavigation="Cycle"/>
+                    </Border>
+                </Popup>
+            </Grid>
+        </Border>
+        <ControlTemplate.Triggers>
+            <Trigger Property="Icon" Value="{x:Null}">
+                <Setter TargetName="HeaderIconPresenter" Property="Visibility" Value="Collapsed"/>
+            </Trigger>
+            <Trigger Property="InputGestureText" Value="">
+                <Setter TargetName="HeaderInputGestureTextBlock" Property="Visibility" Value="Collapsed"/>
+            </Trigger>
+            <Trigger Property="IsHighlighted" Value="True">
+                <Setter TargetName="Root" Property="Background" Value="{DynamicResource MenuHoverBackgroundBrush}"/>
+            </Trigger>
+            <Trigger Property="IsSubmenuOpen" Value="True">
+                <Setter TargetName="Root" Property="Background" Value="{DynamicResource MenuHoverBackgroundBrush}"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.45"/>
+            </Trigger>
+        </ControlTemplate.Triggers>
+    </ControlTemplate>
+
+    <Style TargetType="{x:Type Menu}">
+        <Setter Property="Background" Value="{DynamicResource MenuBackgroundBrush}"/>
+        <Setter Property="Foreground" Value="{DynamicResource MenuForegroundBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource MenuBorderBrush}"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Padding" Value="4,2"/>
+        <Setter Property="SnapsToDevicePixels" Value="True"/>
+    </Style>
+
+    <Style TargetType="{x:Type MenuItem}">
+        <Setter Property="OverridesDefaultStyle" Value="True"/>
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="Foreground" Value="{DynamicResource MenuForegroundBrush}"/>
+        <Setter Property="BorderBrush" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Padding" Value="12,7"/>
+        <Setter Property="MinHeight" Value="32"/>
+        <Setter Property="SnapsToDevicePixels" Value="True"/>
+        <Setter Property="Template" Value="{StaticResource FastEditSubmenuItemMenuItemTemplate}"/>
+        <Style.Triggers>
+            <Trigger Property="Role" Value="TopLevelHeader">
+                <Setter Property="Padding" Value="12,8"/>
+                <Setter Property="Template" Value="{StaticResource FastEditTopLevelHeaderMenuItemTemplate}"/>
+            </Trigger>
+            <Trigger Property="Role" Value="TopLevelItem">
+                <Setter Property="Padding" Value="12,8"/>
+                <Setter Property="Template" Value="{StaticResource FastEditTopLevelItemMenuItemTemplate}"/>
+            </Trigger>
+            <Trigger Property="Role" Value="SubmenuHeader">
+                <Setter Property="Template" Value="{StaticResource FastEditSubmenuHeaderMenuItemTemplate}"/>
+            </Trigger>
+            <Trigger Property="Role" Value="SubmenuItem">
+                <Setter Property="Template" Value="{StaticResource FastEditSubmenuItemMenuItemTemplate}"/>
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <Style x:Key="FastEditMenuSeparatorStyle" TargetType="{x:Type Separator}">
+        <Setter Property="Margin" Value="0,4"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="{x:Type Separator}">
+                    <Border Height="1"
+                            Margin="34,0,4,0"
+                            Background="{DynamicResource MenuBorderBrush}"
+                            Opacity="0.75"/>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- Custom TabControl Style (editor tabs with accent border) -->
     <Style x:Key="EditorTabControlStyle" TargetType="TabControl">
         <Setter Property="Background" Value="{DynamicResource EditorBackgroundBrush}"/>

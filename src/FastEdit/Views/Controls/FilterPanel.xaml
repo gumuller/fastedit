@@ -92,6 +92,7 @@
                 Padding="6,4">
             <WrapPanel>
                 <Button Click="Add_Click" Padding="8,3" Margin="0,0,4,0"
+                        AutomationProperties.Name="Add"
                         FontSize="11" Background="Transparent" Foreground="{DynamicResource WindowForegroundBrush}" Cursor="Hand">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="&#xE710;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Margin="0,0,4,0"/>
@@ -99,6 +100,7 @@
                     </StackPanel>
                 </Button>
                 <Button Click="Edit_Click" Padding="8,3" Margin="0,0,4,0"
+                        AutomationProperties.Name="Edit"
                         FontSize="11" Background="Transparent" Foreground="{DynamicResource WindowForegroundBrush}" Cursor="Hand">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="&#xE70F;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Margin="0,0,4,0"/>
@@ -106,6 +108,7 @@
                     </StackPanel>
                 </Button>
                 <Button Click="Remove_Click" Padding="8,3" Margin="0,0,4,0"
+                        AutomationProperties.Name="Remove"
                         FontSize="11" Background="Transparent" Foreground="{DynamicResource WindowForegroundBrush}" Cursor="Hand">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="&#xE74D;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Margin="0,0,4,0"/>
@@ -115,6 +118,7 @@
                 <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}"
                            Margin="4,2"/>
                 <Button Click="PrevMatch_Click" Padding="8,3" Margin="0,0,4,0"
+                        AutomationProperties.Name="Previous Filter Match"
                         FontSize="11" Background="Transparent" Foreground="{DynamicResource WindowForegroundBrush}" Cursor="Hand"
                         ToolTip="Jump to previous matching line (Shift+F3)">
                     <StackPanel Orientation="Horizontal">
@@ -123,6 +127,7 @@
                     </StackPanel>
                 </Button>
                 <Button Click="NextMatch_Click" Padding="8,3" Margin="0,0,4,0"
+                        AutomationProperties.Name="Next Filter Match"
                         FontSize="11" Background="Transparent" Foreground="{DynamicResource WindowForegroundBrush}" Cursor="Hand"
                         ToolTip="Jump to next matching line (F3)">
                     <StackPanel Orientation="Horizontal">
@@ -133,6 +138,7 @@
                 <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}"
                            Margin="4,2"/>
                 <ToggleButton x:Name="ShowOnlyToggle"
+                              AutomationProperties.Name="Show Only Filtered"
                               Click="ShowOnlyToggle_Click" Padding="8,3" Margin="0,0,4,0"
                               FontSize="11" Background="Transparent" Foreground="{DynamicResource WindowForegroundBrush}" Cursor="Hand">
                     <StackPanel Orientation="Horizontal">
@@ -149,6 +155,7 @@
                 <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}"
                            Margin="4,2"/>
                 <Button Click="SaveFilters_Click" Padding="8,3" Margin="0,0,4,0"
+                        AutomationProperties.Name="Save Filters"
                         FontSize="11" Background="Transparent" Foreground="{DynamicResource WindowForegroundBrush}" Cursor="Hand">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="&#xE74E;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Margin="0,0,4,0"/>
@@ -156,6 +163,7 @@
                     </StackPanel>
                 </Button>
                 <Button Click="LoadFilters_Click" Padding="8,3" Margin="0,0,4,0"
+                        AutomationProperties.Name="Load Filters"
                         FontSize="11" Background="Transparent" Foreground="{DynamicResource WindowForegroundBrush}" Cursor="Hand">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="&#xE8E5;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Margin="0,0,4,0"/>

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
@@ -9,7 +10,6 @@ using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
 using FastEdit.Views.Controls;
 using FastEdit.Views.Dialogs;
-using Microsoft.Extensions.DependencyInjection;
 using Wpf.Ui.Controls;
 
 namespace FastEdit.Views;
@@ -18,6 +18,11 @@ public partial class MainWindow : FluentWindow
 {
     private MainViewModel? _viewModel;
     private FindInFilesViewModel? _findInFilesVm;
+    private readonly ISettingsService _settingsService;
+    private readonly IKeyBindingService _keyBindingService;
+    private readonly IAutoSaveService _autoSaveService;
+    private readonly IDialogService _dialogService;
+    private readonly IFileSystemService _fileSystemService;
     private CommandRegistry? _commandRegistry;
 
     // Zen mode state
@@ -26,8 +31,40 @@ public partial class MainWindow : FluentWindow
     private GridLength _preZenFileTreeWidth;
     private GridLength _savedExplorerWidth = new GridLength(250);
 
-    public MainWindow()
+    public MainViewModel MainViewModel { get; }
+    public ISettingsService SettingsService => _settingsService;
+    public IDialogService DialogService => _dialogService;
+    public IFileSystemService FileSystemService => _fileSystemService;
+    public ILineFilterService LineFilterService { get; }
+    public IThemeService ThemeService { get; }
+    public ITextToolsService TextToolsService { get; }
+    public IMacroService MacroService { get; }
+
+    public MainWindow(
+        MainViewModel viewModel,
+        FindInFilesViewModel findInFilesVm,
+        ISettingsService settingsService,
+        IKeyBindingService keyBindingService,
+        IAutoSaveService autoSaveService,
+        IDialogService dialogService,
+        IFileSystemService fileSystemService,
+        ILineFilterService lineFilterService,
+        IThemeService themeService,
+        ITextToolsService textToolsService,
+        IMacroService macroService)
     {
+        _viewModel = MainViewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
+        _findInFilesVm = findInFilesVm ?? throw new ArgumentNullException(nameof(findInFilesVm));
+        _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
+        _keyBindingService = keyBindingService ?? throw new ArgumentNullException(nameof(keyBindingService));
+        _autoSaveService = autoSaveService ?? throw new ArgumentNullException(nameof(autoSaveService));
+        _dialogService = dialogService ?? throw new ArgumentNullException(nameof(dialogService));
+        _fileSystemService = fileSystemService ?? throw new ArgumentNullException(nameof(fileSystemService));
+        LineFilterService = lineFilterService ?? throw new ArgumentNullException(nameof(lineFilterService));
+        ThemeService = themeService ?? throw new ArgumentNullException(nameof(themeService));
+        TextToolsService = textToolsService ?? throw new ArgumentNullException(nameof(textToolsService));
+        MacroService = macroService ?? throw new ArgumentNullException(nameof(macroService));
+
         InitializeComponent();
 
         // Set window icon
@@ -36,7 +73,7 @@ public partial class MainWindow : FluentWindow
             var exePath = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName;
             var dir = System.IO.Path.GetDirectoryName(exePath) ?? ".";
             var icoPath = System.IO.Path.Combine(dir, "fastedit.ico");
-            if (System.IO.File.Exists(icoPath))
+            if (_fileSystemService.FileExists(icoPath))
             {
                 // Force the window icon to decode from a SMALL frame of the
                 // .ico. Without DecodePixelWidth, WPF picks the largest frame
@@ -64,9 +101,11 @@ public partial class MainWindow : FluentWindow
                 AppIcon.Source = titleIcon;
             }
         }
-        catch { /* icon is optional */ }
+        catch (Exception ex)
+        {
+            Trace.TraceWarning($"Optional app icon could not be loaded: {ex.Message}");
+        }
 
-        _viewModel = App.Services.GetRequiredService<MainViewModel>();
         DataContext = _viewModel;
 
         Loaded += MainWindow_Loaded;
@@ -83,11 +122,11 @@ public partial class MainWindow : FluentWindow
         _viewModel.ReplaceRequested += OnReplaceRequested;
 
         // Setup Find in Files
-        _findInFilesVm = App.Services.GetRequiredService<FindInFilesViewModel>();
         _findInFilesVm.NavigateToResult += OnNavigateToSearchResult;
         FindInFilesPanel.DataContext = _findInFilesVm;
 
         // Setup Line Filter Panel
+        LineFilterPanel.SetServices(LineFilterService, DialogService);
         _viewModel.ToggleFilterPanelRequested += OnToggleFilterPanel;
         LineFilterPanel.CloseRequested += () =>
         {
@@ -106,7 +145,7 @@ public partial class MainWindow : FluentWindow
             if (lfv != null) lfv.NavigateToPreviousFilterMatch();
             else FindActiveEditorHost()?.NavigateToPreviousFilterMatch();
         };
-        // LargeFileViewer subscribes to the filter service itself via App.Services;
+        // LargeFileViewer subscribes to the filter service itself;
         // no need for MainWindow to re-dispatch FiltersUpdated.
 
         BuildCommandRegistry();
@@ -121,7 +160,7 @@ public partial class MainWindow : FluentWindow
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
         // Restore window position and size
-        var settings = App.Services.GetRequiredService<ISettingsService>();
+        var settings = _settingsService;
         if (!double.IsNaN(settings.WindowLeft) && !double.IsNaN(settings.WindowTop))
         {
             Left = settings.WindowLeft;
@@ -139,12 +178,11 @@ public partial class MainWindow : FluentWindow
         if (_viewModel != null)
         {
             // Check for crash recovery first
-            var autoSave = App.Services.GetService<IAutoSaveService>();
-            if (autoSave != null &&
-                CrashRecoveryStartupPolicy.ShouldPromptForRecovery(autoSave.HasRecoveryFiles(), App.HasAnotherRunningInstance))
+            if (CrashRecoveryStartupPolicy.ShouldPromptForRecovery(
+                _autoSaveService.HasRecoveryFiles(),
+                App.HasAnotherRunningInstance))
             {
-                var dialogService = App.Services.GetRequiredService<IDialogService>();
-                var result = dialogService.ShowMessage(
+                var result = _dialogService.ShowMessage(
                     "FastEdit was not shut down cleanly. Would you like to recover unsaved files?",
                     "Crash Recovery",
                     DialogButtons.YesNo,
@@ -152,7 +190,7 @@ public partial class MainWindow : FluentWindow
 
                 if (result == Services.Interfaces.DialogResult.Yes)
                 {
-                    var entries = autoSave.GetRecoveryEntries();
+                    var entries = _autoSaveService.GetRecoveryEntries();
                     foreach (var entry in entries)
                     {
                         var tab = _viewModel.RecoverTab(entry);
@@ -161,7 +199,7 @@ public partial class MainWindow : FluentWindow
                     if (_viewModel.Tabs.Count > 0)
                         _viewModel.SelectedTab = _viewModel.Tabs[0];
                 }
-                autoSave.ClearRecoveryFiles();
+                _autoSaveService.ClearRecoveryFiles();
             }
 
             await _viewModel.RestoreSessionAsync();
@@ -188,7 +226,7 @@ public partial class MainWindow : FluentWindow
 
     private void SaveWindowState()
     {
-        var settings = App.Services.GetRequiredService<ISettingsService>();
+        var settings = _settingsService;
         settings.WindowMaximized = WindowState == WindowState.Maximized;
         if (WindowState == WindowState.Normal)
         {
@@ -230,7 +268,7 @@ public partial class MainWindow : FluentWindow
             // async-void Closing handler (even after the await) can race with
             // WPF's internal "window is closing" state and throw
             // "Cannot set Visibility / call Close … while a Window is closing".
-            Dispatcher.BeginInvoke(new Action(() =>
+            _ = Dispatcher.BeginInvoke(new Action(() =>
             {
                 SaveEditorState();
                 SaveWindowState();
@@ -278,10 +316,7 @@ public partial class MainWindow : FluentWindow
     private void ShowSettingsDialog()
     {
         if (_viewModel == null) return;
-        var settingsService = App.Services.GetRequiredService<ISettingsService>();
-        var keyBindingService = App.Services.GetRequiredService<IKeyBindingService>();
-
-        var dialog = new SettingsWindow(_viewModel, settingsService, keyBindingService)
+        var dialog = new SettingsWindow(_viewModel, _settingsService, _keyBindingService, _dialogService)
         {
             Owner = this
         };
@@ -295,8 +330,7 @@ public partial class MainWindow : FluentWindow
     private void ApplyKeyBindings()
     {
         if (_viewModel == null) return;
-        var keyBindingService = App.Services.GetRequiredService<IKeyBindingService>();
-        var bindings = keyBindingService.GetBindings();
+        var bindings = _keyBindingService.GetBindings();
 
         InputBindings.Clear();
         var commandMap = MainWindowKeyBindingFactory.CreateCommandMap(_viewModel);
@@ -323,7 +357,7 @@ public partial class MainWindow : FluentWindow
     // --- Go To Line Dialog ---
     private void OnGoToLineRequested(int currentLine)
     {
-        var dialog = new GoToLineDialog(currentLine);
+        var dialog = new GoToLineDialog(currentLine, _dialogService);
         dialog.Owner = this;
         if (dialog.ShowDialog() == true && dialog.LineNumber > 0)
         {
@@ -370,17 +404,18 @@ public partial class MainWindow : FluentWindow
 
         if (e.Data.GetDataPresent(DataFormats.FileDrop))
         {
-            var files = (string[])e.Data.GetData(DataFormats.FileDrop)!;
-            foreach (var file in files)
+            var paths = (string[])e.Data.GetData(DataFormats.FileDrop)!;
+            foreach (var action in DroppedPathClassifier.Classify(paths, _fileSystemService))
             {
-                if (System.IO.File.Exists(file))
+                switch (action.Kind)
                 {
-                    await _viewModel.OpenFileCommand.ExecuteAsync(file);
-                }
-                else if (System.IO.Directory.Exists(file))
-                {
-                    _viewModel.FileTree.OpenFolderCommand.Execute(file);
-                    CommandRunner.SetWorkingDirectory(file);
+                    case DroppedPathKind.File:
+                        await _viewModel.OpenFileCommand.ExecuteAsync(action.Path);
+                        break;
+                    case DroppedPathKind.Directory:
+                        _viewModel.FileTree.OpenFolderCommand.Execute(action.Path);
+                        CommandRunner.SetWorkingDirectory(action.Path);
+                        break;
                 }
             }
         }
@@ -541,40 +576,24 @@ public partial class MainWindow : FluentWindow
     // --- Compare Files ---
     private void OnCompareFilesRequested()
     {
-        var dialog = new Microsoft.Win32.OpenFileDialog
-        {
-            Title = "Select two files to compare (hold Ctrl to multi-select)",
-            Multiselect = true
-        };
-        if (dialog.ShowDialog() != true) return;
+        var fileNames = _dialogService.ShowOpenFilesDialog();
+        if (fileNames.Length == 0) return;
 
-        string leftPath, rightPath;
-
-        if (dialog.FileNames.Length >= 2)
+        string? secondPath = null;
+        if (CompareFileSelectionResolver.NeedsSecondFile(fileNames))
         {
-            leftPath = dialog.FileNames[0];
-            rightPath = dialog.FileNames[1];
+            secondPath = _dialogService.ShowOpenFileDialog(initialDirectory: _fileSystemService.GetDirectoryName(fileNames[0]));
+            if (secondPath == null) return;
         }
-        else if (dialog.FileNames.Length == 1)
-        {
-            leftPath = dialog.FileNames[0];
-            // Ask for second file
-            var dialog2 = new Microsoft.Win32.OpenFileDialog
-            {
-                Title = "Select second file to compare",
-                Multiselect = false,
-                InitialDirectory = System.IO.Path.GetDirectoryName(leftPath)
-            };
-            if (dialog2.ShowDialog() != true) return;
-            rightPath = dialog2.FileName;
-        }
-        else return;
 
-        var compareWindow = new CompareFilesWindow
+        if (!CompareFileSelectionResolver.TryResolve(fileNames, secondPath, out var selection))
+            return;
+
+        var compareWindow = new CompareFilesWindow(_fileSystemService)
         {
             Owner = this
         };
-        compareWindow.CompareFiles(leftPath, rightPath);
+        compareWindow.CompareFiles(selection.LeftPath, selection.RightPath);
         compareWindow.Show();
     }
 
@@ -783,9 +802,9 @@ public partial class MainWindow : FluentWindow
         var sourceIndex = _viewModel.Tabs.IndexOf(sourceTab);
         var targetIndex = _viewModel.Tabs.IndexOf(targetTab);
 
-        if (sourceIndex >= 0 && targetIndex >= 0)
+        if (TabReorderPlanner.TryCreateMove(sourceIndex, targetIndex, out var move))
         {
-            _viewModel.Tabs.Move(sourceIndex, targetIndex);
+            _viewModel.Tabs.Move(move.SourceIndex, move.TargetIndex);
         }
     }
 
