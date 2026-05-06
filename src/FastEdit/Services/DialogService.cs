@@ -9,33 +9,12 @@ public class DialogService : IDialogService
 {
     public DialogResult ShowMessage(string message, string title, DialogButtons buttons = DialogButtons.Ok, DialogIcon icon = DialogIcon.Information)
     {
-        var mbButton = buttons switch
-        {
-            DialogButtons.Ok => MessageBoxButton.OK,
-            DialogButtons.OkCancel => MessageBoxButton.OKCancel,
-            DialogButtons.YesNo => MessageBoxButton.YesNo,
-            DialogButtons.YesNoCancel => MessageBoxButton.YesNoCancel,
-            _ => MessageBoxButton.OK
-        };
-
-        var mbIcon = icon switch
-        {
-            DialogIcon.Information => MessageBoxImage.Information,
-            DialogIcon.Warning => MessageBoxImage.Warning,
-            DialogIcon.Error => MessageBoxImage.Error,
-            DialogIcon.Question => MessageBoxImage.Question,
-            _ => MessageBoxImage.None
-        };
-
-        var result = MessageBox.Show(message, title, mbButton, mbIcon);
-        return result switch
-        {
-            MessageBoxResult.OK => DialogResult.Ok,
-            MessageBoxResult.Cancel => DialogResult.Cancel,
-            MessageBoxResult.Yes => DialogResult.Yes,
-            MessageBoxResult.No => DialogResult.No,
-            _ => DialogResult.None
-        };
+        var result = MessageBox.Show(
+            message,
+            title,
+            DialogMessageMapper.ToMessageBoxButton(buttons),
+            DialogMessageMapper.ToMessageBoxImage(icon));
+        return DialogMessageMapper.ToDialogResult(result);
     }
 
     public string? ShowOpenFileDialog(string? filter = null, string? initialDirectory = null)

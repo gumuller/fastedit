@@ -356,99 +356,65 @@ public partial class CommandRunnerPanel : UserControl
 
     private void TerminalBox_PreviewKeyDown(object sender, KeyEventArgs e)
     {
+        var decision = TerminalKeyInputPolicy.Decide(
+            e.Key,
+            Keyboard.Modifiers,
+            _activeTab != null,
+            _activeTab?.Service.IsBusy == true,
+            TerminalBox.Selection.IsEmpty,
+            IsCaretInInputRun(),
+            IsSelectionInInputRun(),
+            IsCaretAtInputStart());
+
+        if (decision.Action == TerminalKeyAction.None)
+            return;
+
         if (_activeTab == null) return;
         var runner = _activeTab.Service;
 
-        if (e.Key == Key.C && Keyboard.Modifiers == ModifierKeys.Control)
+        switch (decision.Action)
         {
-            if (TerminalBox.Selection.IsEmpty && runner.IsBusy)
-            {
+            case TerminalKeyAction.StopProcess:
                 runner.StopCurrentProcess();
-                e.Handled = true;
-            }
+                break;
+            case TerminalKeyAction.MoveCaretToInputEnd:
+                MoveCaretToInputEnd();
+                break;
+            case TerminalKeyAction.SubmitInput:
+                SubmitInput(runner);
+                break;
+            case TerminalKeyAction.PreviousHistory:
+                SetInputTextIfNotNull(runner.GetPreviousHistoryItem());
+                break;
+            case TerminalKeyAction.NextHistory:
+                SetInputTextIfNotNull(runner.GetNextHistoryItem());
+                break;
+            case TerminalKeyAction.MoveToInputStart:
+                if (_inputRun != null)
+                    TerminalBox.CaretPosition = _inputRun.ContentStart;
+                break;
+        }
+
+        e.Handled = decision.Handled;
+    }
+
+    private void SubmitInput(CommandRunnerService runner)
+    {
+        var input = GetInputText().Trim();
+        if (string.IsNullOrEmpty(input))
             return;
-        }
 
-        if (Keyboard.Modifiers == ModifierKeys.Control && e.Key != Key.V)
-            return;
+        _inputRun = null;
+        _promptRun = null;
+        _activeTab!.InputRun = null;
+        _activeTab.PromptRun = null;
+        runner.ExecuteCommand(input);
+    }
 
-        if (e.Key == Key.V && Keyboard.Modifiers == ModifierKeys.Control)
-        {
-            if (!IsCaretInInputRun()) MoveCaretToInputEnd();
-            return;
-        }
-
-        if (e.Key == Key.Enter)
-        {
-            var input = GetInputText().Trim();
-            if (!string.IsNullOrEmpty(input))
-            {
-                _inputRun = null;
-                _promptRun = null;
-                _activeTab.InputRun = null;
-                _activeTab.PromptRun = null;
-                runner.ExecuteCommand(input);
-            }
-            e.Handled = true;
-            return;
-        }
-
-        if (e.Key == Key.Up)
-        {
-            var prev = runner.GetPreviousHistoryItem();
-            if (prev != null) SetInputText(prev);
-            e.Handled = true;
-            return;
-        }
-        if (e.Key == Key.Down)
-        {
-            var next = runner.GetNextHistoryItem();
-            if (next != null) SetInputText(next);
-            e.Handled = true;
-            return;
-        }
-
-        if (e.Key == Key.Home)
-        {
-            if (_inputRun != null)
-                TerminalBox.CaretPosition = _inputRun.ContentStart;
-            e.Handled = true;
-            return;
-        }
-
-        if (e.Key == Key.Back)
-        {
-            if (!IsCaretInInputRun() || IsCaretAtInputStart() ||
-                (!TerminalBox.Selection.IsEmpty && !IsSelectionInInputRun()))
-            {
-                e.Handled = true;
-                return;
-            }
-        }
-
-        if (e.Key == Key.Delete)
-        {
-            if (!IsCaretInInputRun() ||
-                (!TerminalBox.Selection.IsEmpty && !IsSelectionInInputRun()))
-            {
-                e.Handled = true;
-                return;
-            }
-        }
-
-        if (e.Key == Key.Left)
-        {
-            if (IsCaretAtInputStart())
-            {
-                e.Handled = true;
-                return;
-            }
-        }
-
-        if (!IsCaretInInputRun())
-        {
-            MoveCaretToInputEnd();
-        }
+    private void SetInputTextIfNotNull(string? input)
+    {
+        if (input != null)
+            SetInputText(input);
     }
 
     private void TerminalBox_PreviewTextInput(object sender, TextCompositionEventArgs e)

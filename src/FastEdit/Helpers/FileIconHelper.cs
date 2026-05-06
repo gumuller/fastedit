@@ -4,56 +4,118 @@ namespace FastEdit.Helpers;
 
 public static class FileIconHelper
 {
+    private const string FolderIcon = "\uE8B7";
+    private const string CodeIcon = "\uE943";
+    private const string WebIcon = "\uE774";
+    private const string StyleIcon = "\uE790";
+    private const string StructuredDataIcon = "\uE9D5";
+    private const string DocumentIcon = "\uE8A5";
+    private const string ImageIcon = "\uEB9F";
+    private const string PdfIcon = "\uEA90";
+    private const string ArchiveIcon = "\uF012";
+    private const string AppIcon = "\uE7AC";
+    private const string TerminalIcon = "\uE756";
+    private const string DatabaseIcon = "\uE964";
+    private const string SettingsIcon = "\uE713";
+
+    private static readonly IReadOnlyDictionary<string, string> IconsByExtension =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            [".cs"] = CodeIcon,
+            [".js"] = CodeIcon,
+            [".ts"] = CodeIcon,
+            [".tsx"] = CodeIcon,
+            [".jsx"] = CodeIcon,
+            [".py"] = CodeIcon,
+            [".java"] = CodeIcon,
+            [".cpp"] = CodeIcon,
+            [".c"] = CodeIcon,
+            [".h"] = CodeIcon,
+            [".hpp"] = CodeIcon,
+            [".rs"] = CodeIcon,
+            [".go"] = CodeIcon,
+            [".html"] = WebIcon,
+            [".htm"] = WebIcon,
+            [".css"] = StyleIcon,
+            [".scss"] = StyleIcon,
+            [".sass"] = StyleIcon,
+            [".less"] = StyleIcon,
+            [".json"] = StructuredDataIcon,
+            [".xml"] = StructuredDataIcon,
+            [".xaml"] = StructuredDataIcon,
+            [".csproj"] = StructuredDataIcon,
+            [".sln"] = StructuredDataIcon,
+            [".yaml"] = StructuredDataIcon,
+            [".yml"] = StructuredDataIcon,
+            [".toml"] = StructuredDataIcon,
+            [".md"] = DocumentIcon,
+            [".txt"] = DocumentIcon,
+            [".log"] = DocumentIcon,
+            [".csv"] = DocumentIcon,
+            [".png"] = ImageIcon,
+            [".jpg"] = ImageIcon,
+            [".jpeg"] = ImageIcon,
+            [".gif"] = ImageIcon,
+            [".bmp"] = ImageIcon,
+            [".svg"] = ImageIcon,
+            [".ico"] = ImageIcon,
+            [".webp"] = ImageIcon,
+            [".pdf"] = PdfIcon,
+            [".zip"] = ArchiveIcon,
+            [".tar"] = ArchiveIcon,
+            [".gz"] = ArchiveIcon,
+            [".7z"] = ArchiveIcon,
+            [".rar"] = ArchiveIcon,
+            [".exe"] = AppIcon,
+            [".dll"] = AppIcon,
+            [".msi"] = AppIcon,
+            [".ps1"] = TerminalIcon,
+            [".bat"] = TerminalIcon,
+            [".cmd"] = TerminalIcon,
+            [".sh"] = TerminalIcon,
+            [".bash"] = TerminalIcon,
+            [".sql"] = DatabaseIcon,
+            [".gitignore"] = SettingsIcon,
+            [".editorconfig"] = SettingsIcon,
+            [".env"] = SettingsIcon,
+        };
+
+    private static readonly IReadOnlyDictionary<string, string> ColorsByExtension =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            [".cs"] = "#68217A",
+            [".js"] = "#F7DF1E",
+            [".ts"] = "#3178C6",
+            [".tsx"] = "#3178C6",
+            [".py"] = "#3776AB",
+            [".json"] = "#CBB148",
+            [".html"] = "#E44D26",
+            [".htm"] = "#E44D26",
+            [".css"] = "#264DE4",
+            [".md"] = "#083FA1",
+            [".xml"] = "#FF6600",
+            [".xaml"] = "#FF6600",
+            [".yaml"] = "#CB171E",
+            [".yml"] = "#CB171E",
+            [".rs"] = "#DEA584",
+            [".go"] = "#00ADD8",
+            [".java"] = "#ED8B00",
+            [".ps1"] = "#012456",
+        };
+
     public static string GetIcon(string fileName, bool isDirectory = false)
     {
-        if (isDirectory) return "\uE8B7"; // folder icon
+        if (isDirectory) return FolderIcon;
 
-        var ext = Path.GetExtension(fileName).ToLowerInvariant();
-        return ext switch
-        {
-            ".cs" => "\uE943",      // code
-            ".js" or ".ts" or ".tsx" or ".jsx" => "\uE943",
-            ".py" => "\uE943",
-            ".java" => "\uE943",
-            ".cpp" or ".c" or ".h" or ".hpp" => "\uE943",
-            ".rs" or ".go" => "\uE943",
-            ".html" or ".htm" => "\uE774",  // web
-            ".css" or ".scss" or ".sass" or ".less" => "\uE790", // paint
-            ".json" => "\uE9D5",    // code block
-            ".xml" or ".xaml" or ".csproj" or ".sln" => "\uE9D5",
-            ".yaml" or ".yml" or ".toml" => "\uE9D5",
-            ".md" or ".txt" or ".log" or ".csv" => "\uE8A5", // document
-            ".png" or ".jpg" or ".jpeg" or ".gif" or ".bmp" or ".svg" or ".ico" or ".webp" => "\uEB9F", // image
-            ".pdf" => "\uEA90",     // PDF
-            ".zip" or ".tar" or ".gz" or ".7z" or ".rar" => "\uF012", // archive
-            ".exe" or ".dll" or ".msi" => "\uE7AC", // app
-            ".ps1" or ".bat" or ".cmd" or ".sh" or ".bash" => "\uE756", // terminal
-            ".sql" => "\uE964",     // database
-            ".gitignore" or ".editorconfig" or ".env" => "\uE713", // settings gear
-            _ => "\uE8A5"           // generic document
-        };
+        return IconsByExtension.TryGetValue(Path.GetExtension(fileName), out var icon)
+            ? icon
+            : DocumentIcon;
     }
 
     public static string? GetIconColor(string fileName)
     {
-        var ext = Path.GetExtension(fileName).ToLowerInvariant();
-        return ext switch
-        {
-            ".cs" => "#68217A",       // C# purple
-            ".js" => "#F7DF1E",       // JS yellow
-            ".ts" or ".tsx" => "#3178C6", // TS blue
-            ".py" => "#3776AB",       // Python blue
-            ".json" => "#CBB148",     // JSON yellow
-            ".html" or ".htm" => "#E44D26", // HTML orange
-            ".css" => "#264DE4",      // CSS blue
-            ".md" => "#083FA1",       // Markdown blue
-            ".xml" or ".xaml" => "#FF6600", // XML orange
-            ".yaml" or ".yml" => "#CB171E", // YAML red
-            ".rs" => "#DEA584",       // Rust orange
-            ".go" => "#00ADD8",       // Go blue
-            ".java" => "#ED8B00",     // Java orange
-            ".ps1" => "#012456",      // PowerShell dark blue
-            _ => null
-        };
+        return ColorsByExtension.TryGetValue(Path.GetExtension(fileName), out var color)
+            ? color
+            : null;
     }
 }

@@ -5,6 +5,37 @@ namespace FastEdit.Infrastructure;
 
 public static class KeyGestureParser
 {
+    private static readonly IReadOnlyDictionary<string, ModifierKeys> ModifierAliases =
+        new Dictionary<string, ModifierKeys>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["CTRL"] = ModifierKeys.Control,
+            ["CONTROL"] = ModifierKeys.Control,
+            ["ALT"] = ModifierKeys.Alt,
+            ["SHIFT"] = ModifierKeys.Shift,
+        };
+
+    private static readonly IReadOnlyDictionary<string, Key> KeyAliases =
+        new Dictionary<string, Key>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["+"] = Key.OemPlus,
+            ["Plus"] = Key.OemPlus,
+            ["-"] = Key.OemMinus,
+            ["Minus"] = Key.OemMinus,
+            ["`"] = Key.OemTilde,
+            ["\\"] = Key.OemPipe,
+            [","] = Key.OemComma,
+            ["0"] = Key.D0,
+            ["1"] = Key.D1,
+            ["2"] = Key.D2,
+            ["3"] = Key.D3,
+            ["4"] = Key.D4,
+            ["5"] = Key.D5,
+            ["6"] = Key.D6,
+            ["7"] = Key.D7,
+            ["8"] = Key.D8,
+            ["9"] = Key.D9,
+        };
+
     public static KeyGesture? Parse(string gestureString)
     {
         if (string.IsNullOrWhiteSpace(gestureString))
@@ -60,32 +91,12 @@ public static class KeyGestureParser
     }
 
     private static ModifierKeys? ParseModifier(string modifier) =>
-        modifier.ToUpperInvariant() switch
-        {
-            "CTRL" or "CONTROL" => ModifierKeys.Control,
-            "ALT" => ModifierKeys.Alt,
-            "SHIFT" => ModifierKeys.Shift,
-            _ => null
-        };
+        ModifierAliases.TryGetValue(modifier, out var key)
+            ? key
+            : null;
 
     private static Key? ParseKey(string keyPart) =>
-        keyPart switch
-        {
-            "+" or "Plus" => Key.OemPlus,
-            "-" or "Minus" => Key.OemMinus,
-            "`" => Key.OemTilde,
-            "\\" => Key.OemPipe,
-            "," => Key.OemComma,
-            "0" => Key.D0,
-            "1" => Key.D1,
-            "2" => Key.D2,
-            "3" => Key.D3,
-            "4" => Key.D4,
-            "5" => Key.D5,
-            "6" => Key.D6,
-            "7" => Key.D7,
-            "8" => Key.D8,
-            "9" => Key.D9,
-            _ => Enum.TryParse<Key>(keyPart, true, out var key) ? key : null
-        };
+        KeyAliases.TryGetValue(keyPart, out var alias)
+            ? alias
+            : Enum.TryParse<Key>(keyPart, true, out var key) ? key : null;
 }

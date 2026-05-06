@@ -154,9 +154,7 @@ public sealed class LargeFileDocument : IDisposable
         long linesSinceCheckpoint = 0;
         long lastProgressReport = 0;
 
-        bool isUtf16Le = Encoding.Equals(Encoding.Unicode);
-        bool isUtf16Be = Encoding.Equals(Encoding.BigEndianUnicode);
-        int stride = (isUtf16Le || isUtf16Be) ? 2 : 1;
+        var layout = EncodingLayout.From(Encoding);
 
         const int BufSize = 4 * 1024 * 1024;
         var buf = new byte[BufSize];
@@ -167,26 +165,15 @@ public sealed class LargeFileDocument : IDisposable
             int toRead = (int)Math.Min(BufSize, FileSize - pos);
             _accessor.ReadArray(pos, buf, 0, toRead);
 
-            for (int i = 0; i < toRead; i += stride)
+            for (int i = 0; i < toRead; i += layout.Stride)
             {
-                bool isNewline;
-                if (isUtf16Le)
-                    isNewline = i + 1 < toRead && buf[i] == 0x0A && buf[i + 1] == 0x00;
-                else if (isUtf16Be)
-                    isNewline = i + 1 < toRead && buf[i] == 0x00 && buf[i + 1] == 0x0A;
-                else
-                    isNewline = buf[i] == 0x0A;
-
-                if (isNewline)
+                if (layout.IsNewline(buf, i, toRead))
                 {
                     lineCount++;
                     linesSinceCheckpoint++;
-                    long absPos = pos + i + stride;
+                    long absPos = pos + i + layout.Stride;
 
-                    bool lineCheckpoint = linesSinceCheckpoint >= LineCheckpointInterval;
-                    bool byteCheckpoint = absPos - lastCheckpointBytes >= ByteCheckpointInterval;
-
-                    if (lineCheckpoint || byteCheckpoint)
+                    if (ShouldCreateCheckpoint(linesSinceCheckpoint, absPos, lastCheckpointBytes))
                     {
                         checkpoints.Add(new LineCheckpoint(lineCount, absPos));
                         lastCheckpointBytes = absPos;
@@ -212,96 +199,75 @@ public sealed class LargeFileDocument : IDisposable
         onProgress?.Report(1.0);
     }
 
+    private static bool ShouldCreateCheckpoint(long linesSinceCheckpoint, long byteOffset, long lastCheckpointBytes) =>
+        linesSinceCheckpoint >= LineCheckpointInterval ||
+        byteOffset - lastCheckpointBytes >= ByteCheckpointInterval;
+
     public string GetLine(long lineNumber)
     {
         if (!HasBuiltIndex || lineNumber < 1 || lineNumber > _totalLines)
             return string.Empty;
 
-        var checkpoint = FindCheckpointForLine(lineNumber);
-        long pos = checkpoint.ByteOffset;
-        long currentLine = checkpoint.LineNumber;
+        var layout = EncodingLayout.From(Encoding);
+        var lineStart = FindLineStart(lineNumber, FindCheckpointForLine(lineNumber), layout);
+        var lineEnd = FindLineEnd(lineStart, layout, out var truncated);
+        return DecodeDisplayLine(lineStart, lineEnd, truncated, layout);
+    }
 
-        bool isUtf16Le = Encoding.Equals(Encoding.Unicode);
-        bool isUtf16Be = Encoding.Equals(Encoding.BigEndianUnicode);
-        int stride = (isUtf16Le || isUtf16Be) ? 2 : 1;
+    private long FindLineStart(long lineNumber, LineCheckpoint checkpoint, EncodingLayout layout)
+    {
+        var pos = checkpoint.ByteOffset;
+        var currentLine = checkpoint.LineNumber;
 
         while (currentLine < lineNumber && pos < FileSize)
         {
-            byte b0 = _accessor.ReadByte(pos);
-            bool isNewline;
-            if (isUtf16Le)
-            {
-                byte b1 = pos + 1 < FileSize ? _accessor.ReadByte(pos + 1) : (byte)0;
-                isNewline = b0 == 0x0A && b1 == 0x00;
-            }
-            else if (isUtf16Be)
-            {
-                byte b1 = pos + 1 < FileSize ? _accessor.ReadByte(pos + 1) : (byte)0;
-                isNewline = b0 == 0x00 && b1 == 0x0A;
-            }
-            else
-            {
-                isNewline = b0 == 0x0A;
-            }
-
-            pos += stride;
+            var isNewline = layout.IsNewline(_accessor, pos, FileSize);
+            pos += layout.Stride;
             if (isNewline) currentLine++;
         }
 
-        long lineStart = pos;
-        long maxBytes = MaxDisplayLineChars * (long)stride * 4;
-        long lineEndScanLimit = Math.Min(FileSize, lineStart + maxBytes);
-        long lineEnd = lineEndScanLimit;
-        bool truncated = false;
+        return pos;
+    }
+
+    private long FindLineEnd(long lineStart, EncodingLayout layout, out bool truncated)
+    {
+        var pos = lineStart;
+        var lineEndScanLimit = Math.Min(FileSize, lineStart + MaxDisplayLineChars * (long)layout.Stride * 4);
+        var lineEnd = lineEndScanLimit;
+        truncated = false;
 
         while (pos < lineEndScanLimit)
         {
-            byte b0 = _accessor.ReadByte(pos);
-            bool isNewline;
-            if (isUtf16Le)
-            {
-                byte b1 = pos + 1 < FileSize ? _accessor.ReadByte(pos + 1) : (byte)0;
-                isNewline = b0 == 0x0A && b1 == 0x00;
-            }
-            else if (isUtf16Be)
-            {
-                byte b1 = pos + 1 < FileSize ? _accessor.ReadByte(pos + 1) : (byte)0;
-                isNewline = b0 == 0x00 && b1 == 0x0A;
-            }
-            else
-            {
-                isNewline = b0 == 0x0A;
-            }
-
-            if (isNewline)
+            if (layout.IsNewline(_accessor, pos, FileSize))
             {
                 lineEnd = pos;
                 break;
             }
-            pos += stride;
+
+            pos += layout.Stride;
         }
 
-        if (pos >= lineEndScanLimit && lineEndScanLimit < FileSize)
-        {
-            truncated = true;
-            lineEnd = lineEndScanLimit;
-        }
+        if (pos < lineEndScanLimit || lineEndScanLimit >= FileSize)
+            return lineEnd;
 
-        int byteLen = (int)(lineEnd - lineStart);
+        truncated = true;
+        return lineEndScanLimit;
+    }
+
+    private string DecodeDisplayLine(long lineStart, long lineEnd, bool truncated, EncodingLayout layout)
+    {
+        var byteLen = (int)(lineEnd - lineStart);
         if (byteLen <= 0) return string.Empty;
 
         var buf = new byte[byteLen];
         _accessor.ReadArray(lineStart, buf, 0, byteLen);
 
-        var trim = GetTrailingCarriageReturnByteCount(buf, 0, byteLen, isUtf16Le, isUtf16Be);
-        string text = Encoding.GetString(buf, 0, byteLen - trim);
+        var trim = GetTrailingCarriageReturnByteCount(buf, 0, byteLen, layout);
+        var text = Encoding.GetString(buf, 0, byteLen - trim);
 
-        if (text.Length > MaxDisplayLineChars)
-            text = text.Substring(0, MaxDisplayLineChars) + " …[truncated]";
-        else if (truncated)
-            text += " …[truncated]";
-
-        return text;
+        return text.Length > MaxDisplayLineChars
+            ? text.Substring(0, MaxDisplayLineChars) + " …[truncated]"
+            : truncated ? text + " …[truncated]" : text;
     }
 
     public readonly record struct SearchMatch(long LineNumber, int ColumnInLine);
@@ -349,9 +315,7 @@ public sealed class LargeFileDocument : IDisposable
         var results = new List<long>();
         if (!HasBuiltIndex || FileSize == 0 || _accessor == null) return results;
 
-        bool isUtf16Le = Encoding.Equals(Encoding.Unicode);
-        bool isUtf16Be = Encoding.Equals(Encoding.BigEndianUnicode);
-        int stride = (isUtf16Le || isUtf16Be) ? 2 : 1;
+        var layout = EncodingLayout.From(Encoding);
 
         const int BufSize = 4 * 1024 * 1024;
         var buf = new byte[BufSize];
@@ -370,36 +334,17 @@ public sealed class LargeFileDocument : IDisposable
             _accessor.ReadArray(pos, buf, 0, toRead);
 
             int lineStart = 0;
-            for (int i = 0; i < toRead; i += stride)
+            for (int i = 0; i < toRead; i += layout.Stride)
             {
-                bool isNewline;
-                if (isUtf16Le) isNewline = i + 1 < toRead && buf[i] == 0x0A && buf[i + 1] == 0x00;
-                else if (isUtf16Be) isNewline = i + 1 < toRead && buf[i] == 0x00 && buf[i + 1] == 0x0A;
-                else isNewline = buf[i] == 0x0A;
-
-                if (isNewline)
+                if (layout.IsNewline(buf, i, toRead))
                 {
                     int byteLen = i - lineStart;
-                    string line;
-                    if (carry.Count > 0)
-                    {
-                        carry.AddRange(new ArraySegment<byte>(buf, lineStart, byteLen));
-                        line = DecodeLine(carry.ToArray(), 0, carry.Count, stride, isUtf16Le, isUtf16Be);
-                        carry.Clear();
-                    }
-                    else
-                    {
-                        line = DecodeLine(buf, lineStart, byteLen, stride, isUtf16Le, isUtf16Be);
-                    }
-
-                    if (predicate(line))
-                    {
-                        results.Add(currentLine);
-                        if (results.Count >= maxResults) return results;
-                    }
+                    var line = DecodeBufferedLine(buf, lineStart, byteLen, carry, layout);
+                    if (AddMatchingLine(results, currentLine, line, predicate, maxResults))
+                        return results;
 
                     currentLine++;
-                    lineStart = i + stride;
+                    lineStart = i + layout.Stride;
                 }
             }
 
@@ -424,18 +369,42 @@ public sealed class LargeFileDocument : IDisposable
         // Final line without trailing newline.
         if (carry.Count > 0)
         {
-            string line = DecodeLine(carry.ToArray(), 0, carry.Count, stride, isUtf16Le, isUtf16Be);
-            if (predicate(line))
-                results.Add(currentLine);
+            var line = DecodeLine(carry.ToArray(), 0, carry.Count, layout);
+            AddMatchingLine(results, currentLine, line, predicate, maxResults);
         }
 
         onProgress?.Report(1.0);
         return results;
     }
 
-    private string DecodeLine(byte[] buf, int offset, int length, int stride, bool isUtf16Le, bool isUtf16Be)
+    private string DecodeBufferedLine(byte[] buf, int offset, int length, List<byte> carry, EncodingLayout layout)
     {
-        length -= GetTrailingCarriageReturnByteCount(buf, offset, length, isUtf16Le, isUtf16Be);
+        if (carry.Count == 0)
+            return DecodeLine(buf, offset, length, layout);
+
+        carry.AddRange(new ArraySegment<byte>(buf, offset, length));
+        var line = DecodeLine(carry.ToArray(), 0, carry.Count, layout);
+        carry.Clear();
+        return line;
+    }
+
+    private static bool AddMatchingLine(
+        List<long> results,
+        long lineNumber,
+        string line,
+        Func<string, bool> predicate,
+        int maxResults)
+    {
+        if (!predicate(line))
+            return false;
+
+        results.Add(lineNumber);
+        return results.Count >= maxResults;
+    }
+
+    private string DecodeLine(byte[] buf, int offset, int length, EncodingLayout layout)
+    {
+        length -= GetTrailingCarriageReturnByteCount(buf, offset, length, layout);
         if (length <= 0) return string.Empty;
         return Encoding.GetString(buf, offset, length);
     }
@@ -444,20 +413,19 @@ public sealed class LargeFileDocument : IDisposable
         byte[] buf,
         int offset,
         int length,
-        bool isUtf16Le,
-        bool isUtf16Be)
+        EncodingLayout layout)
     {
         if (length <= 0)
             return 0;
 
-        if (!isUtf16Le && !isUtf16Be)
+        if (!layout.IsUtf16Le && !layout.IsUtf16Be)
             return buf[offset + length - 1] == 0x0D ? 1 : 0;
 
         if (length < 2)
             return 0;
 
         var last = offset + length - 2;
-        if (isUtf16Le)
+        if (layout.IsUtf16Le)
             return buf[last] == 0x0D && buf[last + 1] == 0x00 ? 2 : 0;
 
         return buf[last] == 0x00 && buf[last + 1] == 0x0D ? 2 : 0;
@@ -481,15 +449,11 @@ public sealed class LargeFileDocument : IDisposable
         var results = new List<SearchMatch>();
         if (string.IsNullOrEmpty(needle) || !HasBuiltIndex) return results;
 
-        byte[] needleBytes = Encoding.GetBytes(needle);
-        byte[]? needleLowerBytes = caseSensitive ? null : Encoding.GetBytes(needle.ToLowerInvariant());
-
-        bool isUtf16Le = Encoding.Equals(Encoding.Unicode);
-        bool isUtf16Be = Encoding.Equals(Encoding.BigEndianUnicode);
-        int stride = (isUtf16Le || isUtf16Be) ? 2 : 1;
+        var query = SearchNeedle.Create(needle, caseSensitive, Encoding);
+        var layout = EncodingLayout.From(Encoding);
 
         const int BufSize = 4 * 1024 * 1024;
-        int overlap = needleBytes.Length;
+        int overlap = query.Bytes.Length;
         var buf = new byte[BufSize + overlap];
 
         long pos = BomLength;
@@ -505,26 +469,16 @@ public sealed class LargeFileDocument : IDisposable
 
             int scanLimit = (pos + toRead >= FileSize) ? toRead : toRead - overlap;
 
-            for (int i = 0; i < scanLimit; i += stride)
+            for (int i = 0; i < scanLimit; i += layout.Stride)
             {
-                bool isNewline;
-                if (isUtf16Le) isNewline = i + 1 < toRead && buf[i] == 0x0A && buf[i + 1] == 0x00;
-                else if (isUtf16Be) isNewline = i + 1 < toRead && buf[i] == 0x00 && buf[i + 1] == 0x0A;
-                else isNewline = buf[i] == 0x0A;
-
-                if (isNewline)
+                if (layout.IsNewline(buf, i, toRead))
                 {
                     currentLine++;
-                    lineStart = pos + i + stride;
+                    lineStart = pos + i + layout.Stride;
                 }
 
-                if (i + needleBytes.Length <= toRead && MatchAt(buf, i, needleBytes, needleLowerBytes, caseSensitive))
-                {
-                    long absOffset = pos + i;
-                    int col = (int)((absOffset - lineStart) / stride);
-                    results.Add(new SearchMatch(currentLine, col));
-                    if (results.Count >= maxResults) return results;
-                }
+                if (TryAddSearchMatch(results, currentLine, lineStart, pos, buf, i, toRead, query, layout, maxResults))
+                    return results;
             }
 
             pos += scanLimit;
@@ -540,23 +494,98 @@ public sealed class LargeFileDocument : IDisposable
         return results;
     }
 
+    private static bool TryAddSearchMatch(
+        List<SearchMatch> results,
+        long currentLine,
+        long lineStart,
+        long bufferStart,
+        byte[] buffer,
+        int offset,
+        int bytesRead,
+        SearchNeedle query,
+        EncodingLayout layout,
+        int maxResults)
+    {
+        if (offset + query.Bytes.Length > bytesRead ||
+            !MatchAt(buffer, offset, query.Bytes, query.LowerBytes, query.CaseSensitive))
+            return false;
+
+        var absOffset = bufferStart + offset;
+        var column = (int)((absOffset - lineStart) / layout.Stride);
+        results.Add(new SearchMatch(currentLine, column));
+        return results.Count >= maxResults;
+    }
+
     private static bool MatchAt(byte[] haystack, int offset, byte[] needle, byte[]? needleLower, bool caseSensitive)
     {
-        if (caseSensitive)
+        return caseSensitive
+            ? MatchExact(haystack, offset, needle)
+            : MatchAsciiOrdinalIgnoreCase(haystack, offset, needleLower!);
+    }
+
+    private static bool MatchExact(byte[] haystack, int offset, byte[] needle)
+    {
+        for (int i = 0; i < needle.Length; i++)
+            if (haystack[offset + i] != needle[i]) return false;
+        return true;
+    }
+
+    private static bool MatchAsciiOrdinalIgnoreCase(byte[] haystack, int offset, byte[] needleLower)
+    {
+        for (int i = 0; i < needleLower.Length; i++)
         {
-            for (int i = 0; i < needle.Length; i++)
-                if (haystack[offset + i] != needle[i]) return false;
-            return true;
+            var h = haystack[offset + i];
+            if (h >= 0x41 && h <= 0x5A) h = (byte)(h + 32);
+            if (h != needleLower[i]) return false;
         }
-        else
+
+        return true;
+    }
+
+    private readonly record struct EncodingLayout(bool IsUtf16Le, bool IsUtf16Be, int Stride)
+    {
+        public static EncodingLayout From(Encoding encoding)
         {
-            for (int i = 0; i < needle.Length; i++)
-            {
-                byte h = haystack[offset + i];
-                if (h >= 0x41 && h <= 0x5A) h = (byte)(h + 32);
-                if (h != needleLower![i]) return false;
-            }
-            return true;
+            var isUtf16Le = encoding.Equals(Encoding.Unicode);
+            var isUtf16Be = encoding.Equals(Encoding.BigEndianUnicode);
+            return new EncodingLayout(isUtf16Le, isUtf16Be, isUtf16Le || isUtf16Be ? 2 : 1);
+        }
+
+        public bool IsNewline(byte[] buffer, int index, int length)
+        {
+            if (IsUtf16Le)
+                return index + 1 < length && buffer[index] == 0x0A && buffer[index + 1] == 0x00;
+
+            if (IsUtf16Be)
+                return index + 1 < length && buffer[index] == 0x00 && buffer[index + 1] == 0x0A;
+
+            return buffer[index] == 0x0A;
+        }
+
+        public bool IsNewline(MemoryMappedViewAccessor accessor, long offset, long fileSize)
+        {
+            var first = accessor.ReadByte(offset);
+
+            if (IsUtf16Le)
+                return first == 0x0A && ReadSecondByte(accessor, offset, fileSize) == 0x00;
+
+            if (IsUtf16Be)
+                return first == 0x00 && ReadSecondByte(accessor, offset, fileSize) == 0x0A;
+
+            return first == 0x0A;
+        }
+
+        private static byte ReadSecondByte(MemoryMappedViewAccessor accessor, long offset, long fileSize) =>
+            offset + 1 < fileSize ? accessor.ReadByte(offset + 1) : (byte)0;
+    }
+
+    private readonly record struct SearchNeedle(byte[] Bytes, byte[]? LowerBytes, bool CaseSensitive)
+    {
+        public static SearchNeedle Create(string needle, bool caseSensitive, Encoding encoding)
+        {
+            var bytes = encoding.GetBytes(needle);
+            var lowerBytes = caseSensitive ? null : encoding.GetBytes(needle.ToLowerInvariant());
+            return new SearchNeedle(bytes, lowerBytes, caseSensitive);
         }
     }
 

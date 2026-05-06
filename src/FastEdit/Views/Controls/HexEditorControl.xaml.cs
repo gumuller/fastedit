@@ -4,6 +4,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using FastEdit.Core.HexEngine;
+using FastEdit.Infrastructure;
 using FastEdit.ViewModels;
 
 namespace FastEdit.Views.Controls;
@@ -154,124 +155,60 @@ public partial class HexEditorControl : UserControl
 
     private void HexCanvas_KeyDown(object sender, KeyEventArgs e)
     {
-        // Ctrl+F opens search
-        if (e.Key == Key.F && Keyboard.Modifiers == ModifierKeys.Control)
+        var buffer = _viewModel?.ByteBuffer;
+        var decision = HexEditorKeyInputPolicy.Decide(
+            e.Key,
+            Keyboard.Modifiers,
+            HexSearchBar.Visibility == Visibility.Visible,
+            ReferenceEquals(e.OriginalSource, HexCanvas) || ReferenceEquals(e.OriginalSource, this),
+            buffer != null && _selectedOffset >= 0,
+            _selectedOffset,
+            buffer?.Length ?? 0,
+            _viewModel?.BytesPerRow ?? 1,
+            _visibleRows);
+
+        switch (decision.Action)
         {
-            ShowSearch();
-            e.Handled = true;
-            return;
-        }
-
-        // Escape closes search if open
-        if (e.Key == Key.Escape && HexSearchBar.Visibility == Visibility.Visible)
-        {
-            HideSearch();
-            e.Handled = true;
-            return;
-        }
-
-        // Key events bubble up from child controls (e.g. the search TextBox).
-        // If the event did NOT originate on the hex canvas itself, ignore it —
-        // otherwise we'd treat keystrokes in the search box as hex edits,
-        // corrupt the buffer, and steal focus back to the canvas.
-        if (!ReferenceEquals(e.OriginalSource, HexCanvas) &&
-            !ReferenceEquals(e.OriginalSource, this))
-            return;
-
-        if (_viewModel?.ByteBuffer == null || _selectedOffset < 0) return;
-
-        var buffer = _viewModel.ByteBuffer;
-        var bytesPerRow = _viewModel.BytesPerRow;
-
-        // Handle hex input
-        int nibble = -1;
-        if (e.Key >= Key.D0 && e.Key <= Key.D9)
-            nibble = e.Key - Key.D0;
-        else if (e.Key >= Key.NumPad0 && e.Key <= Key.NumPad9)
-            nibble = e.Key - Key.NumPad0;
-        else if (e.Key >= Key.A && e.Key <= Key.F)
-            nibble = 10 + (e.Key - Key.A);
-
-        if (nibble >= 0)
-        {
-            byte currentByte = buffer.GetByte(_selectedOffset);
-            byte newByte;
-
-            if (_editingHighNibble)
-            {
-                newByte = (byte)((nibble << 4) | (currentByte & 0x0F));
-                buffer.SetByte(_selectedOffset, newByte);
-                _editingHighNibble = false;
-            }
-            else
-            {
-                newByte = (byte)((currentByte & 0xF0) | nibble);
-                buffer.SetByte(_selectedOffset, newByte);
+            case HexEditorKeyAction.ShowSearch:
+                ShowSearch();
+                e.Handled = true;
+                return;
+            case HexEditorKeyAction.HideSearch:
+                HideSearch();
+                e.Handled = true;
+                return;
+            case HexEditorKeyAction.EditNibble:
+                if (buffer == null) return;
+                ApplyHexNibble(buffer, decision.Nibble);
+                e.Handled = true;
+                return;
+            case HexEditorKeyAction.MoveSelection:
+                _selectedOffset = decision.Offset;
                 _editingHighNibble = true;
-
-                // Move to next byte
-                if (_selectedOffset < buffer.Length - 1)
-                    _selectedOffset++;
-            }
-
-            RenderHex();
-            e.Handled = true;
-            return;
-        }
-
-        // Handle navigation
-        switch (e.Key)
-        {
-            case Key.Left:
-                if (_selectedOffset > 0)
-                    _selectedOffset--;
-                _editingHighNibble = true;
-                break;
-            case Key.Right:
-                if (_selectedOffset < buffer.Length - 1)
-                    _selectedOffset++;
-                _editingHighNibble = true;
-                break;
-            case Key.Up:
-                if (_selectedOffset >= bytesPerRow)
-                    _selectedOffset -= bytesPerRow;
-                _editingHighNibble = true;
-                break;
-            case Key.Down:
-                if (_selectedOffset + bytesPerRow < buffer.Length)
-                    _selectedOffset += bytesPerRow;
-                _editingHighNibble = true;
-                break;
-            case Key.PageUp:
-                _selectedOffset = Math.Max(0, _selectedOffset - _visibleRows * bytesPerRow);
-                _editingHighNibble = true;
-                break;
-            case Key.PageDown:
-                _selectedOffset = Math.Min(buffer.Length - 1, _selectedOffset + _visibleRows * bytesPerRow);
-                _editingHighNibble = true;
-                break;
-            case Key.Home:
-                if ((Keyboard.Modifiers & ModifierKeys.Control) != 0)
-                    _selectedOffset = 0;
-                else
-                    _selectedOffset = (_selectedOffset / bytesPerRow) * bytesPerRow;
-                _editingHighNibble = true;
-                break;
-            case Key.End:
-                if ((Keyboard.Modifiers & ModifierKeys.Control) != 0)
-                    _selectedOffset = buffer.Length - 1;
-                else
-                    _selectedOffset = Math.Min(buffer.Length - 1, ((_selectedOffset / bytesPerRow) + 1) * bytesPerRow - 1);
-                _editingHighNibble = true;
-                break;
-            default:
+                EnsureOffsetVisible(_selectedOffset);
+                RenderHex();
+                e.Handled = true;
                 return;
         }
+    }
 
-        // Ensure selected byte is visible
-        EnsureOffsetVisible(_selectedOffset);
+    private void ApplyHexNibble(VirtualizedByteBuffer buffer, int nibble)
+    {
+        var currentByte = buffer.GetByte(_selectedOffset);
+        if (_editingHighNibble)
+        {
+            buffer.SetByte(_selectedOffset, (byte)((nibble << 4) | (currentByte & 0x0F)));
+            _editingHighNibble = false;
+        }
+        else
+        {
+            buffer.SetByte(_selectedOffset, (byte)((currentByte & 0xF0) | nibble));
+            _editingHighNibble = true;
+            if (_selectedOffset < buffer.Length - 1)
+                _selectedOffset++;
+        }
+
         RenderHex();
-        e.Handled = true;
     }
 
     private void EnsureOffsetVisible(long offset)

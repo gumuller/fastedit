@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using FastEdit.Infrastructure;
 using FastEdit.Services.Interfaces;
 using FastEdit.Theming;
 using FastEdit.ViewModels;
@@ -128,40 +129,8 @@ public partial class SettingsWindow : Wpf.Ui.Controls.FluentWindow
         e.Handled = true;
 
         var key = e.Key == Key.System ? e.SystemKey : e.Key;
-
-        // Ignore modifier-only keys
-        if (key is Key.LeftCtrl or Key.RightCtrl or Key.LeftAlt or Key.RightAlt
-            or Key.LeftShift or Key.RightShift or Key.LWin or Key.RWin)
+        if (!ShortcutGestureFormatter.TryFormat(key, Keyboard.Modifiers, out var gesture))
             return;
-
-        var modifiers = Keyboard.Modifiers;
-        var parts = new List<string>();
-        if (modifiers.HasFlag(ModifierKeys.Control)) parts.Add("Ctrl");
-        if (modifiers.HasFlag(ModifierKeys.Alt)) parts.Add("Alt");
-        if (modifiers.HasFlag(ModifierKeys.Shift)) parts.Add("Shift");
-
-        var keyName = key switch
-        {
-            Key.OemPlus => "Plus",
-            Key.OemMinus => "Minus",
-            Key.OemTilde => "`",
-            Key.OemPipe => "\\",
-            Key.OemComma => ",",
-            Key.D0 => "0",
-            Key.D1 => "1",
-            Key.D2 => "2",
-            Key.D3 => "3",
-            Key.D4 => "4",
-            Key.D5 => "5",
-            Key.D6 => "6",
-            Key.D7 => "7",
-            Key.D8 => "8",
-            Key.D9 => "9",
-            _ => key.ToString()
-        };
-        parts.Add(keyName);
-
-        var gesture = string.Join("+", parts);
 
         if (_recordingEntry != null)
         {

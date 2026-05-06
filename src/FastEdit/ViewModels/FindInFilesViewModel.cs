@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Security;
 using System.Text.RegularExpressions;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -46,95 +47,16 @@ public partial class FindInFilesViewModel : ObservableObject
     [RelayCommand]
     private async Task SearchAsync()
     {
-        if (string.IsNullOrEmpty(SearchPattern) || string.IsNullOrEmpty(FolderPath))
+        if (!CanSearch())
             return;
 
-        if (!_fileSystemService.DirectoryExists(FolderPath)) return;
-
-        IsSearching = true;
-        Results.Clear();
-        StatusText = "Searching...";
+        var request = CreateSearchRequest();
+        BeginSearch();
 
         try
         {
-            await Task.Run(() =>
-            {
-                var comparison = MatchCase ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
-                Regex? regex = null;
-                if (UseRegex)
-                {
-                    var options = MatchCase ? RegexOptions.None : RegexOptions.IgnoreCase;
-                    regex = new Regex(SearchPattern, options | RegexOptions.Compiled, TimeSpan.FromSeconds(5));
-                }
-
-                var filters = FileFilter.Split(';', '|', ',')
-                    .Select(f => f.Trim())
-                    .Where(f => !string.IsNullOrEmpty(f))
-                    .ToList();
-
-                if (filters.Count == 0) filters.Add("*.*");
-
-                var files = new List<string>();
-                foreach (var filter in filters)
-                {
-                    try
-                    {
-                        files.AddRange(_fileSystemService.EnumerateFiles(FolderPath, filter, recursive: true));
-                    }
-                    catch { /* skip inaccessible */ }
-                }
-
-                files = files.Distinct().ToList();
-                int matchCount = 0;
-
-                foreach (var file in files)
-                {
-                    if (matchCount > 5000) break; // safety limit
-
-                    try
-                    {
-                        // Skip binary files (check first 8KB)
-                        using var checkStream = _fileSystemService.OpenRead(file);
-                        var buffer = new byte[Math.Min(8192, checkStream.Length)];
-                        int bytesRead = checkStream.Read(buffer, 0, buffer.Length);
-                        if (IsBinary(buffer, bytesRead)) continue;
-                    }
-                    catch { continue; }
-
-                    try
-                    {
-                        var lines = _fileSystemService.ReadLines(file).ToList();
-                        for (int i = 0; i < lines.Count; i++)
-                        {
-                            bool isMatch;
-                            if (regex != null)
-                                isMatch = regex.IsMatch(lines[i]);
-                            else
-                                isMatch = lines[i].Contains(SearchPattern, comparison);
-
-                            if (isMatch)
-                            {
-                                matchCount++;
-                                var relativePath = Path.GetRelativePath(FolderPath, file);
-                                var result = new SearchResult
-                                {
-                                    FilePath = file,
-                                    RelativePath = relativePath,
-                                    LineNumber = i + 1,
-                                    LineText = lines[i].TrimStart(),
-                                    FileName = Path.GetFileName(file)
-                                };
-
-                                _dispatcherService.Invoke(() => Results.Add(result));
-                            }
-                        }
-                    }
-                    catch { /* skip unreadable */ }
-                }
-
-                _dispatcherService.Invoke(() =>
-                    StatusText = $"Found {matchCount} match(es) in {files.Count} file(s)");
-            });
+            var summary = await Task.Run(() => RunSearch(request));
+            StatusText = $"Found {summary.MatchCount} match(es) in {summary.FileCount} file(s)";
         }
         catch (Exception ex)
         {
@@ -145,6 +67,144 @@ public partial class FindInFilesViewModel : ObservableObject
             IsSearching = false;
         }
     }
+
+    private bool CanSearch() =>
+        !string.IsNullOrEmpty(SearchPattern) &&
+        !string.IsNullOrEmpty(FolderPath) &&
+        _fileSystemService.DirectoryExists(FolderPath);
+
+    private SearchRequest CreateSearchRequest() => new(
+        FolderPath!,
+        SearchPattern,
+        MatchCase,
+        UseRegex,
+        FileFilter);
+
+    private void BeginSearch()
+    {
+        IsSearching = true;
+        Results.Clear();
+        StatusText = "Searching...";
+    }
+
+    private SearchSummary RunSearch(SearchRequest request)
+    {
+        var matcher = CreateLineMatcher(request);
+        var files = EnumerateCandidateFiles(request).ToList();
+        var matchCount = 0;
+
+        foreach (var file in files)
+        {
+            if (matchCount > 5000) break; // safety limit
+            if (ShouldSkipFile(file)) continue;
+
+            matchCount += AddFileMatches(file, request, matcher);
+        }
+
+        return new SearchSummary(matchCount, files.Count);
+    }
+
+    private Func<string, bool> CreateLineMatcher(SearchRequest request)
+    {
+        if (request.UseRegex)
+        {
+            var options = request.MatchCase ? RegexOptions.None : RegexOptions.IgnoreCase;
+            var regex = new Regex(request.SearchPattern, options | RegexOptions.Compiled, TimeSpan.FromSeconds(5));
+            return regex.IsMatch;
+        }
+
+        var comparison = request.MatchCase ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+        return line => line.Contains(request.SearchPattern, comparison);
+    }
+
+    private IEnumerable<string> EnumerateCandidateFiles(SearchRequest request) =>
+        SplitFileFilters(request.FileFilter)
+            .SelectMany(filter => EnumerateFilesSafely(request.FolderPath, filter))
+            .Distinct();
+
+    private static IEnumerable<string> SplitFileFilters(string fileFilter)
+    {
+        var filters = fileFilter.Split(';', '|', ',')
+            .Select(f => f.Trim())
+            .Where(f => !string.IsNullOrEmpty(f))
+            .ToList();
+
+        return filters.Count == 0 ? ["*.*"] : filters;
+    }
+
+    private IEnumerable<string> EnumerateFilesSafely(string folderPath, string filter)
+    {
+        try
+        {
+            return _fileSystemService.EnumerateFiles(folderPath, filter, recursive: true).ToList();
+        }
+        catch (Exception ex) when (IsSkippableFileAccessException(ex))
+        {
+            return [];
+        }
+    }
+
+    private bool ShouldSkipFile(string file)
+    {
+        try
+        {
+            using var checkStream = _fileSystemService.OpenRead(file);
+            var buffer = new byte[Math.Min(8192, checkStream.Length)];
+            var bytesRead = checkStream.Read(buffer, 0, buffer.Length);
+            return IsBinary(buffer, bytesRead);
+        }
+        catch (Exception ex) when (IsSkippableFileAccessException(ex))
+        {
+            return true;
+        }
+    }
+
+    private int AddFileMatches(string file, SearchRequest request, Func<string, bool> matcher)
+    {
+        try
+        {
+            var lines = _fileSystemService.ReadLines(file).ToList();
+            var matches = CreateSearchResults(file, request, lines, matcher);
+
+            foreach (var result in matches)
+                _dispatcherService.Invoke(() => Results.Add(result));
+
+            return matches.Count;
+        }
+        catch (Exception ex) when (IsSkippableFileAccessException(ex))
+        {
+            return 0;
+        }
+    }
+
+    private static List<SearchResult> CreateSearchResults(
+        string file,
+        SearchRequest request,
+        IReadOnlyList<string> lines,
+        Func<string, bool> matcher)
+    {
+        var matches = new List<SearchResult>();
+
+        for (var i = 0; i < lines.Count; i++)
+        {
+            if (!matcher(lines[i]))
+                continue;
+
+            matches.Add(new SearchResult
+            {
+                FilePath = file,
+                RelativePath = Path.GetRelativePath(request.FolderPath, file),
+                LineNumber = i + 1,
+                LineText = lines[i].TrimStart(),
+                FileName = Path.GetFileName(file)
+            });
+        }
+
+        return matches;
+    }
+
+    private static bool IsSkippableFileAccessException(Exception ex) =>
+        ex is IOException or UnauthorizedAccessException or SecurityException;
 
     [RelayCommand]
     private void NavigateTo(SearchResult? result)
@@ -170,6 +230,15 @@ public partial class FindInFilesViewModel : ObservableObject
         }
         return false;
     }
+
+    private sealed record SearchRequest(
+        string FolderPath,
+        string SearchPattern,
+        bool MatchCase,
+        bool UseRegex,
+        string FileFilter);
+
+    private readonly record struct SearchSummary(int MatchCount, int FileCount);
 }
 
 public class SearchResult

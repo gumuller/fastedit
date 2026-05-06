@@ -86,6 +86,63 @@ public static class LargeFileFilterPolicy
         return true;
     }
 
+    public static bool TryFindNavigationTarget(
+        long totalLines,
+        long currentLine,
+        IReadOnlyList<long>? sortedFilteredPhysicalLines,
+        IReadOnlyList<LineFilter> activeFilters,
+        bool forward,
+        Func<long, string> getLine,
+        out long targetLine)
+    {
+        targetLine = 0;
+        if (!HasNavigationFilter(activeFilters))
+            return false;
+
+        if (sortedFilteredPhysicalLines != null &&
+            TryFindAdjacentMatch(sortedFilteredPhysicalLines, currentLine, forward, out targetLine))
+            return true;
+
+        return TryFindMatchingLineByScan(totalLines, currentLine, activeFilters, forward, getLine, out targetLine);
+    }
+
+    private static bool TryFindMatchingLineByScan(
+        long totalLines,
+        long currentLine,
+        IReadOnlyList<LineFilter> activeFilters,
+        bool forward,
+        Func<long, string> getLine,
+        out long targetLine)
+    {
+        foreach (var lineNumber in EnumerateWrappedLines(totalLines, currentLine, forward))
+        {
+            if (!MatchesNavigationFilter(getLine(lineNumber), activeFilters))
+                continue;
+
+            targetLine = lineNumber;
+            return true;
+        }
+
+        targetLine = 0;
+        return false;
+    }
+
+    private static IEnumerable<long> EnumerateWrappedLines(long totalLines, long currentLine, bool forward)
+    {
+        var step = forward ? 1 : -1;
+        for (var pass = 0; pass < 2; pass++)
+        {
+            var from = pass == 0 ? currentLine + step : forward ? 1 : totalLines;
+            var to = pass == 0 ? forward ? totalLines : 1 : currentLine;
+
+            for (var lineNumber = from; IsInRange(lineNumber, to, forward); lineNumber += step)
+                yield return lineNumber;
+        }
+    }
+
+    private static bool IsInRange(long lineNumber, long boundary, bool forward) =>
+        forward ? lineNumber <= boundary : lineNumber >= boundary;
+
     private static int LowerBound(IReadOnlyList<long> values, long target)
     {
         var low = 0;

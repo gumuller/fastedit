@@ -862,58 +862,71 @@ public partial class MainViewModel : ObservableObject
         if (openFiles == null || openFiles.Count == 0) return;
 
         foreach (var sessionFile in openFiles)
-        {
-            try
-            {
-                if (sessionFile.IsUntitled)
-                {
-                    if (sessionFile.IsBinaryMode) continue;
+            await RestoreSessionFileAsync(sessionFile);
 
-                    // Skip if an untitled tab with same name was already recovered
-                    var fileName = Path.GetFileName(sessionFile.FilePath);
-                    if (Tabs.Any(t => string.IsNullOrEmpty(t.FilePath) && t.FileName == fileName))
-                        continue;
-
-                    string content = string.Empty;
-
-                    if (!string.IsNullOrEmpty(sessionFile.TempFilePath) && _fileSystemService.FileExists(sessionFile.TempFilePath))
-                    {
-                        content = await _fileSystemService.ReadAllTextAsync(sessionFile.TempFilePath);
-                    }
-                    else if (!string.IsNullOrEmpty(sessionFile.Content))
-                    {
-                        content = sessionFile.Content;
-                    }
-
-                    var tab = _tabFactory.CreateUntitled(content);
-                    tab.FileName = fileName;
-                    Tabs.Add(tab);
-                }
-                else if (_fileSystemService.FileExists(sessionFile.FilePath))
-                {
-                    // Skip if this file is already open
-                    if (Tabs.Any(t => string.Equals(t.FilePath, sessionFile.FilePath, StringComparison.OrdinalIgnoreCase)))
-                        continue;
-
-                    var tab = _tabFactory.Create();
-                    await tab.LoadFileAsync(sessionFile.FilePath);
-                    Tabs.Add(tab);
-                }
-            }
-            catch (Exception ex)
-            {
-                Trace.TraceWarning("Failed to restore session file '{0}': {1}", sessionFile.FilePath, ex.Message);
-            }
-        }
-
-        if (Tabs.Count > 0)
-        {
-            var index = Math.Clamp(_settingsService.ActiveTabIndex, 0, Tabs.Count - 1);
-            SelectedTab = Tabs[index];
-        }
+        SelectRestoredActiveTab();
 
         // Clean up temp files only (keep session data until next clean close)
         CleanupTempFiles();
+    }
+
+    private async Task RestoreSessionFileAsync(SessionFile sessionFile)
+    {
+        try
+        {
+            if (sessionFile.IsUntitled)
+                await RestoreUntitledSessionFileAsync(sessionFile);
+            else
+                await RestoreExistingSessionFileAsync(sessionFile);
+        }
+        catch (Exception ex)
+        {
+            Trace.TraceWarning("Failed to restore session file '{0}': {1}", sessionFile.FilePath, ex.Message);
+        }
+    }
+
+    private async Task RestoreUntitledSessionFileAsync(SessionFile sessionFile)
+    {
+        if (sessionFile.IsBinaryMode) return;
+
+        var fileName = Path.GetFileName(sessionFile.FilePath);
+        if (Tabs.Any(t => string.IsNullOrEmpty(t.FilePath) && t.FileName == fileName))
+            return;
+
+        var content = await GetUntitledSessionContentAsync(sessionFile);
+        var tab = _tabFactory.CreateUntitled(content);
+        tab.FileName = fileName;
+        Tabs.Add(tab);
+    }
+
+    private async Task<string> GetUntitledSessionContentAsync(SessionFile sessionFile)
+    {
+        if (!string.IsNullOrEmpty(sessionFile.TempFilePath) && _fileSystemService.FileExists(sessionFile.TempFilePath))
+            return await _fileSystemService.ReadAllTextAsync(sessionFile.TempFilePath);
+
+        return sessionFile.Content ?? string.Empty;
+    }
+
+    private async Task RestoreExistingSessionFileAsync(SessionFile sessionFile)
+    {
+        if (!_fileSystemService.FileExists(sessionFile.FilePath) || IsFileAlreadyOpen(sessionFile.FilePath))
+            return;
+
+        var tab = _tabFactory.Create();
+        await tab.LoadFileAsync(sessionFile.FilePath);
+        Tabs.Add(tab);
+    }
+
+    private bool IsFileAlreadyOpen(string filePath) =>
+        Tabs.Any(t => string.Equals(t.FilePath, filePath, StringComparison.OrdinalIgnoreCase));
+
+    private void SelectRestoredActiveTab()
+    {
+        if (Tabs.Count == 0)
+            return;
+
+        var index = Math.Clamp(_settingsService.ActiveTabIndex, 0, Tabs.Count - 1);
+        SelectedTab = Tabs[index];
     }
 
     private void CleanupTempFiles()

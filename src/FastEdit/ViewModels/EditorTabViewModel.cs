@@ -6,6 +6,7 @@ using CommunityToolkit.Mvvm.Input;
 using FastEdit.Core.FileAnalysis;
 using FastEdit.Core.HexEngine;
 using FastEdit.Core.LargeFile;
+using FastEdit.Infrastructure;
 using FastEdit.Services.Interfaces;
 
 namespace FastEdit.ViewModels;
@@ -156,7 +157,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
             _fileEncoding = result.Encoding;
             _hasBom = result.HasBom;
             Encoding = GetEncodingDisplayName(result.Encoding, result.HasBom);
-            SyntaxLanguage = GetSyntaxLanguage(filePath);
+            SyntaxLanguage = SyntaxLanguageResolver.Resolve(filePath);
         }
 
         IsModified = false;
@@ -213,7 +214,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         // Update metadata after successful save
         FilePath = savePath;
         FileName = Path.GetFileName(savePath);
-        SyntaxLanguage = Mode == FileOpenMode.Text ? GetSyntaxLanguage(savePath) : string.Empty;
+        SyntaxLanguage = Mode == FileOpenMode.Text ? SyntaxLanguageResolver.Resolve(savePath) : string.Empty;
         IsModified = false;
         return true;
     }
@@ -264,7 +265,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
 
         FilePath = savePath;
         FileName = Path.GetFileName(savePath);
-        SyntaxLanguage = GetSyntaxLanguage(savePath);
+        SyntaxLanguage = SyntaxLanguageResolver.Resolve(savePath);
         IsModified = false;
         return true;
     }
@@ -302,7 +303,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
             _fileEncoding = result.Encoding;
             _hasBom = result.HasBom;
             Encoding = GetEncodingDisplayName(result.Encoding, result.HasBom);
-            SyntaxLanguage = GetSyntaxLanguage(FilePath);
+            SyntaxLanguage = SyntaxLanguageResolver.Resolve(FilePath);
         }
         else if (Mode == FileOpenMode.Text || Mode == FileOpenMode.LargeText)
         {
@@ -327,53 +328,6 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         {
             IsModified = true;
         }
-    }
-
-    private static string GetSyntaxLanguage(string filePath)
-    {
-        // Check filename first for files without meaningful extensions
-        var fileName = Path.GetFileName(filePath);
-        var fileNameLower = fileName.ToLowerInvariant();
-
-        var nameMatch = fileNameLower switch
-        {
-            "dockerfile" or "containerfile" => "Dockerfile",
-            "makefile" or "gnumakefile" => "Makefile",
-            ".gitignore" or ".gitattributes" or ".gitmodules" => "INI",
-            ".editorconfig" => "INI",
-            ".env" or ".env.local" or ".env.production" => "INI",
-            "cmakelists.txt" => "CMake",
-            _ => (string?)null
-        };
-        if (nameMatch != null) return nameMatch;
-
-        var ext = Path.GetExtension(filePath).ToLowerInvariant();
-        return ext switch
-        {
-            ".cs" => "C#",
-            ".js" or ".mjs" or ".cjs" => "JavaScript",
-            ".ts" or ".tsx" => "TypeScript",
-            ".py" or ".pyw" => "Python",
-            ".java" => "Java",
-            ".cpp" or ".cxx" or ".cc" or ".hpp" or ".hxx" => "C++",
-            ".c" or ".h" => "C",
-            ".rs" => "Rust",
-            ".go" => "Go",
-            ".rb" or ".rake" => "Ruby",
-            ".html" or ".htm" => "HTML",
-            ".css" or ".scss" or ".less" => "CSS",
-            ".xml" or ".xaml" or ".xsl" or ".xsd" or ".csproj" or ".fsproj" or ".vbproj" or ".props" or ".targets" => "XML",
-            ".json" or ".jsonc" => "JSON",
-            ".yaml" or ".yml" => "YAML",
-            ".md" or ".markdown" => "Markdown",
-            ".sql" => "SQL",
-            ".ps1" or ".psm1" or ".psd1" => "PowerShell",
-            ".sh" or ".bash" or ".zsh" or ".fish" => "Shell",
-            ".bat" or ".cmd" => "Batch",
-            ".toml" => "TOML",
-            ".ini" or ".cfg" or ".conf" => "INI",
-            _ => string.Empty
-        };
     }
 
     public void Dispose()

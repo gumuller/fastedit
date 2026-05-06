@@ -22,50 +22,65 @@ public static class IndentDetector
                 break;
 
             var line = rawLine.TrimEnd('\r');
-            if (line.Length == 0 || line.TrimStart().Length == 0)
+            if (string.IsNullOrWhiteSpace(line))
                 continue;
 
             linesAnalyzed++;
 
-            if (line[0] == '\t')
-            {
-                tabLines++;
-                prevIndent = 0;
-            }
-            else if (line[0] == ' ')
-            {
-                spaceLines++;
-                int spaces = 0;
-                while (spaces < line.Length && line[spaces] == ' ')
-                    spaces++;
-
-                int diff = Math.Abs(spaces - prevIndent);
-                if (diff > 0 && indentDiffs.ContainsKey(diff))
-                    indentDiffs[diff]++;
-
-                prevIndent = spaces;
-            }
-            else
-            {
-                prevIndent = 0;
-            }
+            var indentation = AnalyzeLineIndent(line, prevIndent, indentDiffs);
+            tabLines += indentation.TabLineCount;
+            spaceLines += indentation.SpaceLineCount;
+            prevIndent = indentation.CurrentIndent;
         }
 
         if (tabLines > spaceLines)
             return new IndentInfo(true, 4);
 
-        // Find the most common indent size
-        int bestSize = 4;
-        int bestCount = 0;
+        return new IndentInfo(false, FindMostCommonIndentSize(indentDiffs));
+    }
+
+    private static LineIndentAnalysis AnalyzeLineIndent(
+        string line,
+        int previousIndent,
+        Dictionary<int, int> indentDiffs)
+    {
+        if (line[0] == '\t')
+            return new LineIndentAnalysis(TabLineCount: 1, SpaceLineCount: 0, CurrentIndent: 0);
+
+        if (line[0] != ' ')
+            return new LineIndentAnalysis(TabLineCount: 0, SpaceLineCount: 0, CurrentIndent: 0);
+
+        var spaces = CountLeadingSpaces(line);
+        var diff = Math.Abs(spaces - previousIndent);
+        if (diff > 0 && indentDiffs.ContainsKey(diff))
+            indentDiffs[diff]++;
+
+        return new LineIndentAnalysis(TabLineCount: 0, SpaceLineCount: 1, CurrentIndent: spaces);
+    }
+
+    private static int CountLeadingSpaces(string line)
+    {
+        var spaces = 0;
+        while (spaces < line.Length && line[spaces] == ' ')
+            spaces++;
+        return spaces;
+    }
+
+    private static int FindMostCommonIndentSize(IReadOnlyDictionary<int, int> indentDiffs)
+    {
+        var bestSize = 4;
+        var bestCount = 0;
         foreach (var (size, count) in indentDiffs)
         {
-            if (count > bestCount)
-            {
-                bestCount = count;
-                bestSize = size;
-            }
+            if (count <= bestCount)
+                continue;
+
+            bestCount = count;
+            bestSize = size;
         }
 
-        return new IndentInfo(false, bestSize);
+        return bestSize;
     }
+
+    private readonly record struct LineIndentAnalysis(int TabLineCount, int SpaceLineCount, int CurrentIndent);
 }

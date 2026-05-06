@@ -42,13 +42,11 @@ public static class FoldingHelper
     private static void UpdateFoldings(FoldingManager manager, IFoldingStrategy strategy, TextDocument document)
     {
         if (strategy is XmlFoldingStrategy xmlStrategy)
-        {
             xmlStrategy.UpdateFoldings(manager, document);
-        }
         else if (strategy is BraceFoldingStrategy braceStrategy)
-        {
             braceStrategy.UpdateFoldings(manager, document);
-        }
+        else if (strategy is IndentFoldingStrategy indentStrategy)
+            indentStrategy.UpdateFoldings(manager, document);
     }
 
     private static IFoldingStrategy? GetStrategy(string language)
@@ -71,81 +69,143 @@ public class BraceFoldingStrategy : IFoldingStrategy
 {
     public void UpdateFoldings(FoldingManager manager, TextDocument document)
     {
-        var foldings = CreateNewFoldings(document);
-        manager.UpdateFoldings(foldings, -1);
+        manager.UpdateFoldings(BraceFoldingBuilder.Create(document), -1);
     }
+}
 
-    private static IEnumerable<NewFolding> CreateNewFoldings(TextDocument document)
+public static class BraceFoldingBuilder
+{
+    public static IEnumerable<NewFolding> Create(TextDocument document)
     {
         var foldings = new List<NewFolding>();
         var stack = new Stack<int>();
-        bool inString = false;
-        bool inLineComment = false;
-        bool inBlockComment = false;
-        char stringChar = '\0';
+        var scanner = new BraceTokenScanner(document);
 
         for (int i = 0; i < document.TextLength; i++)
         {
-            char c = document.GetCharAt(i);
-
-            if (inLineComment)
+            switch (scanner.Read(ref i))
             {
-                if (c == '\n') inLineComment = false;
-                continue;
-            }
-
-            if (inBlockComment)
-            {
-                if (c == '*' && i + 1 < document.TextLength && document.GetCharAt(i + 1) == '/')
-                {
-                    inBlockComment = false;
-                    i++;
-                }
-                continue;
-            }
-
-            if (inString)
-            {
-                if (c == '\\') { i++; continue; }
-                if (c == stringChar) inString = false;
-                continue;
-            }
-
-            if (c == '"' || c == '\'')
-            {
-                inString = true;
-                stringChar = c;
-                continue;
-            }
-
-            if (c == '/' && i + 1 < document.TextLength)
-            {
-                var next = document.GetCharAt(i + 1);
-                if (next == '/') { inLineComment = true; continue; }
-                if (next == '*') { inBlockComment = true; i++; continue; }
-            }
-
-            if (c == '{')
-            {
-                stack.Push(i);
-            }
-            else if (c == '}' && stack.Count > 0)
-            {
-                int openOffset = stack.Pop();
-                if (i - openOffset > 1)
-                {
-                    var line = document.GetLineByOffset(openOffset);
-                    var endLine = document.GetLineByOffset(i);
-                    if (endLine.LineNumber > line.LineNumber)
-                    {
-                        foldings.Add(new NewFolding(openOffset, i + 1));
-                    }
-                }
+                case BraceToken.Open:
+                    stack.Push(i);
+                    break;
+                case BraceToken.Close when stack.Count > 0:
+                    AddFoldIfMultiline(foldings, document, stack.Pop(), i);
+                    break;
             }
         }
 
         foldings.Sort((a, b) => a.StartOffset.CompareTo(b.StartOffset));
         return foldings;
+    }
+
+    private static void AddFoldIfMultiline(List<NewFolding> foldings, TextDocument document, int openOffset, int closeOffset)
+    {
+        if (closeOffset - openOffset <= 1)
+            return;
+
+        var startLine = document.GetLineByOffset(openOffset);
+        var endLine = document.GetLineByOffset(closeOffset);
+        if (endLine.LineNumber > startLine.LineNumber)
+            foldings.Add(new NewFolding(openOffset, closeOffset + 1));
+    }
+
+    private sealed class BraceTokenScanner
+    {
+        private readonly TextDocument _document;
+        private bool _inString;
+        private bool _inLineComment;
+        private bool _inBlockComment;
+        private char _stringChar;
+
+        public BraceTokenScanner(TextDocument document)
+        {
+            _document = document;
+        }
+
+        public BraceToken Read(ref int index)
+        {
+            var current = _document.GetCharAt(index);
+
+            if (_inLineComment)
+                return ReadLineComment(current);
+
+            if (_inBlockComment)
+                return ReadBlockComment(current, ref index);
+
+            if (_inString)
+                return ReadString(current, ref index);
+
+            if (current == '"' || current == '\'')
+            {
+                _inString = true;
+                _stringChar = current;
+                return BraceToken.None;
+            }
+
+            if (current == '/' && index + 1 < _document.TextLength)
+                return ReadCommentStart(ref index);
+
+            return current switch
+            {
+                '{' => BraceToken.Open,
+                '}' => BraceToken.Close,
+                _ => BraceToken.None
+            };
+        }
+
+        private BraceToken ReadLineComment(char current)
+        {
+            if (current == '\n')
+                _inLineComment = false;
+
+            return BraceToken.None;
+        }
+
+        private BraceToken ReadBlockComment(char current, ref int index)
+        {
+            if (current == '*' && index + 1 < _document.TextLength && _document.GetCharAt(index + 1) == '/')
+            {
+                _inBlockComment = false;
+                index++;
+            }
+
+            return BraceToken.None;
+        }
+
+        private BraceToken ReadString(char current, ref int index)
+        {
+            if (current == '\\')
+                index++;
+            else if (current == _stringChar)
+                _inString = false;
+
+            return BraceToken.None;
+        }
+
+        private BraceToken ReadCommentStart(ref int index)
+        {
+            var next = _document.GetCharAt(index + 1);
+            if (next == '/')
+            {
+                _inLineComment = true;
+                return BraceToken.None;
+            }
+
+            if (next == '*')
+            {
+                _inBlockComment = true;
+                index++;
+            }
+
+            return BraceToken.None;
+        }
+    }
+
+    private enum BraceToken
+    {
+        None,
+        Open,
+        Close
     }
 }
 
@@ -153,11 +213,13 @@ public class IndentFoldingStrategy : IFoldingStrategy
 {
     public void UpdateFoldings(FoldingManager manager, TextDocument document)
     {
-        var foldings = CreateNewFoldings(document);
-        manager.UpdateFoldings(foldings, -1);
+        manager.UpdateFoldings(IndentFoldingBuilder.Create(document), -1);
     }
+}
 
-    private static IEnumerable<NewFolding> CreateNewFoldings(TextDocument document)
+public static class IndentFoldingBuilder
+{
+    public static IEnumerable<NewFolding> Create(TextDocument document)
     {
         var foldings = new List<NewFolding>();
         var stack = new Stack<(int indent, int startOffset)>();
@@ -169,43 +231,63 @@ public class IndentFoldingStrategy : IFoldingStrategy
 
             if (string.IsNullOrWhiteSpace(text)) continue;
 
-            int indent = 0;
-            foreach (char c in text)
-            {
-                if (c == ' ') indent++;
-                else if (c == '\t') indent += 4;
-                else break;
-            }
+            var indent = CountIndent(text);
+            CloseCompletedScopes(foldings, document, stack, indent, lineNum);
 
-            while (stack.Count > 0 && stack.Peek().indent >= indent)
-            {
-                var (_, startOffset) = stack.Pop();
-                var prevLine = document.GetLineByOffset(startOffset);
-                if (lineNum - prevLine.LineNumber > 1)
-                {
-                    var prevLineObj = document.GetLineByNumber(lineNum - 1);
-                    foldings.Add(new NewFolding(startOffset, prevLineObj.EndOffset));
-                }
-            }
-
-            if (text.TrimEnd().EndsWith(':') || text.TrimEnd().EndsWith("def") || text.TrimEnd().EndsWith("class"))
-            {
+            if (IsFoldHeader(text))
                 stack.Push((indent, line.Offset));
-            }
         }
 
-        while (stack.Count > 0)
-        {
-            var (_, startOffset) = stack.Pop();
-            var startLine = document.GetLineByOffset(startOffset);
-            if (document.LineCount > startLine.LineNumber)
-            {
-                foldings.Add(new NewFolding(startOffset, document.GetLineByNumber(document.LineCount).EndOffset));
-            }
-        }
+        CloseRemainingScopes(foldings, document, stack);
 
         foldings.Sort((a, b) => a.StartOffset.CompareTo(b.StartOffset));
         return foldings;
+    }
+
+    private static int CountIndent(string text)
+    {
+        var indent = 0;
+        foreach (var c in text)
+        {
+            if (c == ' ') indent++;
+            else if (c == '\t') indent += 4;
+            else break;
+        }
+
+        return indent;
+    }
+
+    private static void CloseCompletedScopes(
+        List<NewFolding> foldings,
+        TextDocument document,
+        Stack<(int indent, int startOffset)> stack,
+        int indent,
+        int lineNumber)
+    {
+        while (stack.Count > 0 && stack.Peek().indent >= indent)
+            AddCompletedScope(foldings, document, stack.Pop().startOffset, lineNumber - 1);
+    }
+
+    private static void AddCompletedScope(List<NewFolding> foldings, TextDocument document, int startOffset, int endLineNumber)
+    {
+        var startLine = document.GetLineByOffset(startOffset);
+        if (endLineNumber > startLine.LineNumber)
+            foldings.Add(new NewFolding(startOffset, document.GetLineByNumber(endLineNumber).EndOffset));
+    }
+
+    private static bool IsFoldHeader(string text)
+    {
+        var trimmed = text.TrimEnd();
+        return trimmed.EndsWith(':') || trimmed.EndsWith("def") || trimmed.EndsWith("class");
+    }
+
+    private static void CloseRemainingScopes(
+        List<NewFolding> foldings,
+        TextDocument document,
+        Stack<(int indent, int startOffset)> stack)
+    {
+        while (stack.Count > 0)
+            AddCompletedScope(foldings, document, stack.Pop().startOffset, document.LineCount);
     }
 }
 

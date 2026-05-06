@@ -72,62 +72,63 @@ public static class BreadcrumbHelper
         new(new Regex(@"^\s*(?:function|func|fn|def|sub|proc)\s+(\w+)\s*[<(]", RegexOptions.Compiled), "function"),
     ];
 
+    private static readonly DeclarationPattern[] PythonPatterns =
+    [
+        new(new Regex(@"^(\s*)class\s+(\w+)", RegexOptions.Compiled), "class"),
+        new(new Regex(@"^(\s*)(?:async\s+)?def\s+(\w+)\s*\(", RegexOptions.Compiled), "def"),
+    ];
+
     private static List<BreadcrumbItem> GetBraceBreadcrumbs(string[] lines, int caretLine, DeclarationPattern[] patterns)
     {
-        // Stack of (BreadcrumbItem, braceDepthWhenDeclared)
         var scopeStack = new List<(BreadcrumbItem Item, int Depth)>();
-        int braceDepth = 0;
+        var braceDepth = 0;
 
-        for (int i = 0; i < caretLine; i++)
+        for (var i = 0; i < caretLine; i++)
         {
             var line = lines[i].TrimEnd('\r');
-
-            // Check for declarations before counting braces on this line
-            var match = TryMatchDeclaration(line, patterns);
-            if (match != null)
-            {
-                // Pop scopes that are at same or deeper depth (sibling or child replaced)
-                while (scopeStack.Count > 0 && scopeStack[^1].Depth >= braceDepth)
-                    scopeStack.RemoveAt(scopeStack.Count - 1);
-
-                scopeStack.Add((new BreadcrumbItem(match.Value.Name, match.Value.Kind, i + 1), braceDepth));
-            }
-
-            // Count braces (skip strings/comments simplistically)
-            bool inString = false;
-            char stringChar = '\0';
-            for (int c = 0; c < line.Length; c++)
-            {
-                char ch = line[c];
-                if (inString)
-                {
-                    if (ch == stringChar && (c == 0 || line[c - 1] != '\\'))
-                        inString = false;
-                    continue;
-                }
-                if (ch == '"' || ch == '\'')
-                {
-                    inString = true;
-                    stringChar = ch;
-                    continue;
-                }
-                // Skip line comments
-                if (ch == '/' && c + 1 < line.Length && line[c + 1] == '/')
-                    break;
-
-                if (ch == '{')
-                    braceDepth++;
-                else if (ch == '}')
-                {
-                    braceDepth--;
-                    // Pop scopes that have exited
-                    while (scopeStack.Count > 0 && scopeStack[^1].Depth >= braceDepth)
-                        scopeStack.RemoveAt(scopeStack.Count - 1);
-                }
-            }
+            AddBraceDeclarationScope(scopeStack, line, patterns, i + 1, braceDepth);
+            braceDepth = ApplyBraceDepth(line, braceDepth, scopeStack);
         }
 
         return scopeStack.Select(s => s.Item).ToList();
+    }
+
+    private static void AddBraceDeclarationScope(
+        List<(BreadcrumbItem Item, int Depth)> scopeStack,
+        string line,
+        DeclarationPattern[] patterns,
+        int lineNumber,
+        int braceDepth)
+    {
+        var match = TryMatchDeclaration(line, patterns);
+        if (match == null)
+            return;
+
+        RemoveScopesAtOrBelowDepth(scopeStack, braceDepth);
+        scopeStack.Add((new BreadcrumbItem(match.Value.Name, match.Value.Kind, lineNumber), braceDepth));
+    }
+
+    private static int ApplyBraceDepth(
+        string line,
+        int braceDepth,
+        List<(BreadcrumbItem Item, int Depth)> scopeStack)
+    {
+        var scanner = new BreadcrumbBraceScanner(line);
+        while (scanner.TryRead(out var token))
+        {
+            if (token == BreadcrumbBraceToken.Open)
+                braceDepth++;
+            else if (token == BreadcrumbBraceToken.Close)
+                RemoveScopesAtOrBelowDepth(scopeStack, --braceDepth);
+        }
+
+        return braceDepth;
+    }
+
+    private static void RemoveScopesAtOrBelowDepth(List<(BreadcrumbItem Item, int Depth)> scopeStack, int braceDepth)
+    {
+        while (scopeStack.Count > 0 && scopeStack[^1].Depth >= braceDepth)
+            scopeStack.RemoveAt(scopeStack.Count - 1);
     }
 
     private static (string Name, string Kind)? TryMatchDeclaration(string line, DeclarationPattern[] patterns)
@@ -149,38 +150,105 @@ public static class BreadcrumbHelper
 
     private static List<BreadcrumbItem> GetPythonBreadcrumbs(string[] lines, int caretLine)
     {
-        var pythonPatterns = new DeclarationPattern[]
-        {
-            new(new Regex(@"^(\s*)class\s+(\w+)", RegexOptions.Compiled), "class"),
-            new(new Regex(@"^(\s*)(?:async\s+)?def\s+(\w+)\s*\(", RegexOptions.Compiled), "def"),
-        };
-
-        // Stack of (BreadcrumbItem, indentLevel)
         var scopeStack = new List<(BreadcrumbItem Item, int Indent)>();
 
-        for (int i = 0; i < caretLine; i++)
+        for (var i = 0; i < caretLine; i++)
         {
             var line = lines[i].TrimEnd('\r');
             if (string.IsNullOrWhiteSpace(line)) continue;
 
-            foreach (var pattern in pythonPatterns)
-            {
-                var m = pattern.Regex.Match(line);
-                if (m.Success)
-                {
-                    int indent = m.Groups[1].Value.Length;
-                    string name = m.Groups[2].Value;
-
-                    // Pop scopes at same or deeper indent
-                    while (scopeStack.Count > 0 && scopeStack[^1].Indent >= indent)
-                        scopeStack.RemoveAt(scopeStack.Count - 1);
-
-                    scopeStack.Add((new BreadcrumbItem(name, pattern.Kind, i + 1), indent));
-                    break;
-                }
-            }
+            AddPythonDeclarationScope(scopeStack, line, i + 1);
         }
 
         return scopeStack.Select(s => s.Item).ToList();
+    }
+
+    private static void AddPythonDeclarationScope(
+        List<(BreadcrumbItem Item, int Indent)> scopeStack,
+        string line,
+        int lineNumber)
+    {
+        foreach (var pattern in PythonPatterns)
+        {
+            var match = pattern.Regex.Match(line);
+            if (!match.Success)
+                continue;
+
+            var indent = match.Groups[1].Value.Length;
+            while (scopeStack.Count > 0 && scopeStack[^1].Indent >= indent)
+                scopeStack.RemoveAt(scopeStack.Count - 1);
+
+            scopeStack.Add((new BreadcrumbItem(match.Groups[2].Value, pattern.Kind, lineNumber), indent));
+            return;
+        }
+    }
+
+    private sealed class BreadcrumbBraceScanner
+    {
+        private readonly string _line;
+        private int _index;
+        private bool _inString;
+        private char _stringChar;
+
+        public BreadcrumbBraceScanner(string line)
+        {
+            _line = line;
+        }
+
+        public bool TryRead(out BreadcrumbBraceToken token)
+        {
+            while (_index < _line.Length)
+            {
+                var current = _line[_index];
+                _index++;
+
+                if (_inString)
+                {
+                    UpdateStringState(current);
+                    continue;
+                }
+
+                if (StartsLineComment(current))
+                    break;
+
+                if (current == '"' || current == '\'')
+                {
+                    _inString = true;
+                    _stringChar = current;
+                    continue;
+                }
+
+                if (current == '{')
+                {
+                    token = BreadcrumbBraceToken.Open;
+                    return true;
+                }
+
+                if (current == '}')
+                {
+                    token = BreadcrumbBraceToken.Close;
+                    return true;
+                }
+            }
+
+            token = BreadcrumbBraceToken.None;
+            return false;
+        }
+
+        private void UpdateStringState(char current)
+        {
+            if (current == _stringChar && (_index < 2 || _line[_index - 2] != '\\'))
+                _inString = false;
+        }
+
+        private bool StartsLineComment(char current) =>
+            current == '/' && _index < _line.Length && _line[_index] == '/';
+    }
+
+    private enum BreadcrumbBraceToken
+    {
+        None,
+        Open,
+        Close
     }
 }

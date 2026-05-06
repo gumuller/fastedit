@@ -56,6 +56,19 @@ public partial class EditorHost : UserControl
     private Dictionary<int, Models.LineFilterResult> _filterCache = new();
     private bool _isFilterFoldingActive;
 
+    private static readonly IReadOnlyDictionary<MacroAction, Action<EditorHost, MacroStep, ITextToolsService?>> MacroStepHandlers =
+        new Dictionary<MacroAction, Action<EditorHost, MacroStep, ITextToolsService?>>
+        {
+            [MacroAction.TypeText] = static (host, step, _) => host.InsertMacroText(step.Parameter),
+            [MacroAction.DeleteBackward] = static (host, _, _) => host.DeleteMacroTextBackward(),
+            [MacroAction.DeleteForward] = static (host, _, _) => host.DeleteMacroTextForward(),
+            [MacroAction.NewLine] = static (host, _, _) => host.InsertMacroText(Environment.NewLine),
+            [MacroAction.DuplicateLine] = static (host, _, _) => host.OnDuplicateLineRequested(),
+            [MacroAction.MoveLineUp] = static (host, _, _) => host.OnMoveLineRequested(true),
+            [MacroAction.MoveLineDown] = static (host, _, _) => host.OnMoveLineRequested(false),
+            [MacroAction.TextTool] = static (host, step, _) => host.RunMacroTextTool(step.Parameter),
+        };
+
     public EditorHost()
     {
         InitializeComponent();
@@ -761,37 +774,32 @@ public partial class EditorHost : UserControl
 
     private void ExecuteMacroStep(MacroStep step, ITextToolsService? textTools)
     {
-        switch (step.Action)
-        {
-            case MacroAction.TypeText:
-                if (step.Parameter != null)
-                    TextEditor.Document.Insert(TextEditor.CaretOffset, step.Parameter);
-                break;
-            case MacroAction.DeleteBackward:
-                if (TextEditor.CaretOffset > 0)
-                    TextEditor.Document.Remove(TextEditor.CaretOffset - 1, 1);
-                break;
-            case MacroAction.DeleteForward:
-                if (TextEditor.CaretOffset < TextEditor.Document.TextLength)
-                    TextEditor.Document.Remove(TextEditor.CaretOffset, 1);
-                break;
-            case MacroAction.NewLine:
-                TextEditor.Document.Insert(TextEditor.CaretOffset, Environment.NewLine);
-                break;
-            case MacroAction.DuplicateLine:
-                OnDuplicateLineRequested();
-                break;
-            case MacroAction.MoveLineUp:
-                OnMoveLineRequested(true);
-                break;
-            case MacroAction.MoveLineDown:
-                OnMoveLineRequested(false);
-                break;
-            case MacroAction.TextTool:
-                if (step.Parameter != null && TextToolOperationRunner.TryParseLegacyName(step.Parameter, out var operation))
-                    OnTextToolRequested(operation);
-                break;
-        }
+        if (MacroStepHandlers.TryGetValue(step.Action, out var execute))
+            execute(this, step, textTools);
+    }
+
+    private void InsertMacroText(string? text)
+    {
+        if (text != null)
+            TextEditor.Document.Insert(TextEditor.CaretOffset, text);
+    }
+
+    private void DeleteMacroTextBackward()
+    {
+        if (TextEditor.CaretOffset > 0)
+            TextEditor.Document.Remove(TextEditor.CaretOffset - 1, 1);
+    }
+
+    private void DeleteMacroTextForward()
+    {
+        if (TextEditor.CaretOffset < TextEditor.Document.TextLength)
+            TextEditor.Document.Remove(TextEditor.CaretOffset, 1);
+    }
+
+    private void RunMacroTextTool(string? operationName)
+    {
+        if (operationName != null && TextToolOperationRunner.TryParseLegacyName(operationName, out var operation))
+            OnTextToolRequested(operation);
     }
 
     // --- Code Folding ---
@@ -861,78 +869,41 @@ public partial class EditorHost : UserControl
         if (_lineFilterService == null) return;
 
         if (_lineFilterService.ShowOnlyFilteredLines && _lineFilterService.HasActiveFilters)
-        {
-            // Enter filter folding mode: stop code folding, fold non-matching lines
-            _isFilterFoldingActive = true;
-            _foldingTimer?.Stop();
-
-            if (_foldingManager == null)
-                _foldingManager = FoldingHelper.Install(TextEditor, _currentVm?.SyntaxLanguage ?? "Text");
-
-            // If no language strategy exists (e.g. plain text), install a bare FoldingManager for filter folds
-            if (_foldingManager == null)
-                _foldingManager = ICSharpCode.AvalonEdit.Folding.FoldingManager.Install(TextEditor.TextArea);
-
-            var doc = TextEditor.Document;
-            if (doc == null) return;
-
-            var folds = new List<ICSharpCode.AvalonEdit.Folding.NewFolding>();
-            int foldStart = -1;
-            int foldStartLine = -1;
-
-            for (int i = 1; i <= doc.LineCount; i++)
-            {
-                bool isVisible = _filterCache.TryGetValue(i, out var result) && result.IsVisible;
-
-                if (!isVisible)
-                {
-                    if (foldStart < 0)
-                    {
-                        foldStart = doc.GetLineByNumber(i).Offset;
-                        foldStartLine = i;
-                    }
-                }
-                else if (foldStart >= 0)
-                {
-                    var prevLine = doc.GetLineByNumber(i - 1);
-                    int hiddenCount = i - foldStartLine;
-                    folds.Add(new ICSharpCode.AvalonEdit.Folding.NewFolding(foldStart, prevLine.EndOffset)
-                    {
-                        Name = $"[{hiddenCount} hidden line{(hiddenCount > 1 ? "s" : "")}]",
-                        DefaultClosed = true
-                    });
-                    foldStart = -1;
-                }
-            }
-
-            // Close final fold if document ends with non-matching lines
-            if (foldStart >= 0)
-            {
-                var lastLine = doc.GetLineByNumber(doc.LineCount);
-                int hiddenCount = doc.LineCount - foldStartLine + 1;
-                folds.Add(new ICSharpCode.AvalonEdit.Folding.NewFolding(foldStart, lastLine.EndOffset)
-                {
-                    Name = $"[{hiddenCount} hidden line{(hiddenCount > 1 ? "s" : "")}]",
-                    DefaultClosed = true
-                });
-            }
-
-            folds.Sort((a, b) => a.StartOffset.CompareTo(b.StartOffset));
-            _foldingManager.UpdateFoldings(folds, -1);
-        }
+            EnterFilterFoldingMode();
         else if (_isFilterFoldingActive)
-        {
-            // Exit filter folding mode: restore code folding
-            _isFilterFoldingActive = false;
-            UninstallFolding();
+            ExitFilterFoldingMode();
+    }
 
-            if (IsTextMode(_currentVm))
-            {
-                InstallFolding();
-                UpdateFoldings();
-            }
-            _foldingTimer?.Start();
+    private void EnterFilterFoldingMode()
+    {
+        _isFilterFoldingActive = true;
+        _foldingTimer?.Stop();
+        EnsureFilterFoldingManager();
+
+        var doc = TextEditor.Document;
+        if (doc == null || _foldingManager == null) return;
+
+        _foldingManager.UpdateFoldings(FilterFoldingBuilder.Create(doc, _filterCache), -1);
+    }
+
+    private void EnsureFilterFoldingManager()
+    {
+        _foldingManager ??= FoldingHelper.Install(TextEditor, _currentVm?.SyntaxLanguage ?? "Text");
+        _foldingManager ??= FoldingManager.Install(TextEditor.TextArea);
+    }
+
+    private void ExitFilterFoldingMode()
+    {
+        _isFilterFoldingActive = false;
+        UninstallFolding();
+
+        if (IsTextMode(_currentVm))
+        {
+            InstallFolding();
+            UpdateFoldings();
         }
+
+        _foldingTimer?.Start();
     }
 
     private void UpdateFilterMatchCount()
@@ -1308,96 +1279,112 @@ public partial class EditorHost : UserControl
     private void UpdateEditor(EditorTabViewModel vm)
     {
         if (IsBinaryMode(vm))
-        {
-            TextEditor.Visibility = Visibility.Collapsed;
-            HexEditor.Visibility = Visibility.Visible;
-            HexEditor.DataContext = vm;
-
-            Panel.SetZIndex(HexEditor, 1);
-            Panel.SetZIndex(TextEditor, 0);
-
-            UninstallFolding();
-            DocumentMap.DetachEditor();
-            _fileWatcher.StopWatching();
-        }
+            ShowBinaryEditor(vm);
         else if (!IsTextMode(vm))
-        {
-            TextEditor.Visibility = Visibility.Collapsed;
-            HexEditor.Visibility = Visibility.Collapsed;
-
-            Panel.SetZIndex(TextEditor, 0);
-            Panel.SetZIndex(HexEditor, 0);
-
-            UninstallFolding();
-            DocumentMap.DetachEditor();
-            _fileWatcher.StopWatching();
-        }
+            ShowNoEditor();
         else
-        {
-            HexEditor.Visibility = Visibility.Collapsed;
-            TextEditor.Visibility = Visibility.Visible;
+            ShowTextEditor(vm);
+    }
 
-            Panel.SetZIndex(TextEditor, 1);
-            Panel.SetZIndex(HexEditor, 0);
+    private void ShowBinaryEditor(EditorTabViewModel vm)
+    {
+        TextEditor.Visibility = Visibility.Collapsed;
+        HexEditor.Visibility = Visibility.Visible;
+        HexEditor.DataContext = vm;
 
-            TextEditor.Text = vm.Content;
+        Panel.SetZIndex(HexEditor, 1);
+        Panel.SetZIndex(TextEditor, 0);
+        DisableTextEditorFeatures();
+    }
 
-            // Detect indentation from content
-            var indentResult = IndentDetector.Detect(vm.Content);
-            TextEditor.Options.ConvertTabsToSpaces = !indentResult.UseTabs;
-            TextEditor.Options.IndentationSize = indentResult.IndentSize;
-            vm.IndentInfo = indentResult.UseTabs
-                ? "Tabs"
-                : $"Spaces: {indentResult.IndentSize}";
+    private void ShowNoEditor()
+    {
+        TextEditor.Visibility = Visibility.Collapsed;
+        HexEditor.Visibility = Visibility.Collapsed;
 
-            // Remove old handler to prevent duplicates
-            TextEditor.TextChanged -= TextEditor_TextChanged;
-            TextEditor.TextChanged += TextEditor_TextChanged;
+        Panel.SetZIndex(TextEditor, 0);
+        Panel.SetZIndex(HexEditor, 0);
+        DisableTextEditorFeatures();
+    }
 
-            var featureGate = EditorFeatureGatePolicy.Create(vm.Mode, vm.FileSize);
+    private void DisableTextEditorFeatures()
+    {
+        UninstallFolding();
+        DocumentMap.DetachEditor();
+        _fileWatcher.StopWatching();
+    }
 
-            TextEditor.SyntaxHighlighting = featureGate.SyntaxHighlightingEnabled
-                ? GetHighlightingForLanguage(vm.SyntaxLanguage)
-                : null;
+    private void ShowTextEditor(EditorTabViewModel vm)
+    {
+        HexEditor.Visibility = Visibility.Collapsed;
+        TextEditor.Visibility = Visibility.Visible;
 
-            // Apply theme syntax colors on top of default highlighting
-            if (featureGate.SyntaxHighlightingEnabled && _themeService?.CurrentTheme != null)
-            {
-                ApplySyntaxThemeColors(_themeService.CurrentTheme);
-            }
+        Panel.SetZIndex(TextEditor, 1);
+        Panel.SetZIndex(HexEditor, 0);
 
-            // Track caret position - remove old handler first
-            TextEditor.TextArea.Caret.PositionChanged -= Caret_PositionChanged;
-            TextEditor.TextArea.Caret.PositionChanged += Caret_PositionChanged;
+        TextEditor.Text = vm.Content;
+        ApplyIndentSettings(vm);
+        AttachTextEditorHandlers();
 
-            ApplyEditorThemeBrushes();
-            UpdateIndentGuides(_mainViewModel?.IsIndentGuidesEnabled == true);
+        var featureGate = EditorFeatureGatePolicy.Create(vm.Mode, vm.FileSize);
+        ApplyTextFeatureGate(vm, featureGate);
+        UpdateAutoReloadForTab(vm);
+        _bookmarks.Clear();
+    }
 
-            // Install code folding
-            if (_mainViewModel?.IsFoldingEnabled == true && featureGate.FoldingEnabled)
-                InstallFolding();
+    private void ApplyIndentSettings(EditorTabViewModel vm)
+    {
+        var indentResult = IndentDetector.Detect(vm.Content);
+        TextEditor.Options.ConvertTabsToSpaces = !indentResult.UseTabs;
+        TextEditor.Options.IndentationSize = indentResult.IndentSize;
+        vm.IndentInfo = indentResult.UseTabs ? "Tabs" : $"Spaces: {indentResult.IndentSize}";
+    }
 
-            // Minimap
-            if (_mainViewModel?.IsMinimapVisible == true && featureGate.MinimapEnabled)
-                UpdateMinimapVisibility(true);
-            else
-                UpdateMinimapVisibility(false);
+    private void AttachTextEditorHandlers()
+    {
+        TextEditor.TextChanged -= TextEditor_TextChanged;
+        TextEditor.TextChanged += TextEditor_TextChanged;
+        TextEditor.TextArea.Caret.PositionChanged -= Caret_PositionChanged;
+        TextEditor.TextArea.Caret.PositionChanged += Caret_PositionChanged;
+    }
 
-            if (!featureGate.OccurrenceHighlightingEnabled)
-                _occurrenceRenderer?.Clear();
+    private void ApplyTextFeatureGate(EditorTabViewModel vm, EditorFeatureGate featureGate)
+    {
+        TextEditor.SyntaxHighlighting = featureGate.SyntaxHighlightingEnabled
+            ? GetHighlightingForLanguage(vm.SyntaxLanguage)
+            : null;
 
-            if (!featureGate.BracketMatchingEnabled)
-                _bracketRenderer?.SetHighlight(null);
+        if (featureGate.SyntaxHighlightingEnabled && _themeService?.CurrentTheme != null)
+            ApplySyntaxThemeColors(_themeService.CurrentTheme);
 
-            // Auto-reload
-            if (_mainViewModel?.IsAutoReloadEnabled == true && !string.IsNullOrEmpty(vm.FilePath))
-                _fileWatcher.StartWatching(vm.FilePath);
-            else
-                _fileWatcher.StopWatching();
+        ApplyEditorThemeBrushes();
+        UpdateIndentGuides(_mainViewModel?.IsIndentGuidesEnabled == true);
+        UpdateCodeFolding(featureGate);
+        UpdateMinimapVisibility(_mainViewModel?.IsMinimapVisible == true && featureGate.MinimapEnabled);
+        ClearDisabledFeatureRenderers(featureGate);
+    }
 
-            // Clear bookmarks on tab switch
-            _bookmarks.Clear();
-        }
+    private void UpdateCodeFolding(EditorFeatureGate featureGate)
+    {
+        if (_mainViewModel?.IsFoldingEnabled == true && featureGate.FoldingEnabled)
+            InstallFolding();
+    }
+
+    private void ClearDisabledFeatureRenderers(EditorFeatureGate featureGate)
+    {
+        if (!featureGate.OccurrenceHighlightingEnabled)
+            _occurrenceRenderer?.Clear();
+
+        if (!featureGate.BracketMatchingEnabled)
+            _bracketRenderer?.SetHighlight(null);
+    }
+
+    private void UpdateAutoReloadForTab(EditorTabViewModel vm)
+    {
+        if (_mainViewModel?.IsAutoReloadEnabled == true && !string.IsNullOrEmpty(vm.FilePath))
+            _fileWatcher.StartWatching(vm.FilePath);
+        else
+            _fileWatcher.StopWatching();
     }
 
     private void TextEditor_TextChanged(object? sender, EventArgs e)
@@ -1595,34 +1582,7 @@ public partial class EditorHost : UserControl
 
     private static IHighlightingDefinition? GetHighlightingForLanguage(string language)
     {
-        if (string.IsNullOrEmpty(language))
-            return null;
-
-        return language switch
-        {
-            "C#" => HighlightingManager.Instance.GetDefinition("C#"),
-            "JavaScript" => HighlightingManager.Instance.GetDefinition("JavaScript"),
-            "TypeScript" => HighlightingManager.Instance.GetDefinition("JavaScript"),
-            "Python" => HighlightingManager.Instance.GetDefinition("Python"),
-            "Java" => HighlightingManager.Instance.GetDefinition("Java"),
-            "C++" => HighlightingManager.Instance.GetDefinition("C++"),
-            "C" => HighlightingManager.Instance.GetDefinition("C++"),
-            "HTML" => HighlightingManager.Instance.GetDefinition("HTML"),
-            "CSS" => HighlightingManager.Instance.GetDefinition("CSS"),
-            "XML" => HighlightingManager.Instance.GetDefinition("XML"),
-            "JSON" => HighlightingManager.Instance.GetDefinition("Json"),
-            "SQL" => HighlightingManager.Instance.GetDefinition("TSQL"),
-            "PowerShell" => HighlightingManager.Instance.GetDefinition("PowerShell"),
-            "Markdown" => HighlightingManager.Instance.GetDefinition("MarkDown"),
-            // Custom .xshd definitions
-            "YAML" => HighlightingManager.Instance.GetDefinition("YAML"),
-            "Shell" => HighlightingManager.Instance.GetDefinition("Bash"),
-            "Dockerfile" => HighlightingManager.Instance.GetDefinition("Dockerfile"),
-            "Rust" => HighlightingManager.Instance.GetDefinition("Rust"),
-            "Go" => HighlightingManager.Instance.GetDefinition("Go"),
-            "TOML" => HighlightingManager.Instance.GetDefinition("TOML"),
-            "INI" => HighlightingManager.Instance.GetDefinition("INI"),
-            _ => null
-        };
+        var definitionName = HighlightingDefinitionNameResolver.Resolve(language);
+        return definitionName == null ? null : HighlightingManager.Instance.GetDefinition(definitionName);
     }
 }

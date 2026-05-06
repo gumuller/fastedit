@@ -426,42 +426,19 @@ public partial class LargeFileViewer : UserControl
     {
         if (_doc == null || _filters == null) return;
         var activeFilters = LargeFileFilterPolicy.GetActiveFilters(_filters);
-        if (!LargeFileFilterPolicy.HasNavigationFilter(activeFilters)) return;
-
-        if (_viewport.FilteredPhysicalLines != null &&
-            LargeFileFilterPolicy.TryFindAdjacentMatch(
-                _viewport.FilteredPhysicalLines,
-                Math.Max(1, ResolvePhysicalLine(_viewport.TopLine)),
-                forward,
-                out var filteredTarget))
-        {
-            GoToLine(filteredTarget);
-            return;
-        }
-
-        long total = _doc.TotalLines;
-        long start = _viewport.IsFiltered
+        var currentLine = _viewport.IsFiltered
             ? Math.Max(1, ResolvePhysicalLine(_viewport.TopLine))
             : _viewport.TopLine;
-        long end = forward ? total : 1;
-        int step = forward ? 1 : -1;
 
-        // Scan from just after current top line, wrap around if needed.
-        for (int pass = 0; pass < 2; pass++)
-        {
-            long from = pass == 0 ? start + step : (forward ? 1 : total);
-            long to = pass == 0 ? end : start;
-
-            for (long ln = from; forward ? ln <= to : ln >= to; ln += step)
-            {
-                var text = _doc.GetLine(ln);
-                if (LargeFileFilterPolicy.MatchesNavigationFilter(text, activeFilters))
-                {
-                    GoToLine(ln);
-                    return;
-                }
-            }
-        }
+        if (LargeFileFilterPolicy.TryFindNavigationTarget(
+                _doc.TotalLines,
+                currentLine,
+                _viewport.FilteredPhysicalLines,
+                activeFilters,
+                forward,
+                _doc.GetLine,
+                out var targetLine))
+            GoToLine(targetLine);
     }
 
     // Filter integration --------------------------------------------------
