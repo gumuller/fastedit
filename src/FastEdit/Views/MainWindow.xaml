@@ -91,10 +91,13 @@
                     <DataTemplate>
                         <Border x:Name="TabBorder"
                                 Background="Transparent"
-                                BorderThickness="0,0,1,0"
-                                BorderBrush="{DynamicResource TabBorderBrush}"
+                                BorderThickness="1,1,1,0"
+                                BorderBrush="Transparent"
+                                CornerRadius="8,8,0,0"
+                                Margin="2,3,0,0"
                                 Padding="12,6"
                                 Cursor="Hand"
+                                SnapsToDevicePixels="True"
                                 MouseLeftButtonDown="TabHeader_MouseLeftButtonDown"
                                 MouseRightButtonUp="TabHeader_MouseRightButtonUp"
                                 MouseMove="TabHeader_MouseMove"
@@ -132,8 +135,7 @@
                                     </MultiBinding>
                                 </DataTrigger.Binding>
                                 <Setter TargetName="TabBorder" Property="Background" Value="{DynamicResource TabActiveBackgroundBrush}"/>
-                                <Setter TargetName="TabBorder" Property="BorderThickness" Value="0,2,1,0"/>
-                                <Setter TargetName="TabBorder" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                                <Setter TargetName="TabBorder" Property="BorderBrush" Value="{DynamicResource TabBorderBrush}"/>
                             </DataTrigger>
                         </DataTemplate.Triggers>
                     </DataTemplate>

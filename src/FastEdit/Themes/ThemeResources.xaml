@@ -427,7 +427,7 @@
                             <Setter TargetName="Border" Property="Background" Value="{DynamicResource TabActiveBackgroundBrush}"/>
                             <Setter Property="Foreground" Value="{DynamicResource TabActiveForegroundBrush}"/>
                             <Setter TargetName="Border" Property="BorderThickness" Value="0,2,1,0"/>
-                            <Setter TargetName="Border" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                            <Setter TargetName="Border" Property="BorderBrush" Value="{DynamicResource TabBorderBrush}"/>
                         </Trigger>
                         <Trigger Property="IsMouseOver" Value="True">
                             <Setter TargetName="Border" Property="Background" Value="{DynamicResource MenuHoverBackgroundBrush}"/>

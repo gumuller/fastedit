@@ -189,12 +189,17 @@ public partial class CommandRunnerPanel : UserControl
             {
                 Child = panel,
                 Padding = new Thickness(8, 4, 8, 4),
+                Margin = new Thickness(2, 2, 0, 0),
+                CornerRadius = new CornerRadius(7, 7, 0, 0),
+                SnapsToDevicePixels = true,
                 Cursor = Cursors.Hand,
                 Background = isActive
                     ? ((FindResource("EditorBackgroundBrush") as Brush) ?? Brushes.Black)
                     : Brushes.Transparent,
-                BorderThickness = isActive ? new Thickness(0, 2, 0, 0) : new Thickness(0),
-                BorderBrush = isActive ? ((FindResource("AccentBrush") as Brush) ?? Brushes.Cyan) : null,
+                BorderThickness = new Thickness(1, 1, 1, 0),
+                BorderBrush = isActive
+                    ? ((FindResource("TabBorderBrush") as Brush) ?? Brushes.DimGray)
+                    : Brushes.Transparent,
                 Tag = tab
             };
             border.MouseLeftButtonDown += TabBorder_Click;
