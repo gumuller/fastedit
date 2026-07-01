@@ -72,7 +72,7 @@
     <SolidColorBrush x:Key="SuccessBrush" Color="#89d185"/>
 
     <!-- Menu colors -->
-    <SolidColorBrush x:Key="MenuBackgroundBrush" Color="#252526"/>
+    <SolidColorBrush x:Key="MenuBackgroundBrush" Color="#1e1e1e"/>
     <SolidColorBrush x:Key="MenuForegroundBrush" Color="#d4d4d4"/>
     <SolidColorBrush x:Key="MenuHoverBackgroundBrush" Color="#2a2d2e"/>
     <SolidColorBrush x:Key="MenuBorderBrush" Color="#3c3c3c"/>

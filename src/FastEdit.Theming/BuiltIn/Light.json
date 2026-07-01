@@ -24,7 +24,7 @@
     "treeViewItemHover": "#e8e8e8",
     "treeViewItemSelected": "#cce8ff",
     "tabBackground": "#ececec",
-    "tabActiveBackground": "#fafafa",
+    "tabActiveBackground": "#e3e3e3",
     "tabForeground": "#6b6b6b",
     "tabActiveForeground": "#333333",
     "tabBorder": "#e0e0e0",

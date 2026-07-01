@@ -125,8 +125,8 @@ public class ThemeService : IThemeService
         resources["WarningBrush"] = CreateBrush(colors.WarningColor);
         resources["SuccessBrush"] = CreateBrush(colors.SuccessColor);
 
-        // Menu colors (derived from panel colors)
-        resources["MenuBackgroundBrush"] = CreateBrush(colors.PanelBackground);
+        // Menu colors follow the selected tab surface so the top chrome reads as one band.
+        resources["MenuBackgroundBrush"] = CreateBrush(colors.TabActiveBackground);
         resources["MenuForegroundBrush"] = CreateBrush(colors.WindowForeground);
         resources["MenuHoverBackgroundBrush"] = CreateBrush(colors.TreeViewItemHover);
         resources["MenuBorderBrush"] = CreateBrush(colors.PanelBorder);
