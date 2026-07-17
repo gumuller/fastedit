@@ -110,7 +110,8 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     public Encoding FileEncoding => _fileEncoding;
     public bool HasBom => _hasBom;
     public string AutoSaveIdentity { get; } = Guid.NewGuid().ToString("N");
-    public long ChangeVersion { get; private set; }
+    public long UserMutationVersion { get; private set; }
+    public long ChangeVersion => UserMutationVersion;
 
     public EditorTabViewModel(IFileService fileService, IFileSystemService fileSystemService, IDialogService dialogService)
     {
@@ -210,7 +211,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
                 return false; // User cancelled
         }
 
-        var changeVersion = ChangeVersion;
+        var changeVersion = UserMutationVersion;
         var content = Content;
         await _fileService.WriteFileWithEncodingAsync(savePath, content, _fileEncoding, _hasBom);
 
@@ -218,7 +219,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         FilePath = savePath;
         FileName = Path.GetFileName(savePath);
         SyntaxLanguage = Mode == FileOpenMode.Text ? SyntaxLanguageResolver.Resolve(savePath) : string.Empty;
-        IsModified = ChangeVersion != changeVersion;
+        IsModified = UserMutationVersion != changeVersion;
         return !IsModified;
     }
 
@@ -263,10 +264,10 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         }
         else
         {
-            var changeVersion = ChangeVersion;
+            var changeVersion = UserMutationVersion;
             var content = Content;
             await _fileService.WriteFileWithEncodingAsync(savePath, content, _fileEncoding, _hasBom);
-            IsModified = ChangeVersion != changeVersion;
+            IsModified = UserMutationVersion != changeVersion;
         }
 
         FilePath = savePath;
@@ -328,8 +329,8 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
 
     private void OnByteBufferModificationsChanged(object? sender, EventArgs e)
     {
-        if (!_isApplyingBinaryBaseline)
-            ChangeVersion++;
+        if (!_isApplyingBinaryBaseline && _byteBuffer?.HasModifications == true)
+            UserMutationVersion++;
         IsModified = _byteBuffer?.HasModifications == true;
     }
 
@@ -350,7 +351,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     {
         if (!_isSettingContentBaseline)
         {
-            ChangeVersion++;
+            UserMutationVersion++;
             IsModified = true;
         }
     }

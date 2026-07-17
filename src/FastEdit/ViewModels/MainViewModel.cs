@@ -1,8 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
-using System.Security.Cryptography;
-using System.Text;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using FastEdit.Helpers;
@@ -164,10 +162,11 @@ public partial class MainViewModel : ObservableObject
     {
         filePath ??= _dialogService.ShowOpenFileDialog(filter: EditorTabViewModel.FileDialogFilters);
         if (string.IsNullOrEmpty(filePath)) return;
+        filePath = NormalizeFilePath(filePath);
 
-        // Check if already open
         var existingTab = Tabs.FirstOrDefault(t =>
-            string.Equals(t.FilePath, filePath, StringComparison.Ordinal));
+            !string.IsNullOrEmpty(t.FilePath) &&
+            HasSameOpenIdentity(t.FilePath, filePath));
         if (existingTab != null)
         {
             SelectedTab = existingTab;
@@ -710,7 +709,7 @@ public partial class MainViewModel : ObservableObject
         if (!await ConfirmExitAsync())
             return;
 
-        var workspaceSnapshot = Tabs.ToDictionary(tab => tab, tab => tab.ChangeVersion);
+        var workspaceSnapshot = Tabs.ToDictionary(tab => tab, tab => tab.UserMutationVersion);
         try
         {
             var replacementTabs = await StageSessionTabsAsync(session);
@@ -736,7 +735,7 @@ public partial class MainViewModel : ObservableObject
         return Tabs.Count != workspaceSnapshot.Count ||
             Tabs.Any(tab =>
                 !workspaceSnapshot.TryGetValue(tab, out var changeVersion) ||
-                tab.ChangeVersion != changeVersion);
+                tab.UserMutationVersion != changeVersion);
     }
 
     [RelayCommand]
@@ -1003,8 +1002,13 @@ public partial class MainViewModel : ObservableObject
         Tabs.Add(tab);
     }
 
-    private bool IsFileAlreadyOpen(string filePath) =>
-        Tabs.Any(t => string.Equals(t.FilePath, filePath, StringComparison.Ordinal));
+    private bool IsFileAlreadyOpen(string filePath)
+    {
+        var normalizedPath = NormalizeFilePath(filePath);
+        return Tabs.Any(t =>
+            !string.IsNullOrEmpty(t.FilePath) &&
+            HasSameOpenIdentity(t.FilePath, normalizedPath));
+    }
 
     private void SelectRestoredActiveTab()
     {
@@ -1172,7 +1176,7 @@ public partial class MainViewModel : ObservableObject
 
         if (result == Services.Interfaces.DialogResult.Yes)
         {
-            var approvedVersions = Tabs.ToDictionary(tab => tab, tab => tab.ChangeVersion);
+            var approvedVersions = Tabs.ToDictionary(tab => tab, tab => tab.UserMutationVersion);
             foreach (var tab in unsavedTabs)
             {
                 try
@@ -1205,14 +1209,10 @@ public partial class MainViewModel : ObservableObject
         {
             if (!tab.IsModified && !string.IsNullOrEmpty(tab.FilePath)) continue;
 
-            var id = string.IsNullOrEmpty(tab.FilePath)
-                ? $"untitled-{tab.AutoSaveIdentity}"
-                : CreateSavedFileAutoSaveId(tab.FilePath, tab.AutoSaveIdentity);
-
             entries.Add(new AutoSaveEntry(
-                id,
+                $"tab-{tab.AutoSaveIdentity}",
                 tab.FileName,
-                tab.FilePath,
+                string.IsNullOrEmpty(tab.FilePath) ? null : NormalizeFilePath(tab.FilePath),
                 tab.Content ?? "",
                 string.IsNullOrEmpty(tab.FilePath),
                 tab.CursorOffset,
@@ -1222,13 +1222,15 @@ public partial class MainViewModel : ObservableObject
         return entries;
     }
 
-    internal static string CreateSavedFileAutoSaveId(string filePath, string tabIdentity)
-    {
-        var normalizedPath = Path.GetFullPath(filePath)
+    internal static string NormalizeFilePath(string filePath) =>
+        Path.GetFullPath(filePath)
             .Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
-        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(normalizedPath));
-        return $"file-{Convert.ToHexString(hash).ToLowerInvariant()}-{tabIdentity}";
-    }
+
+    internal static bool HasSameOpenIdentity(string firstPath, string secondPath) =>
+        string.Equals(
+            NormalizeFilePath(firstPath),
+            NormalizeFilePath(secondPath),
+            StringComparison.Ordinal);
 
     public EditorTabViewModel RecoverTab(AutoSaveEntry entry)
     {

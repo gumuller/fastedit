@@ -557,6 +557,38 @@ public class MainViewModelTests
     }
 
     [Fact]
+    public async Task ConfirmExit_NoThenShutdownSession_ExcludesOnlyDiscardedUntitledContent()
+    {
+        var discarded = CreateMockTab("Untitled-discarded");
+        var retained = CreateMockTab("Untitled-retained");
+        _tabFactory.SetupSequence(f => f.CreateUntitled(null))
+            .Returns(discarded)
+            .Returns(retained);
+        _sut.NewFileCommand.Execute(null);
+        _sut.NewFileCommand.Execute(null);
+        discarded.Content = "discard me";
+        retained.SetContentBaseline("restore me", isModified: false);
+        _dialogService.Setup(d => d.ShowMessage(
+                It.IsAny<string>(), It.IsAny<string>(),
+                DialogButtons.YesNoCancel, DialogIcon.Warning))
+            .Returns(Services.Interfaces.DialogResult.No);
+
+        Assert.True(await _sut.ConfirmExitAsync(trackDiscardedUntitledContent: true));
+        _sut.SaveSession();
+
+        _settingsService.VerifySet(s => s.OpenFiles = It.Is<List<SessionFile>>(files =>
+            files.Count == 1 &&
+            files[0].FilePath == retained.FileName &&
+            files[0].IsUntitled));
+        _fileSystemService.Verify(
+            f => f.WriteAllTextAtomic(It.IsAny<string>(), "discard me"),
+            Times.Never);
+        _fileSystemService.Verify(
+            f => f.WriteAllTextAtomic(It.IsAny<string>(), "restore me"),
+            Times.Once);
+    }
+
+    [Fact]
     public async Task ConfirmExit_EditDuringSave_ReturnsFalse()
     {
         var tab = CreateMockTab("test.txt", @"C:\test.txt");
@@ -593,30 +625,32 @@ public class MainViewModelTests
     }
 
     [Fact]
-    public async Task ConfirmExit_BinarySaveBaselineTransition_ReturnsTrue()
+    public async Task ConfirmExit_SuccessfulBinarySaveDoesNotLookLikeConcurrentEdit()
     {
-        var tempFile = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.bin");
-        var tab = CreateMockTab();
+        var tempFile = Path.GetTempFileName();
+        EditorTabViewModel? tab = null;
         try
         {
-            File.WriteAllBytes(tempFile, new byte[] { 0, 1, 0, 2, 0, 3 });
+            await File.WriteAllBytesAsync(
+                tempFile,
+                new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A });
+            tab = CreateMockTab(Path.GetFileName(tempFile), tempFile);
             await tab.LoadFileAsync(tempFile);
-            tab.ByteBuffer!.SetByte(0, 9);
+            tab.ByteBuffer!.SetByte(7, 0x0B);
             _sut.Tabs.Add(tab);
             _sut.SelectedTab = tab;
             _dialogService.Setup(d => d.ShowMessage(
                     It.IsAny<string>(), It.IsAny<string>(),
                     DialogButtons.YesNoCancel, DialogIcon.Warning))
-                .Returns(Services.Interfaces.DialogResult.Yes);
+                    .Returns(Services.Interfaces.DialogResult.Yes);
 
-            var canExit = await _sut.ConfirmExitAsync();
-
-            Assert.True(canExit);
+            Assert.True(await _sut.ConfirmExitAsync());
             Assert.False(tab.IsModified);
+            Assert.Equal(0x0B, (await File.ReadAllBytesAsync(tempFile))[7]);
         }
         finally
         {
-            tab.Dispose();
+            tab?.Dispose();
             File.Delete(tempFile);
         }
     }
@@ -923,44 +957,36 @@ public class MainViewModelTests
     }
 
     [Fact]
-    public void AutoSaveIds_SavedPathsAreFullPathHashes()
+    public void OpenFileIdentity_NormalizesPathsButPreservesCaseVariants()
     {
-        const string firstIdentity = "11111111111111111111111111111111";
-        const string secondIdentity = "22222222222222222222222222222222";
-        var first = MainViewModel.CreateSavedFileAutoSaveId(@"C:\Users\alice\one.txt", firstIdentity);
-        var second = MainViewModel.CreateSavedFileAutoSaveId(@"C:\Users\alice\two.txt", firstIdentity);
-        var shortPath = MainViewModel.CreateSavedFileAutoSaveId(@"C:\a", firstIdentity);
-        var samePathOtherTab = MainViewModel.CreateSavedFileAutoSaveId(
-            @"C:\Users\alice\one.txt",
-            secondIdentity);
-        var caseVariant = MainViewModel.CreateSavedFileAutoSaveId(
-            @"c:\users\ALICE\one.txt",
-            firstIdentity);
-
-        Assert.NotEqual(first, second);
-        Assert.NotEqual(first, samePathOtherTab);
-        Assert.NotEqual(first, caseVariant);
-        Assert.StartsWith("file-", shortPath);
-        Assert.Equal(102, shortPath.Length);
+        Assert.True(MainViewModel.HasSameOpenIdentity(
+            @".\folder\..\file.txt",
+            @".\file.txt"));
+        Assert.False(MainViewModel.HasSameOpenIdentity(
+            @"C:\CaseSensitive\File.txt",
+            @"C:\CaseSensitive\file.txt"));
     }
 
     [Fact]
-    public void AutoSaveIds_ConcurrentSavedTabsAreUniqueAndStable()
+    public void AutoSaveIds_SavedCaseVariantsUseStableCollisionFreeTabIdentity()
     {
-        var first = CreateMockTab("first.txt", @"C:\same.txt");
-        var second = CreateMockTab("second.txt", @"C:\same.txt");
-        first.Content = "first";
-        second.Content = "second";
+        var first = CreateMockTab("File.txt", @"C:\CaseSensitive\File.txt", isModified: true);
+        var second = CreateMockTab("file.txt", @"C:\CaseSensitive\file.txt", isModified: true);
         _sut.Tabs.Add(first);
         _sut.Tabs.Add(second);
 
-        var before = _sut.GetAutoSaveEntries().ToDictionary(entry => entry.Content, entry => entry.Id);
-        _sut.Tabs.Move(0, 1);
-        var after = _sut.GetAutoSaveEntries().ToDictionary(entry => entry.Content, entry => entry.Id);
+        var entriesBefore = _sut.GetAutoSaveEntries();
+        var entriesAfter = _sut.GetAutoSaveEntries();
 
-        Assert.NotEqual(before["first"], before["second"]);
-        Assert.Equal(before["first"], after["first"]);
-        Assert.Equal(before["second"], after["second"]);
+        Assert.Equal(2, entriesBefore.Count);
+        Assert.Equal(2, entriesBefore.Select(entry => entry.Id).Distinct().Count());
+        Assert.Equal(
+            entriesBefore.Select(entry => entry.Id),
+            entriesAfter.Select(entry => entry.Id));
+        Assert.Contains(entriesBefore, entry =>
+            entry.FilePath == MainViewModel.NormalizeFilePath(first.FilePath));
+        Assert.Contains(entriesBefore, entry =>
+            entry.FilePath == MainViewModel.NormalizeFilePath(second.FilePath));
     }
 
     [Fact]

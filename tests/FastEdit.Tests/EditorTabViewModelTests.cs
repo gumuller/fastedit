@@ -148,6 +148,32 @@ public class EditorTabViewModelTests
         Assert.Equal("newer edit", sut.Content);
     }
 
+    [Fact]
+    public async Task Save_BinaryStateNotificationDoesNotIncrementUserMutationVersion()
+    {
+        var sut = CreateSut();
+        var tempFile = Path.GetTempFileName();
+        try
+        {
+            await File.WriteAllBytesAsync(
+                tempFile,
+                new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A });
+            await sut.LoadFileAsync(tempFile);
+            sut.ByteBuffer!.SetByte(7, 0x0B);
+            var mutationVersion = sut.UserMutationVersion;
+
+            await sut.SaveCommand.ExecuteAsync(null);
+
+            Assert.Equal(mutationVersion, sut.UserMutationVersion);
+            Assert.False(sut.IsModified);
+        }
+        finally
+        {
+            sut.Dispose();
+            File.Delete(tempFile);
+        }
+    }
+
     // --- SaveAs ---
 
     [Fact]

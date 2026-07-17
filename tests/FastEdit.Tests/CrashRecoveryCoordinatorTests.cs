@@ -1,4 +1,3 @@
-using System.IO;
 using FastEdit.Infrastructure;
 using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
@@ -17,13 +16,11 @@ public class CrashRecoveryCoordinatorTests
         var operations = new List<string>();
         autoSave.Setup(service => service.GetRecoveryEntries())
             .Returns(new RecoveryEntriesResult(true, new[] { source }));
-        autoSave.Setup(service => service.SaveNow(It.IsAny<IEnumerable<AutoSaveEntry>>()))
-            .Callback(() => operations.Add("persist"));
-        autoSave.Setup(service => service.RecordRecoveredEntries(new[] { source.Id }))
-            .Callback(() => operations.Add("resolve"))
-            .Returns(true);
-        autoSave.Setup(service => service.ClearRecoveryFiles())
-            .Callback(() => operations.Add("clear"))
+        autoSave.Setup(service => service.CompleteRecovery(
+                It.IsAny<IEnumerable<AutoSaveEntry>>(),
+                It.IsAny<IEnumerable<string>>(),
+                true))
+            .Callback(() => operations.Add("complete"))
             .Returns(true);
 
         var result = CrashRecoveryCoordinator.Recover(
@@ -32,9 +29,12 @@ public class CrashRecoveryCoordinatorTests
             () => new[] { replacement });
 
         Assert.True(result.Success);
-        Assert.Equal(new[] { "persist", "resolve", "clear" }, operations);
-        autoSave.Verify(service => service.SaveNow(
-            It.Is<IEnumerable<AutoSaveEntry>>(entries => entries.Single().Id == replacement.Id)),
+        Assert.Equal(new[] { "complete" }, operations);
+        autoSave.Verify(service => service.CompleteRecovery(
+                It.Is<IEnumerable<AutoSaveEntry>>(entries =>
+                    entries.Single().Id == replacement.Id),
+                It.Is<IEnumerable<string>>(ids => ids.Single() == source.Id),
+                true),
             Times.Once);
     }
 
@@ -45,8 +45,11 @@ public class CrashRecoveryCoordinatorTests
         var source = new AutoSaveEntry("source", "recovered.txt", null, "recovered", true);
         autoSave.Setup(service => service.GetRecoveryEntries())
             .Returns(new RecoveryEntriesResult(true, new[] { source }));
-        autoSave.Setup(service => service.SaveNow(It.IsAny<IEnumerable<AutoSaveEntry>>()))
-            .Throws(new IOException("disk full"));
+        autoSave.Setup(service => service.CompleteRecovery(
+                It.IsAny<IEnumerable<AutoSaveEntry>>(),
+                It.IsAny<IEnumerable<string>>(),
+                true))
+            .Returns(false);
 
         var result = CrashRecoveryCoordinator.Recover(
             autoSave.Object,
@@ -55,9 +58,9 @@ public class CrashRecoveryCoordinatorTests
 
         Assert.False(result.Success);
         Assert.Contains("could not be persisted", result.FailureMessage);
-        autoSave.Verify(
-            service => service.RecordRecoveredEntries(It.IsAny<IEnumerable<string>>()),
-            Times.Never);
-        autoSave.Verify(service => service.ClearRecoveryFiles(), Times.Never);
+        autoSave.Verify(service => service.CompleteRecovery(
+            It.IsAny<IEnumerable<AutoSaveEntry>>(),
+            It.IsAny<IEnumerable<string>>(),
+            true), Times.Once);
     }
 }

@@ -27,7 +27,20 @@ public class FileSystemService : IFileSystemService
         var tempPath = Path.Combine(directory ?? string.Empty, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
         try
         {
-            File.WriteAllText(tempPath, content);
+            using (var stream = new FileStream(
+                tempPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 4096,
+                FileOptions.WriteThrough))
+            using (var writer = new StreamWriter(stream, new UTF8Encoding(false), leaveOpen: true))
+            {
+                writer.Write(content);
+                writer.Flush();
+                stream.Flush(flushToDisk: true);
+            }
+
             if (File.Exists(path))
                 File.Replace(tempPath, path, destinationBackupFileName: null, ignoreMetadataErrors: true);
             else

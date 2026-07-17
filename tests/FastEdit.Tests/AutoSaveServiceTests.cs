@@ -566,8 +566,12 @@ public class AutoSaveServiceTests
         nextRecovery.Entries.Should().ContainSingle(entry =>
             entry.Id.EndsWith(":two", StringComparison.Ordinal));
         _sut.ClearRecoveryFiles().Should().BeTrue();
-        _fileSystem.Verify(f => f.DeleteFile(Path.Combine(_autoSaveDir, "one.txt")), Times.Once);
-        _fileSystem.Verify(f => f.DeleteFile(Path.Combine(_autoSaveDir, "two.txt")), Times.Once);
+        _fileSystem.Verify(
+            f => f.DeleteFile(Path.Combine(_autoSaveDir, "one.txt")),
+            Times.Once);
+        _fileSystem.Verify(
+            f => f.DeleteFile(Path.Combine(_autoSaveDir, "two.txt")),
+            Times.Once);
     }
 
     [Fact]
@@ -576,14 +580,30 @@ public class AutoSaveServiceTests
         var contentPath = Path.Combine(_autoSaveDir, "id1.txt");
         var manifestPath = Path.Combine(_autoSaveDir, "manifest.json");
         var manifest = """[{"Id":"id1","FileName":"test.txt","FilePath":null,"ContentFile":"id1.txt","IsUntitled":true,"CursorOffset":0,"ScrollOffset":0}]""";
+        var existingFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            manifestPath,
+            contentPath
+        };
         _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
         _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
             .Returns(new[] { manifestPath });
         _fileSystem.Setup(f => f.ReadAllText(manifestPath)).Returns(manifest);
-        _fileSystem.Setup(f => f.FileExists(contentPath)).Returns(true);
+        _fileSystem.Setup(f => f.FileExists(It.IsAny<string>()))
+            .Returns((string path) => existingFiles.Contains(path));
         _fileSystem.Setup(f => f.ReadAllText(contentPath)).Returns("content");
+        _fileSystem.Setup(f => f.MoveFile(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                false))
+            .Callback<string, string, bool>((source, destination, _) =>
+            {
+                existingFiles.Remove(source);
+                existingFiles.Add(destination);
+            });
+        _fileSystem.Setup(f => f.DeleteFile(contentPath))
+            .Throws(new IOException("locked"));
         _sut.GetRecoveryEntries();
-        _fileSystem.Setup(f => f.DeleteFile(contentPath)).Throws(new IOException("locked"));
 
         _sut.ClearRecoveryFiles().Should().BeTrue();
 
@@ -611,6 +631,169 @@ public class AutoSaveServiceTests
         _fileSystem.Verify(f => f.DeleteFile(firstContent), Times.Once);
         _fileSystem.Verify(f => f.DeleteFile(secondContent), Times.Never);
         _fileSystem.Verify(f => f.DeleteFile(secondManifest), Times.Never);
+    }
+
+    [Fact]
+    public void CompleteRecovery_VerifiesReplacementBeforeRetiringSourceGeneration()
+    {
+        var sourceManifestPath = Path.Combine(_autoSaveDir, "manifest-crashed.json");
+        var sourceContentPath = Path.Combine(_autoSaveDir, "crashed.txt");
+        var sourceManifest = """[{"Id":"old","FileName":"recovered.txt","FilePath":null,"ContentFile":"crashed.txt","IsUntitled":true,"CursorOffset":0,"ScrollOffset":0}]""";
+        var files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            [sourceManifestPath] = sourceManifest,
+            [sourceContentPath] = "recovered"
+        };
+        var operations = new List<string>();
+        var activeManifestPaths = new List<string>();
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(new[] { sourceManifestPath });
+        _fileSystem.Setup(f => f.FileExists(It.IsAny<string>()))
+            .Returns((string path) => files.ContainsKey(path));
+        _fileSystem.Setup(f => f.ReadAllText(It.IsAny<string>()))
+            .Returns((string path) => files[path]);
+        _fileSystem.Setup(f => f.WriteAllTextAtomic(It.IsAny<string>(), It.IsAny<string>()))
+            .Callback<string, string>((path, content) =>
+            {
+                files[path] = content;
+                if (Path.GetFileName(path).StartsWith("manifest-", StringComparison.Ordinal) &&
+                    path != sourceManifestPath)
+                {
+                    activeManifestPaths.Add(path);
+                    operations.Add("replacement-manifest");
+                }
+            });
+        _fileSystem.Setup(f => f.MoveFile(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                false))
+            .Callback<string, string, bool>((source, destination, _) =>
+            {
+                if (source == sourceManifestPath)
+                    operations.Add("source-manifest-quarantined");
+                files[destination] = files[source];
+                files.Remove(source);
+            });
+        _fileSystem.Setup(f => f.DeleteFile(It.IsAny<string>()))
+            .Callback<string>(path => files.Remove(path));
+        var recovery = _sut.GetRecoveryEntries();
+        var replacement = new AutoSaveEntry(
+            "tab-stable",
+            "recovered.txt",
+            null,
+            "recovered",
+            true);
+
+        _sut.CompleteRecovery(
+            new[] { replacement },
+            recovery.Entries.Select(entry => entry.Id),
+            allEntriesRecovered: true).Should().BeTrue();
+        _sut.SaveNow(new[] { replacement with { Content = "newer" } });
+
+        operations.Should().ContainInOrder(
+            "replacement-manifest",
+            "source-manifest-quarantined");
+        activeManifestPaths.Should().NotBeEmpty();
+        activeManifestPaths.Distinct(StringComparer.OrdinalIgnoreCase)
+            .Should().ContainSingle();
+        files.Should().NotContainKey(sourceManifestPath);
+        files.Should().ContainKey(activeManifestPaths[0]);
+    }
+
+    [Fact]
+    public void CompleteRecovery_VerificationFailureRetainsSourceGeneration()
+    {
+        var sourceManifestPath = Path.Combine(_autoSaveDir, "manifest-crashed.json");
+        var sourceContentPath = Path.Combine(_autoSaveDir, "crashed.txt");
+        var sourceManifest = """[{"Id":"old","FileName":"recovered.txt","FilePath":null,"ContentFile":"crashed.txt","IsUntitled":true,"CursorOffset":0,"ScrollOffset":0}]""";
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(new[] { sourceManifestPath });
+        _fileSystem.Setup(f => f.FileExists(sourceContentPath)).Returns(true);
+        _fileSystem.Setup(f => f.ReadAllText(sourceManifestPath)).Returns(sourceManifest);
+        _fileSystem.Setup(f => f.ReadAllText(sourceContentPath)).Returns("recovered");
+        var recovery = _sut.GetRecoveryEntries();
+        _fileSystem.Setup(f => f.ReadAllText(
+                It.Is<string>(path =>
+                    Path.GetFileName(path).StartsWith("manifest-", StringComparison.Ordinal) &&
+                    path != sourceManifestPath)))
+            .Returns("not json");
+
+        _sut.CompleteRecovery(
+            new[]
+            {
+                new AutoSaveEntry(
+                    "tab-stable",
+                    "recovered.txt",
+                    null,
+                    "recovered",
+                    true)
+            },
+            recovery.Entries.Select(entry => entry.Id),
+            allEntriesRecovered: true).Should().BeFalse();
+
+        _fileSystem.Verify(f => f.MoveFile(
+            sourceManifestPath,
+            It.IsAny<string>(),
+            false), Times.Never);
+    }
+
+    [Fact]
+    public void CompleteRecovery_PartialRecoveryPersistsReplacementAndResolvesOnlyRecoveredSource()
+    {
+        var sourceManifestPath = Path.Combine(_autoSaveDir, "manifest-crashed.json");
+        var firstContentPath = Path.Combine(_autoSaveDir, "first.txt");
+        var secondContentPath = Path.Combine(_autoSaveDir, "second.txt");
+        var resolvedPath = Path.Combine(_autoSaveDir, "resolved.json");
+        var sourceManifest = """
+            [
+              {"Id":"first","FileName":"first.txt","FilePath":null,"ContentFile":"first.txt","IsUntitled":true,"CursorOffset":0,"ScrollOffset":0},
+              {"Id":"second","FileName":"second.txt","FilePath":null,"ContentFile":"second.txt","IsUntitled":true,"CursorOffset":0,"ScrollOffset":0}
+            ]
+            """;
+        var files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            [sourceManifestPath] = sourceManifest,
+            [firstContentPath] = "first",
+            [secondContentPath] = "second"
+        };
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(new[] { sourceManifestPath });
+        _fileSystem.Setup(f => f.FileExists(It.IsAny<string>()))
+            .Returns((string path) => files.ContainsKey(path));
+        _fileSystem.Setup(f => f.ReadAllText(It.IsAny<string>()))
+            .Returns((string path) => files[path]);
+        _fileSystem.Setup(f => f.WriteAllTextAtomic(It.IsAny<string>(), It.IsAny<string>()))
+            .Callback<string, string>((path, content) => files[path] = content);
+        var recovery = _sut.GetRecoveryEntries();
+        var recoveredEntry = recovery.Entries.Single(entry =>
+            entry.Id.EndsWith(":first", StringComparison.Ordinal));
+
+        _sut.CompleteRecovery(
+            new[]
+            {
+                new AutoSaveEntry(
+                    "tab-stable",
+                    "first.txt",
+                    null,
+                    "first",
+                    true)
+            },
+            new[] { recoveredEntry.Id },
+            allEntriesRecovered: false).Should().BeTrue();
+        var nextRecovery = _sut.GetRecoveryEntries();
+
+        nextRecovery.Entries.Should().ContainSingle(entry =>
+            entry.Id.EndsWith(":second", StringComparison.Ordinal));
+        files.Should().ContainKey(sourceManifestPath);
+        files.Should().ContainKey(resolvedPath);
+        files[resolvedPath].Should().Contain("\"first\"");
+        _fileSystem.Verify(f => f.MoveFile(
+            sourceManifestPath,
+            It.IsAny<string>(),
+            false), Times.Never);
     }
 
     private string SetupRecoveryGeneration(

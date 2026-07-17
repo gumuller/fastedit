@@ -137,7 +137,10 @@ public sealed class AutoSaveService : IAutoSaveService
         SaveSnapshot(entries.ToArray(), requireRunning: false);
     }
 
-    private void SaveSnapshot(AutoSaveEntry[] snapshot, bool requireRunning)
+    private void SaveSnapshot(
+        AutoSaveEntry[] snapshot,
+        bool requireRunning,
+        bool verifyWrites = false)
     {
         lock (_persistenceSync)
         {
@@ -172,6 +175,41 @@ public sealed class AutoSaveService : IAutoSaveService
             _fileSystem.WriteAllTextAtomic(
                 _activeManifestPath,
                 json);
+
+            if (verifyWrites)
+                VerifySnapshot(snapshot);
+        }
+    }
+
+    private void VerifySnapshot(IReadOnlyCollection<AutoSaveEntry> snapshot)
+    {
+        var storedManifest = JsonSerializer.Deserialize<List<AutoSaveManifestEntry>>(
+            _fileSystem.ReadAllText(_activeManifestPath))
+            ?? throw new InvalidDataException("The replacement recovery manifest contains no entries.");
+        if (storedManifest.Count != snapshot.Count)
+            throw new InvalidDataException("The replacement recovery manifest is incomplete.");
+
+        var storedById = storedManifest.ToDictionary(entry => entry.Id, StringComparer.Ordinal);
+        foreach (var entry in snapshot)
+        {
+            if (!storedById.TryGetValue(entry.Id, out var stored) ||
+                stored.FileName != entry.FileName ||
+                stored.FilePath != entry.FilePath ||
+                stored.IsUntitled != entry.IsUntitled ||
+                stored.CursorOffset != entry.CursorOffset ||
+                stored.ScrollOffset != entry.ScrollOffset)
+            {
+                throw new InvalidDataException(
+                    $"The replacement recovery metadata for '{entry.FileName}' could not be verified.");
+            }
+
+            var storedContent = _fileSystem.ReadAllText(
+                Path.Combine(_autoSaveDir, stored.ContentFile));
+            if (!string.Equals(storedContent, entry.Content, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"The replacement recovery content for '{entry.FileName}' could not be verified.");
+            }
         }
     }
 
@@ -295,25 +333,7 @@ public sealed class AutoSaveService : IAutoSaveService
         {
             try
             {
-                var errors = new List<string>();
-                var resolvedEntries = LoadResolvedEntries(errors);
-                if (errors.Count > 0)
-                    throw new InvalidDataException(string.Join(Environment.NewLine, errors));
-
-                foreach (var entryId in entryIds.Distinct(StringComparer.Ordinal))
-                {
-                    if (!_lastRecoveryOrigins.TryGetValue(entryId, out var origin))
-                        continue;
-
-                    if (!resolvedEntries.TryGetValue(origin.ManifestName, out var resolvedIds))
-                    {
-                        resolvedIds = new HashSet<string>(StringComparer.Ordinal);
-                        resolvedEntries[origin.ManifestName] = resolvedIds;
-                    }
-                    resolvedIds.Add(origin.EntryId);
-                }
-
-                SaveResolvedEntries(resolvedEntries);
+                RecordRecoveredEntriesCore(entryIds);
                 return true;
             }
             catch (Exception ex)
@@ -322,6 +342,56 @@ public sealed class AutoSaveService : IAutoSaveService
                 return false;
             }
         }
+    }
+
+    public bool CompleteRecovery(
+        IEnumerable<AutoSaveEntry> replacementEntries,
+        IEnumerable<string> recoveredEntryIds,
+        bool allEntriesRecovered)
+    {
+        lock (_persistenceSync)
+        {
+            try
+            {
+                var snapshot = replacementEntries.ToArray();
+                if (snapshot.Length > 0)
+                    SaveSnapshot(snapshot, requireRunning: false, verifyWrites: true);
+
+                if (allEntriesRecovered)
+                    return ClearRecoveryFilesCore();
+
+                RecordRecoveredEntriesCore(recoveredEntryIds);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning("Failed to complete auto-save recovery: {0}", ex);
+                return false;
+            }
+        }
+    }
+
+    private void RecordRecoveredEntriesCore(IEnumerable<string> entryIds)
+    {
+        var errors = new List<string>();
+        var resolvedEntries = LoadResolvedEntries(errors);
+        if (errors.Count > 0)
+            throw new InvalidDataException(string.Join(Environment.NewLine, errors));
+
+        foreach (var entryId in entryIds.Distinct(StringComparer.Ordinal))
+        {
+            if (!_lastRecoveryOrigins.TryGetValue(entryId, out var origin))
+                continue;
+
+            if (!resolvedEntries.TryGetValue(origin.ManifestName, out var resolvedIds))
+            {
+                resolvedIds = new HashSet<string>(StringComparer.Ordinal);
+                resolvedEntries[origin.ManifestName] = resolvedIds;
+            }
+            resolvedIds.Add(origin.EntryId);
+        }
+
+        SaveResolvedEntries(resolvedEntries);
     }
 
     private Dictionary<string, HashSet<string>> LoadResolvedEntries(ICollection<string> errors)
@@ -392,6 +462,7 @@ public sealed class AutoSaveService : IAutoSaveService
                 if (!string.IsNullOrEmpty(manifestName))
                     resolvedEntries.Remove(manifestName);
             }
+
             SaveResolvedEntries(resolvedEntries);
             _lastRecoveryManifestPaths.ExceptWith(retiredManifests);
             _lastRecoveryContentPaths.Clear();
