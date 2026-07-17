@@ -896,21 +896,27 @@ public sealed class AutoSaveService : IAutoSaveService
                 $"{generationId}-*.txt");
             if (contentPaths.Length == 0)
             {
-                try
-                {
-                    _fileSystem.DeleteFile(markerPath);
-                }
-                catch (Exception ex)
-                {
-                    Trace.TraceWarning(
-                        "Failed to delete abandoned auto-save marker '{0}': {1}",
-                        markerPath,
-                        ex);
-                }
+                TryDeleteAbandonedMarker(markerPath);
                 continue;
             }
 
             TryWriteSyntheticManifest(manifestPath, contentPaths);
+        }
+    }
+
+    private void TryDeleteAbandonedMarker(string markerPath)
+    {
+        try
+        {
+            if (_fileSystem.FileExists(markerPath))
+                _fileSystem.DeleteFile(markerPath);
+        }
+        catch (Exception ex)
+        {
+            Trace.TraceWarning(
+                "Failed to delete abandoned auto-save marker '{0}': {1}",
+                markerPath,
+                ex);
         }
     }
 
