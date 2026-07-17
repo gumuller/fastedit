@@ -23,6 +23,7 @@ public partial class MainWindow : FluentWindow
     private readonly IAutoSaveService _autoSaveService;
     private readonly IDialogService _dialogService;
     private readonly IFileSystemService _fileSystemService;
+    private readonly MainWindowLifecycleCoordinator _lifecycleCoordinator;
     private CommandRegistry? _commandRegistry;
 
     // Zen mode state
@@ -152,6 +153,20 @@ public partial class MainWindow : FluentWindow
         // LargeFileViewer subscribes to the filter service itself;
         // no need for MainWindow to re-dispatch FiltersUpdated.
 
+        _lifecycleCoordinator = new MainWindowLifecycleCoordinator(
+            _autoSaveService,
+            new MainWindowLifecycleOperations(
+                _viewModel.HasUnsavedChanges,
+                _viewModel.PrepareForExitAsync,
+                _viewModel.CancelExitPreparation,
+                _viewModel.RestoreSessionAsync,
+                path => _viewModel.OpenFileCommand.ExecuteAsync(path),
+                () => _viewModel.FileTree.RootPath,
+                path => CommandRunner.SetWorkingDirectoryAsync(path),
+                _viewModel.RecoverTabs,
+                _viewModel.GetAutoSaveEntries,
+                CommandRunner.ShutdownAsync));
+
         BuildCommandRegistry();
     }
 
@@ -179,64 +194,33 @@ public partial class MainWindow : FluentWindow
             MaxRestoreButton.ToolTip = "Restore Down";
         }
 
-        if (_viewModel != null)
+        var startupResult = await _lifecycleCoordinator.StartAsync(
+            App.StartupFiles,
+            App.HasAnotherRunningInstance,
+            RequestCrashRecovery);
+        foreach (var issue in startupResult.Issues)
         {
-            // Check for crash recovery first
-            if (CrashRecoveryStartupPolicy.ShouldPromptForRecovery(
-                _autoSaveService.HasRecoveryFiles(),
-                App.HasAnotherRunningInstance))
+            if (issue.Kind == MainWindowStartupIssueKind.Recovery)
             {
-                var result = _dialogService.ShowMessage(
-                    "FastEdit was not shut down cleanly. Would you like to recover unsaved files?",
-                    "Crash Recovery",
-                    DialogButtons.YesNo,
-                    DialogIcon.Warning);
-
-                if (result == Services.Interfaces.DialogResult.Yes)
-                {
-                    var recoveryAttempt = CrashRecoveryCoordinator.Recover(
-                        _autoSaveService,
-                        _viewModel.RecoverTabs,
-                        _viewModel.GetAutoSaveEntries);
-                    if (!recoveryAttempt.Success)
-                        ReportRecoveryFailure(recoveryAttempt.FailureMessage!);
-                }
-                else if (CrashRecoveryStartupPolicy.ShouldClearRecoveryFiles(
-                    userRequestedRecovery: false,
-                    recoveryDataLoaded: false,
-                    allEntriesRecovered: false))
-                {
-                    TryClearRecoveryFiles(
-                        "The recovery files could not be cleared after recovery was declined.");
-                }
+                ReportRecoveryFailure(issue.Message);
+                continue;
             }
 
-            await _viewModel.RestoreSessionAsync();
-
-            // Open any files passed on the command line (e.g. Explorer "Open
-            // with FastEdit"). Done after session restore so these files end
-            // up on top and become the selected tab.
-            foreach (var path in App.StartupFiles)
-            {
-                await _viewModel.OpenFileCommand.ExecuteAsync(path);
-            }
-
-            // Set command runner working directory
-            var folder = _viewModel.FileTree.RootPath;
-            if (!string.IsNullOrEmpty(folder))
-                await CommandRunner.SetWorkingDirectoryAsync(folder);
+            Trace.TraceWarning("Main window startup was incomplete: {0}", issue.Exception);
+            MainViewModel.StatusText = issue.Message;
         }
 
         // Apply custom key bindings
         ApplyKeyBindings();
     }
 
-    private void TryClearRecoveryFiles(string failureMessage)
+    private bool RequestCrashRecovery()
     {
-        if (_autoSaveService.ClearRecoveryFiles())
-            return;
-
-        ReportRecoveryFailure(failureMessage);
+        return _dialogService.ShowMessage(
+            "FastEdit was not shut down cleanly. Would you like to recover unsaved files?",
+            "Crash Recovery",
+            DialogButtons.YesNo,
+            DialogIcon.Warning) == Services.Interfaces.DialogResult.Yes;
     }
 
     private void ReportRecoveryFailure(string detail)
@@ -250,9 +234,6 @@ public partial class MainWindow : FluentWindow
             DialogButtons.Ok,
             DialogIcon.Warning);
     }
-
-    private bool _isClosingConfirmed;
-    private bool _isClosingInProgress;
 
     private void SaveWindowState()
     {
@@ -271,67 +252,53 @@ public partial class MainWindow : FluentWindow
     {
         if (_viewModel == null) return;
 
-        if (_isClosingConfirmed)
+        if (_lifecycleCoordinator.IsCloseComplete)
             return;
 
         e.Cancel = true;
-        if (_isClosingInProgress)
-            return;
+        var result = await _lifecycleCoordinator.CloseAsync(
+            () => IsEnabled = false,
+            PersistSession,
+            TimeSpan.FromSeconds(5));
 
-        _isClosingInProgress = true;
-        if (_viewModel.HasUnsavedChanges() && !await _viewModel.PrepareForExitAsync())
+        switch (result.Outcome)
         {
-            _isClosingInProgress = false;
-            return;
+            case MainWindowCloseOutcome.InProgress:
+            case MainWindowCloseOutcome.Cancelled:
+                return;
+            case MainWindowCloseOutcome.PreparationFailed:
+                IsEnabled = true;
+                Trace.TraceError("Failed to prepare the session for shutdown: {0}", result.Error);
+                _viewModel.StatusText = "Unable to prepare the current session for exit; FastEdit remains open.";
+                return;
+            case MainWindowCloseOutcome.PersistenceFailed:
+                IsEnabled = true;
+                Trace.TraceError("Failed to persist the session during shutdown: {0}", result.Error);
+                _viewModel.StatusText = "Unable to save the current session; FastEdit remains open.";
+                _dialogService.ShowMessage(
+                    $"FastEdit could not save the current session:\n\n{result.Error!.Message}",
+                    "FastEdit - Save Failed",
+                    DialogButtons.Ok,
+                    DialogIcon.Error);
+                return;
+            case MainWindowCloseOutcome.ReadyToClose:
+                if (result.TerminalShutdownTimedOut)
+                    Trace.TraceWarning("Terminal shutdown exceeded 5000 ms while closing the main window.");
+                else if (result.Error != null)
+                    Trace.TraceWarning("Terminal shutdown failed while closing the main window: {0}", result.Error);
+                _ = Dispatcher.BeginInvoke(
+                    new Action(Close),
+                    System.Windows.Threading.DispatcherPriority.Background);
+                return;
+            default:
+                throw new ArgumentOutOfRangeException();
         }
-
-        IsEnabled = false;
-        _ = Dispatcher.BeginInvoke(
-            new Action(PersistSessionAndClose),
-            System.Windows.Threading.DispatcherPriority.Background);
     }
 
-    private async void PersistSessionAndClose()
+    private void PersistSession()
     {
-        if (_viewModel == null)
-        {
-            IsEnabled = true;
-            _isClosingInProgress = false;
-            return;
-        }
-
-        try
-        {
-            SaveWindowState();
-            _viewModel.SaveSession();
-        }
-        catch (Exception ex)
-        {
-            IsEnabled = true;
-            _isClosingInProgress = false;
-            _viewModel.CancelExitPreparation();
-            Trace.TraceError("Failed to persist the session during shutdown: {0}", ex);
-            _viewModel.StatusText = "Unable to save the current session; FastEdit remains open.";
-            _dialogService.ShowMessage(
-                $"FastEdit could not save the current session:\n\n{ex.Message}",
-                "FastEdit - Save Failed",
-                DialogButtons.Ok,
-                DialogIcon.Error);
-            return;
-        }
-
-        using var terminalShutdownTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        try
-        {
-            await CommandRunner.ShutdownAsync(terminalShutdownTimeout.Token);
-        }
-        catch (OperationCanceledException)
-        {
-            Trace.TraceWarning("Terminal shutdown exceeded 5000 ms while closing the main window.");
-        }
-
-        _isClosingConfirmed = true;
-        Close();
+        SaveWindowState();
+        _viewModel!.SaveSession();
     }
 
     internal void CaptureEditorState()
