@@ -16,6 +16,7 @@ public interface IFileSystemService
     Task<string> ReadAllTextAsync(string path);
     void WriteAllText(string path, string content);
     void WriteAllText(string path, string content, Encoding encoding);
+    void WriteAllTextAtomic(string path, string content);
     void WriteAllBytes(string path, byte[] bytes);
     void CopyFile(string source, string destination, bool overwrite = false);
     void DeleteFile(string path);

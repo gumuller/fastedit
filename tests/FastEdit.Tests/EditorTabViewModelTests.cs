@@ -116,6 +116,38 @@ public class EditorTabViewModelTests
             It.IsAny<string>(), It.IsAny<string>(), It.IsAny<Encoding>(), It.IsAny<bool>()), Times.Never);
     }
 
+    [Fact]
+    public async Task Save_EditDuringWrite_RemainsModified()
+    {
+        var sut = CreateSut();
+        sut.FilePath = @"C:\test.txt";
+        sut.FileName = "test.txt";
+        sut.Content = "snapshot";
+        var writeStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var writeCompletion = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        _fileService.Setup(f => f.WriteFileWithEncodingAsync(
+                sut.FilePath,
+                "snapshot",
+                It.IsAny<Encoding>(),
+                It.IsAny<bool>()))
+            .Returns(() =>
+            {
+                writeStarted.SetResult();
+                return writeCompletion.Task;
+            });
+
+        var saveTask = sut.SaveCommand.ExecuteAsync(null);
+        await writeStarted.Task;
+        sut.Content = "newer edit";
+        writeCompletion.SetResult();
+        await saveTask;
+
+        Assert.True(sut.IsModified);
+        Assert.Equal("newer edit", sut.Content);
+    }
+
     // --- SaveAs ---
 
     [Fact]
@@ -239,7 +271,7 @@ public class EditorTabViewModelTests
     }
 
     [Fact]
-    public void ContentChange_Untitled_DoesNotSetModified()
+    public void ContentChange_Untitled_SetsModified()
     {
         var sut = CreateSut();
         sut.FilePath = "";
@@ -247,6 +279,17 @@ public class EditorTabViewModelTests
 
         sut.Content = "changed";
 
+        Assert.True(sut.IsModified);
+    }
+
+    [Fact]
+    public void SetContentBaseline_CanEstablishCleanLoadedState()
+    {
+        var sut = CreateSut();
+
+        sut.SetContentBaseline("loaded", isModified: false);
+
+        Assert.Equal("loaded", sut.Content);
         Assert.False(sut.IsModified);
     }
 
@@ -294,6 +337,24 @@ public class EditorTabViewModelTests
 
         Assert.Equal(FileOpenMode.Text, sut.Mode);
         Assert.False(sut.IsBinaryMode);
+    }
+
+    [Fact]
+    public async Task ToggleMode_BinaryToText_EstablishesCleanBaseline()
+    {
+        var sut = CreateSut();
+        sut.FilePath = @"C:\test.txt";
+        sut.FileSize = 10;
+        sut.Mode = FileOpenMode.Binary;
+        sut.IsModified = false;
+        _fileService.Setup(f => f.ReadFileWithEncodingAsync(sut.FilePath))
+            .ReturnsAsync(new FileReadResult("text", Encoding.UTF8, false));
+
+        await sut.ToggleModeCommand.ExecuteAsync(null);
+
+        Assert.Equal(FileOpenMode.Text, sut.Mode);
+        Assert.Equal("text", sut.Content);
+        Assert.False(sut.IsModified);
     }
 
     // --- Dispose ---

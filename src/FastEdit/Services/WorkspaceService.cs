@@ -37,7 +37,7 @@ public class WorkspaceService : IWorkspaceService
 
         var path = Path.Combine(_sessionsDir, $"{SanitizeFileName(name)}.json");
         var json = JsonSerializer.Serialize(session, new JsonSerializerOptions { WriteIndented = true });
-        _fileSystem.WriteAllText(path, json);
+        _fileSystem.WriteAllTextAtomic(path, json);
     }
 
     public SessionData? LoadNamedSession(string name)
@@ -45,15 +45,9 @@ public class WorkspaceService : IWorkspaceService
         var path = Path.Combine(_sessionsDir, $"{SanitizeFileName(name)}.json");
         if (!_fileSystem.FileExists(path)) return null;
 
-        try
-        {
-            var json = _fileSystem.ReadAllText(path);
-            return JsonSerializer.Deserialize<SessionData>(json);
-        }
-        catch
-        {
-            return null;
-        }
+        var json = _fileSystem.ReadAllText(path);
+        return JsonSerializer.Deserialize<SessionData>(json)
+            ?? throw new InvalidDataException($"Session '{name}' contains no data.");
     }
 
     public void DeleteNamedSession(string name)
@@ -69,21 +63,15 @@ public class WorkspaceService : IWorkspaceService
     {
         if (!_fileSystem.FileExists(filePath)) return null;
 
-        try
-        {
-            var json = _fileSystem.ReadAllText(filePath);
-            return JsonSerializer.Deserialize<WorkspaceData>(json);
-        }
-        catch
-        {
-            return null;
-        }
+        var json = _fileSystem.ReadAllText(filePath);
+        return JsonSerializer.Deserialize<WorkspaceData>(json)
+            ?? throw new InvalidDataException($"Workspace '{filePath}' contains no data.");
     }
 
     public void SaveWorkspace(string filePath, WorkspaceData workspace)
     {
         var json = JsonSerializer.Serialize(workspace, new JsonSerializerOptions { WriteIndented = true });
-        _fileSystem.WriteAllText(filePath, json);
+        _fileSystem.WriteAllTextAtomic(filePath, json);
     }
 
     private static string SanitizeFileName(string name)

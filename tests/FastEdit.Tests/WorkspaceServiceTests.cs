@@ -55,7 +55,7 @@ public class WorkspaceServiceTests
         _sut.SaveNamedSession("MySession", session);
 
         _mockFs.Verify(f => f.CreateDirectory(_sessionsDir), Times.Once);
-        _mockFs.Verify(f => f.WriteAllText(
+        _mockFs.Verify(f => f.WriteAllTextAtomic(
             Path.Combine(_sessionsDir, "MySession.json"),
             It.Is<string>(s => s.Contains("MySession") && s.Contains("test.txt"))),
             Times.Once);
@@ -82,6 +82,18 @@ public class WorkspaceServiceTests
     {
         _mockFs.Setup(f => f.FileExists(It.IsAny<string>())).Returns(false);
         _sut.LoadNamedSession("Missing").Should().BeNull();
+    }
+
+    [Fact]
+    public void LoadNamedSession_InvalidJson_SurfacesFailure()
+    {
+        var path = Path.Combine(_sessionsDir, "Broken.json");
+        _mockFs.Setup(f => f.FileExists(path)).Returns(true);
+        _mockFs.Setup(f => f.ReadAllText(path)).Returns("not json");
+
+        var action = () => _sut.LoadNamedSession("Broken");
+
+        action.Should().Throw<System.Text.Json.JsonException>();
     }
 
     [Fact]
@@ -115,7 +127,7 @@ public class WorkspaceServiceTests
 
         _sut.SaveWorkspace(@"C:\project.fastedit-workspace", workspace);
 
-        _mockFs.Verify(f => f.WriteAllText(
+        _mockFs.Verify(f => f.WriteAllTextAtomic(
             @"C:\project.fastedit-workspace",
             It.Is<string>(s => s.Contains("Project") && s.Contains(@"C:\\src"))),
             Times.Once);
@@ -147,7 +159,7 @@ public class WorkspaceServiceTests
         var session = new SessionData { Files = new() };
         _sut.SaveNamedSession("My<>Session", session);
 
-        _mockFs.Verify(f => f.WriteAllText(
+        _mockFs.Verify(f => f.WriteAllTextAtomic(
             Path.Combine(_sessionsDir, "My__Session.json"),
             It.IsAny<string>()), Times.Once);
     }

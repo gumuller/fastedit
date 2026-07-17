@@ -31,9 +31,7 @@ public class EditorTabFactory : IEditorTabFactory
         var tab = Create();
         tab.FileName = "Untitled";
         if (content != null)
-        {
-            tab.Content = content;
-        }
+            tab.SetContentBaseline(content, isModified: true);
         return tab;
     }
 }

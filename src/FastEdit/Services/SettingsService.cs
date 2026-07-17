@@ -1,27 +1,44 @@
 using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using FastEdit.Services.Interfaces;
 
 namespace FastEdit.Services;
 
 public class SettingsService : ISettingsService
 {
+    private static readonly JsonSerializerOptions SerializerOptions = new()
+    {
+        WriteIndented = true,
+        NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals
+    };
+
+    private readonly IFileSystemService _fileSystem;
     private readonly string _settingsPath;
     private readonly string _tempDir;
     private AppSettings _settings;
 
-    public SettingsService()
-    {
-        var appDataPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "FastEdit");
+    public event EventHandler? AutoSaveIntervalChanged;
 
-        Directory.CreateDirectory(appDataPath);
+    public SettingsService(IFileSystemService fileSystem)
+        : this(
+            fileSystem,
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "FastEdit"))
+    {
+    }
+
+    internal SettingsService(IFileSystemService fileSystem, string appDataPath)
+    {
+        _fileSystem = fileSystem;
+
+        _fileSystem.CreateDirectory(appDataPath);
         _settingsPath = Path.Combine(appDataPath, "settings.json");
 
         _tempDir = Path.Combine(appDataPath, "Temp");
-        Directory.CreateDirectory(_tempDir);
+        _fileSystem.CreateDirectory(_tempDir);
 
         _settings = LoadSettings();
     }
@@ -141,8 +158,22 @@ public class SettingsService : ISettingsService
         get => _settings.AutoSaveIntervalSeconds;
         set
         {
-            _settings.AutoSaveIntervalSeconds = value;
-            Save();
+            var normalizedValue = Math.Max(1, value);
+            if (_settings.AutoSaveIntervalSeconds == normalizedValue)
+                return;
+
+            var previousValue = _settings.AutoSaveIntervalSeconds;
+            _settings.AutoSaveIntervalSeconds = normalizedValue;
+            try
+            {
+                Save();
+            }
+            catch
+            {
+                _settings.AutoSaveIntervalSeconds = previousValue;
+                throw;
+            }
+            AutoSaveIntervalChanged?.Invoke(this, EventArgs.Empty);
         }
     }
 
@@ -189,10 +220,10 @@ public class SettingsService : ISettingsService
     {
         try
         {
-            if (File.Exists(_settingsPath))
+            if (_fileSystem.FileExists(_settingsPath))
             {
-                var json = File.ReadAllText(_settingsPath);
-                return JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
+                var json = _fileSystem.ReadAllText(_settingsPath);
+                return JsonSerializer.Deserialize<AppSettings>(json, SerializerOptions) ?? new AppSettings();
             }
         }
         catch (Exception ex)
@@ -204,15 +235,8 @@ public class SettingsService : ISettingsService
 
     public void Save()
     {
-        try
-        {
-            var json = JsonSerializer.Serialize(_settings, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(_settingsPath, json);
-        }
-        catch (Exception ex)
-        {
-            Trace.TraceWarning("Failed to save settings: {0}", ex.Message);
-        }
+        var json = JsonSerializer.Serialize(_settings, SerializerOptions);
+        _fileSystem.WriteAllTextAtomic(_settingsPath, json);
     }
 
     public string GetTempFilePath(string fileName)

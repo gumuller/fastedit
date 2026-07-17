@@ -8,7 +8,9 @@ namespace FastEdit.Tests;
 
 public class AutoSaveServiceTests
 {
-    private readonly Mock<IFileSystemService> _mockFs = new();
+    private readonly Mock<IFileSystemService> _fileSystem = new();
+    private readonly Mock<ISettingsService> _settings = new();
+    private readonly InlineDispatcherService _dispatcher = new();
     private readonly AutoSaveService _sut;
     private readonly string _autoSaveDir;
 
@@ -17,81 +19,248 @@ public class AutoSaveServiceTests
         _autoSaveDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "FastEdit", "AutoSave");
-        _sut = new AutoSaveService(_mockFs.Object);
+        _settings.SetupGet(s => s.AutoSaveIntervalSeconds).Returns(60);
+        _sut = new AutoSaveService(_fileSystem.Object, _settings.Object, _dispatcher);
+    }
+
+    [Fact]
+    public void Constructor_UsesConfiguredInterval()
+    {
+        _sut.IntervalSeconds.Should().Be(60);
+    }
+
+    [Fact]
+    public void SettingsChange_UpdatesRunningInterval()
+    {
+        _sut.Start();
+        _settings.SetupGet(s => s.AutoSaveIntervalSeconds).Returns(15);
+
+        _settings.Raise(s => s.AutoSaveIntervalChanged += null, EventArgs.Empty);
+
+        _sut.IntervalSeconds.Should().Be(15);
+        _sut.Stop();
     }
 
     [Fact]
     public void HasRecoveryFiles_NoDirectory_ReturnsFalse()
     {
-        _mockFs.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(false);
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(false);
+
         _sut.HasRecoveryFiles().Should().BeFalse();
     }
 
     [Fact]
     public void HasRecoveryFiles_CleanShutdown_ReturnsFalse()
     {
-        _mockFs.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
-        _mockFs.Setup(f => f.FileExists(Path.Combine(_autoSaveDir, ".clean-shutdown"))).Returns(true);
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.FileExists(Path.Combine(_autoSaveDir, ".clean-shutdown"))).Returns(true);
+
         _sut.HasRecoveryFiles().Should().BeFalse();
     }
 
     [Fact]
     public void HasRecoveryFiles_UncleanWithManifest_ReturnsTrue()
     {
-        _mockFs.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
-        _mockFs.Setup(f => f.FileExists(Path.Combine(_autoSaveDir, ".clean-shutdown"))).Returns(false);
-        _mockFs.Setup(f => f.FileExists(Path.Combine(_autoSaveDir, "manifest.json"))).Returns(true);
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.FileExists(Path.Combine(_autoSaveDir, ".clean-shutdown"))).Returns(false);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(new[] { Path.Combine(_autoSaveDir, "manifest.json") });
+
         _sut.HasRecoveryFiles().Should().BeTrue();
     }
 
     [Fact]
-    public void HasRecoveryFiles_UncleanNoManifest_ReturnsFalse()
+    public void MarkCleanShutdown_DeletesOnlyActiveGeneration()
     {
-        _mockFs.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
-        _mockFs.Setup(f => f.FileExists(Path.Combine(_autoSaveDir, ".clean-shutdown"))).Returns(false);
-        _mockFs.Setup(f => f.FileExists(Path.Combine(_autoSaveDir, "manifest.json"))).Returns(false);
-        _sut.HasRecoveryFiles().Should().BeFalse();
-    }
+        string? contentPath = null;
+        string? manifestPath = null;
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.WriteAllTextAtomic(It.IsAny<string>(), It.IsAny<string>()))
+            .Callback<string, string>((path, _) =>
+            {
+                if (path.EndsWith(".txt", StringComparison.Ordinal))
+                    contentPath = path;
+                else if (path.EndsWith(".json", StringComparison.Ordinal))
+                    manifestPath = path;
+            });
+        _sut.SaveNow(new[]
+        {
+            new AutoSaveEntry("id", "test.txt", null, "content", true)
+        });
+        _fileSystem.Setup(f => f.GetFiles(
+                _autoSaveDir,
+                It.Is<string>(pattern => pattern.EndsWith("*.txt", StringComparison.Ordinal)),
+                false))
+            .Returns(() => new[] { contentPath! });
+        _fileSystem.Setup(f => f.FileExists(It.IsAny<string>()))
+            .Returns((string path) => path == manifestPath);
 
-    [Fact]
-    public void MarkCleanShutdown_WritesMarker()
-    {
-        _sut.MarkCleanShutdown();
-        _mockFs.Verify(f => f.WriteAllText(
+        _sut.MarkCleanShutdown().Should().BeTrue();
+
+        _fileSystem.Verify(f => f.DeleteFile(contentPath!), Times.Once);
+        _fileSystem.Verify(f => f.DeleteFile(manifestPath!), Times.Once);
+        _fileSystem.Verify(f => f.WriteAllTextAtomic(
             Path.Combine(_autoSaveDir, ".clean-shutdown"),
-            It.IsAny<string>()), Times.Once);
+            It.IsAny<string>()), Times.Never);
     }
 
     [Fact]
-    public void SaveNow_WritesContentAndManifest()
+    public void MarkCleanShutdown_ActiveGenerationCleanupFailure_ReturnsFalse()
     {
-        var entries = new[]
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(
+                _autoSaveDir,
+                It.Is<string>(pattern => pattern.EndsWith("*.txt", StringComparison.Ordinal)),
+                false))
+            .Throws(new IOException("unavailable"));
+
+        _sut.MarkCleanShutdown().Should().BeFalse();
+
+        _fileSystem.Verify(f => f.WriteAllTextAtomic(
+            Path.Combine(_autoSaveDir, ".clean-shutdown"),
+            It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public void SaveNow_WritesContentBeforeAtomicManifest()
+    {
+        var operations = new List<string>();
+        _fileSystem.Setup(f => f.WriteAllTextAtomic(
+                It.Is<string>(path => path.EndsWith("-id1.txt", StringComparison.Ordinal)),
+                "content here"))
+            .Callback(() => operations.Add("content"));
+        _fileSystem.Setup(f => f.WriteAllTextAtomic(
+                It.Is<string>(path =>
+                    Path.GetFileName(path).StartsWith("manifest-", StringComparison.Ordinal)),
+                It.IsAny<string>()))
+            .Callback(() => operations.Add("manifest"));
+
+        _sut.SaveNow(new[]
         {
             new AutoSaveEntry("id1", "test.txt", @"C:\test.txt", "content here", false, 10, 20.5)
-        };
+        });
 
-        _sut.SaveNow(entries);
-
-        _mockFs.Verify(f => f.WriteAllText(
-            Path.Combine(_autoSaveDir, "id1.txt"), "content here"), Times.Once);
-        _mockFs.Verify(f => f.WriteAllText(
-            Path.Combine(_autoSaveDir, "manifest.json"),
-            It.Is<string>(s => s.Contains("id1") && s.Contains("test.txt"))), Times.Once);
+        operations.Should().Equal("content", "manifest");
     }
 
     [Fact]
-    public void SaveNow_MultipleEntries_WritesAll()
+    public void SaveNow_ContentWriteFailure_PreservesPreviousManifest()
     {
-        var entries = new[]
+        _fileSystem.Setup(f => f.WriteAllTextAtomic(
+                It.Is<string>(path => path.EndsWith("-id1.txt", StringComparison.Ordinal)),
+                "content"))
+            .Throws(new IOException("disk full"));
+
+        var action = () => _sut.SaveNow(new[]
         {
-            new AutoSaveEntry("a", "a.txt", null, "aaa", true),
-            new AutoSaveEntry("b", "b.txt", @"C:\b.txt", "bbb", false)
-        };
+            new AutoSaveEntry("id1", "test.txt", null, "content", true)
+        });
 
-        _sut.SaveNow(entries);
+        action.Should().Throw<IOException>();
+        _fileSystem.Verify(f => f.WriteAllTextAtomic(
+            It.Is<string>(path =>
+                Path.GetFileName(path).StartsWith("manifest-", StringComparison.Ordinal)),
+            It.IsAny<string>()), Times.Never);
+    }
 
-        _mockFs.Verify(f => f.WriteAllText(Path.Combine(_autoSaveDir, "a.txt"), "aaa"), Times.Once);
-        _mockFs.Verify(f => f.WriteAllText(Path.Combine(_autoSaveDir, "b.txt"), "bbb"), Times.Once);
+    [Fact]
+    public void SaveNow_SeparateServiceInstancesUseDistinctGenerations()
+    {
+        var writtenPaths = new List<string>();
+        _fileSystem.Setup(f => f.WriteAllTextAtomic(It.IsAny<string>(), It.IsAny<string>()))
+            .Callback<string, string>((path, _) => writtenPaths.Add(path));
+        var second = new AutoSaveService(
+            _fileSystem.Object,
+            _settings.Object,
+            new InlineDispatcherService());
+
+        _sut.SaveNow(new[]
+        {
+            new AutoSaveEntry("same", "one.txt", null, "one", true)
+        });
+        second.SaveNow(new[]
+        {
+            new AutoSaveEntry("same", "two.txt", null, "two", true)
+        });
+
+        writtenPaths.Where(path => path.EndsWith(".json", StringComparison.Ordinal))
+            .Should().HaveCount(2).And.OnlyHaveUniqueItems();
+        writtenPaths.Where(path => path.EndsWith(".txt", StringComparison.Ordinal))
+            .Should().HaveCount(2).And.OnlyHaveUniqueItems();
+    }
+
+    [Fact]
+    public async Task TimerRun_CapturesEntriesOnDispatcher()
+    {
+        var capturedOnDispatcher = false;
+        _sut.SetEntryProvider(() =>
+        {
+            capturedOnDispatcher = _dispatcher.IsInvoking;
+            return new[] { new AutoSaveEntry("id", "test.txt", null, "content", true) };
+        });
+        _sut.Start();
+
+        await _sut.RunAutoSaveAsync();
+
+        capturedOnDispatcher.Should().BeTrue();
+        _sut.Stop();
+    }
+
+    [Fact]
+    public async Task TimerRun_PendingRecoveryWritesSeparateGeneration()
+    {
+        var manifestPath = Path.Combine(_autoSaveDir, "manifest.json");
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.FileExists(Path.Combine(_autoSaveDir, ".clean-shutdown")))
+            .Returns(false);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(new[] { manifestPath });
+        _sut.SetEntryProvider(() =>
+            new[] { new AutoSaveEntry("new", "new.txt", null, "new", true) });
+        _sut.Start();
+
+        await _sut.RunAutoSaveAsync();
+
+        _fileSystem.Verify(f => f.WriteAllTextAtomic(
+            manifestPath,
+            It.IsAny<string>()), Times.Never);
+        _fileSystem.Verify(f => f.WriteAllTextAtomic(
+            It.Is<string>(path =>
+                Path.GetFileName(path).StartsWith("manifest-", StringComparison.Ordinal) &&
+                path.EndsWith(".json", StringComparison.Ordinal)),
+            It.IsAny<string>()), Times.Once);
+        _sut.Stop();
+    }
+
+    [Fact]
+    public async Task TimerRun_OverlappingInvocation_IsSkipped()
+    {
+        using var writeStarted = new ManualResetEventSlim();
+        using var releaseWrite = new ManualResetEventSlim();
+        var providerCalls = 0;
+        _sut.SetEntryProvider(() =>
+        {
+            Interlocked.Increment(ref providerCalls);
+            return new[] { new AutoSaveEntry("id", "test.txt", null, "content", true) };
+        });
+        _fileSystem.Setup(f => f.WriteAllTextAtomic(
+                It.Is<string>(path => path.EndsWith("-id.txt", StringComparison.Ordinal)),
+                "content"))
+            .Callback(() =>
+            {
+                writeStarted.Set();
+                releaseWrite.Wait(TimeSpan.FromSeconds(5));
+            });
+        _sut.Start();
+
+        var firstRun = _sut.RunAutoSaveAsync();
+        writeStarted.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        await _sut.RunAutoSaveAsync();
+        releaseWrite.Set();
+        await firstRun;
+
+        providerCalls.Should().Be(1);
+        _sut.Stop();
     }
 
     [Fact]
@@ -99,113 +268,246 @@ public class AutoSaveServiceTests
     {
         var manifestPath = Path.Combine(_autoSaveDir, "manifest.json");
         var manifest = """[{"Id":"id1","FileName":"test.txt","FilePath":"C:\\test.txt","ContentFile":"id1.txt","IsUntitled":false,"CursorOffset":5,"ScrollOffset":10.0}]""";
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(new[] { manifestPath });
+        _fileSystem.Setup(f => f.ReadAllText(manifestPath)).Returns(manifest);
+        _fileSystem.Setup(f => f.FileExists(Path.Combine(_autoSaveDir, "id1.txt"))).Returns(true);
+        _fileSystem.Setup(f => f.ReadAllText(Path.Combine(_autoSaveDir, "id1.txt"))).Returns("recovered content");
 
-        _mockFs.Setup(f => f.FileExists(manifestPath)).Returns(true);
-        _mockFs.Setup(f => f.ReadAllText(manifestPath)).Returns(manifest);
-        _mockFs.Setup(f => f.FileExists(Path.Combine(_autoSaveDir, "id1.txt"))).Returns(true);
-        _mockFs.Setup(f => f.ReadAllText(Path.Combine(_autoSaveDir, "id1.txt"))).Returns("recovered content");
+        var result = _sut.GetRecoveryEntries();
 
-        var entries = _sut.GetRecoveryEntries();
-
-        entries.Should().HaveCount(1);
-        entries[0].Id.Should().Be("id1");
-        entries[0].FileName.Should().Be("test.txt");
-        entries[0].Content.Should().Be("recovered content");
-        entries[0].CursorOffset.Should().Be(5);
+        result.Success.Should().BeTrue();
+        result.Entries.Should().ContainSingle();
+        result.Entries[0].Content.Should().Be("recovered content");
+        result.Entries[0].CursorOffset.Should().Be(5);
     }
 
     [Fact]
-    public void GetRecoveryEntries_NoManifest_ReturnsEmpty()
+    public void GetRecoveryEntries_InvalidManifest_ReturnsExplicitFailure()
     {
-        _mockFs.Setup(f => f.FileExists(It.IsAny<string>())).Returns(false);
-        _sut.GetRecoveryEntries().Should().BeEmpty();
-    }
-
-    [Fact]
-    public void GetRecoveryEntries_InvalidManifest_LogsWarningAndReturnsEmpty()
-    {
-        using var trace = new TraceCapture();
         var manifestPath = Path.Combine(_autoSaveDir, "manifest.json");
-        _mockFs.Setup(f => f.FileExists(manifestPath)).Returns(true);
-        _mockFs.Setup(f => f.ReadAllText(manifestPath)).Returns("not json");
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(new[] { manifestPath });
+        _fileSystem.Setup(f => f.ReadAllText(manifestPath)).Returns("not json");
 
-        _sut.GetRecoveryEntries().Should().BeEmpty();
-        System.Diagnostics.Trace.Flush();
+        var result = _sut.GetRecoveryEntries();
 
-        trace.Messages.Should().Contain("Failed to read auto-save recovery manifest");
+        result.Success.Should().BeFalse();
+        result.Entries.Should().BeEmpty();
+        result.ErrorMessage.Should().NotBeNullOrWhiteSpace();
     }
 
     [Fact]
-    public void GetRecoveryEntries_MissingContentFile_SkipsEntry()
+    public void GetRecoveryEntries_MissingContentFile_ReturnsExplicitFailure()
     {
         var manifestPath = Path.Combine(_autoSaveDir, "manifest.json");
         var manifest = """[{"Id":"id1","FileName":"test.txt","FilePath":null,"ContentFile":"id1.txt","IsUntitled":true,"CursorOffset":0,"ScrollOffset":0}]""";
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(new[] { manifestPath });
+        _fileSystem.Setup(f => f.ReadAllText(manifestPath)).Returns(manifest);
+        _fileSystem.Setup(f => f.FileExists(Path.Combine(_autoSaveDir, "id1.txt"))).Returns(false);
 
-        _mockFs.Setup(f => f.FileExists(manifestPath)).Returns(true);
-        _mockFs.Setup(f => f.ReadAllText(manifestPath)).Returns(manifest);
-        _mockFs.Setup(f => f.FileExists(Path.Combine(_autoSaveDir, "id1.txt"))).Returns(false);
+        var result = _sut.GetRecoveryEntries();
 
-        _sut.GetRecoveryEntries().Should().BeEmpty();
+        result.Success.Should().BeFalse();
+        result.Entries.Should().BeEmpty();
     }
 
     [Fact]
-    public void ClearRecoveryFiles_DeletesAllTxtFiles()
+    public void GetRecoveryEntries_DamagedGenerationStillReturnsIntactEntries()
     {
-        _mockFs.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
-        _mockFs.Setup(f => f.GetFiles(_autoSaveDir, "*.txt", false)).Returns(new[]
+        var manifestPath = Path.Combine(_autoSaveDir, "manifest.json");
+        var manifest = """
+            [
+              {"Id":"missing","FileName":"missing.txt","FilePath":null,"ContentFile":"missing.txt","IsUntitled":true,"CursorOffset":0,"ScrollOffset":0},
+              {"Id":"valid","FileName":"valid.txt","FilePath":null,"ContentFile":"valid.txt","IsUntitled":true,"CursorOffset":0,"ScrollOffset":0}
+            ]
+            """;
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(new[] { manifestPath });
+        _fileSystem.Setup(f => f.ReadAllText(manifestPath)).Returns(manifest);
+        _fileSystem.Setup(f => f.FileExists(Path.Combine(_autoSaveDir, "valid.txt"))).Returns(true);
+        _fileSystem.Setup(f => f.ReadAllText(Path.Combine(_autoSaveDir, "valid.txt"))).Returns("valid");
+
+        var result = _sut.GetRecoveryEntries();
+
+        result.Success.Should().BeFalse();
+        result.Entries.Should().ContainSingle(entry =>
+            entry.Id.EndsWith(":valid", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void GetRecoveryEntries_DivergentGenerationsRemainSeparate()
+    {
+        var firstManifestPath = Path.Combine(_autoSaveDir, "manifest-first.json");
+        var secondManifestPath = Path.Combine(_autoSaveDir, "manifest-second.json");
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(new[] { firstManifestPath, secondManifestPath });
+        _fileSystem.Setup(f => f.GetLastWriteTime(firstManifestPath))
+            .Returns(new DateTime(2026, 1, 1));
+        _fileSystem.Setup(f => f.GetLastWriteTime(secondManifestPath))
+            .Returns(new DateTime(2026, 1, 2));
+        SetupRecoveryGeneration(firstManifestPath, "first.txt", "first");
+        SetupRecoveryGeneration(secondManifestPath, "second.txt", "second");
+
+        var result = _sut.GetRecoveryEntries();
+
+        result.Success.Should().BeTrue();
+        result.Entries.Select(entry => entry.Content)
+            .Should().BeEquivalentTo("first", "second");
+        result.Entries.Select(entry => entry.Id).Should().OnlyHaveUniqueItems();
+    }
+
+    [Fact]
+    public void ClearRecoveryFiles_DoesNotDeleteLiveGeneration()
+    {
+        var crashedManifestPath = Path.Combine(_autoSaveDir, "manifest-crashed.json");
+        var liveManifestPath = Path.Combine(_autoSaveDir, "manifest-live.json");
+        var liveMarkerPath = Path.Combine(_autoSaveDir, "active-live.lock");
+        var crashedContentPath = SetupRecoveryGeneration(
+            crashedManifestPath,
+            "crashed.txt",
+            "crashed");
+        using var process = System.Diagnostics.Process.GetCurrentProcess();
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(new[] { crashedManifestPath, liveManifestPath });
+        _fileSystem.Setup(f => f.FileExists(liveMarkerPath)).Returns(true);
+        _fileSystem.Setup(f => f.ReadAllText(liveMarkerPath))
+            .Returns($"{process.Id}|{process.StartTime.ToUniversalTime().Ticks}");
+        _sut.GetRecoveryEntries();
+
+        _sut.ClearRecoveryFiles().Should().BeTrue();
+
+        _fileSystem.Verify(f => f.DeleteFile(crashedContentPath), Times.Once);
+        _fileSystem.Verify(f => f.DeleteFile(crashedManifestPath), Times.Once);
+        _fileSystem.Verify(f => f.DeleteFile(liveManifestPath), Times.Never);
+    }
+
+    [Fact]
+    public void MarkCleanShutdown_UnresolvedRecoveryPreservesRetainedGeneration()
+    {
+        var manifestPath = Path.Combine(_autoSaveDir, "manifest.json");
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(new[] { manifestPath });
+        _sut.Start();
+        _sut.Stop();
+
+        _sut.MarkCleanShutdown().Should().BeTrue();
+
+        _fileSystem.Verify(f => f.DeleteFile(manifestPath), Times.Never);
+        _fileSystem.Verify(f => f.WriteAllTextAtomic(
+            Path.Combine(_autoSaveDir, ".clean-shutdown"),
+            It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public void RecordRecoveredEntries_SkipsOnlyResolvedEntriesFromOriginalManifest()
+    {
+        var manifestPath = Path.Combine(_autoSaveDir, "manifest.json");
+        var resolvedPath = Path.Combine(_autoSaveDir, "resolved.json");
+        var manifest = """
+            [
+              {"Id":"one","FileName":"one.txt","FilePath":null,"ContentFile":"one.txt","IsUntitled":true,"CursorOffset":0,"ScrollOffset":0},
+              {"Id":"two","FileName":"two.txt","FilePath":null,"ContentFile":"two.txt","IsUntitled":true,"CursorOffset":0,"ScrollOffset":0}
+            ]
+            """;
+        string? resolvedJson = null;
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(new[] { manifestPath });
+        _fileSystem.Setup(f => f.ReadAllText(manifestPath)).Returns(manifest);
+        foreach (var id in new[] { "one", "two" })
         {
-            Path.Combine(_autoSaveDir, "id1.txt"),
-            Path.Combine(_autoSaveDir, "id2.txt")
-        });
-        _mockFs.Setup(f => f.FileExists(Path.Combine(_autoSaveDir, "manifest.json"))).Returns(true);
+            var contentPath = Path.Combine(_autoSaveDir, $"{id}.txt");
+            _fileSystem.Setup(f => f.FileExists(contentPath)).Returns(true);
+            _fileSystem.Setup(f => f.ReadAllText(contentPath)).Returns(id);
+        }
+        _fileSystem.Setup(f => f.FileExists(resolvedPath))
+            .Returns(() => resolvedJson != null);
+        _fileSystem.Setup(f => f.ReadAllText(resolvedPath))
+            .Returns(() => resolvedJson!);
+        _fileSystem.Setup(f => f.WriteAllTextAtomic(resolvedPath, It.IsAny<string>()))
+            .Callback<string, string>((_, json) => resolvedJson = json);
+        var firstRecovery = _sut.GetRecoveryEntries();
+        var recoveredId = firstRecovery.Entries.Single(entry =>
+            entry.Id.EndsWith(":one", StringComparison.Ordinal)).Id;
 
-        _sut.ClearRecoveryFiles();
+        _sut.RecordRecoveredEntries(new[] { recoveredId }).Should().BeTrue();
+        var nextRecovery = _sut.GetRecoveryEntries();
 
-        _mockFs.Verify(f => f.DeleteFile(Path.Combine(_autoSaveDir, "id1.txt")), Times.Once);
-        _mockFs.Verify(f => f.DeleteFile(Path.Combine(_autoSaveDir, "id2.txt")), Times.Once);
-        _mockFs.Verify(f => f.DeleteFile(Path.Combine(_autoSaveDir, "manifest.json")), Times.Once);
+        nextRecovery.Success.Should().BeTrue();
+        nextRecovery.Entries.Should().ContainSingle(entry =>
+            entry.Id.EndsWith(":two", StringComparison.Ordinal));
+        _sut.ClearRecoveryFiles().Should().BeTrue();
+        _fileSystem.Verify(f => f.DeleteFile(Path.Combine(_autoSaveDir, "one.txt")), Times.Once);
+        _fileSystem.Verify(f => f.DeleteFile(Path.Combine(_autoSaveDir, "two.txt")), Times.Once);
     }
 
     [Fact]
-    public void ClearRecoveryFiles_DeleteFailure_LogsWarningAndContinues()
+    public void ClearRecoveryFiles_DeleteFailure_ReturnsFalseAndPreservesManifest()
     {
-        using var trace = new TraceCapture();
-        var firstFile = Path.Combine(_autoSaveDir, "id1.txt");
-        var secondFile = Path.Combine(_autoSaveDir, "id2.txt");
-        _mockFs.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
-        _mockFs.Setup(f => f.GetFiles(_autoSaveDir, "*.txt", false)).Returns(new[] { firstFile, secondFile });
-        _mockFs.Setup(f => f.DeleteFile(firstFile)).Throws(new IOException("locked"));
+        var contentPath = Path.Combine(_autoSaveDir, "id1.txt");
+        var manifestPath = Path.Combine(_autoSaveDir, "manifest.json");
+        var manifest = """[{"Id":"id1","FileName":"test.txt","FilePath":null,"ContentFile":"id1.txt","IsUntitled":true,"CursorOffset":0,"ScrollOffset":0}]""";
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(new[] { manifestPath });
+        _fileSystem.Setup(f => f.ReadAllText(manifestPath)).Returns(manifest);
+        _fileSystem.Setup(f => f.FileExists(contentPath)).Returns(true);
+        _fileSystem.Setup(f => f.ReadAllText(contentPath)).Returns("content");
+        _sut.GetRecoveryEntries();
+        _fileSystem.Setup(f => f.DeleteFile(contentPath)).Throws(new IOException("locked"));
 
-        _sut.ClearRecoveryFiles();
-        System.Diagnostics.Trace.Flush();
+        _sut.ClearRecoveryFiles().Should().BeFalse();
 
-        _mockFs.Verify(f => f.DeleteFile(secondFile), Times.Once);
-        trace.Messages.Should().Contain("Failed to delete auto-save recovery file");
-        trace.Messages.Should().Contain(firstFile);
+        _fileSystem.Verify(f => f.DeleteFile(manifestPath), Times.Never);
     }
 
-    [Fact]
-    public void ClearRecoveryFiles_GetFilesFailure_LogsWarning()
+    private string SetupRecoveryGeneration(
+        string manifestPath,
+        string contentFile,
+        string content)
     {
-        using var trace = new TraceCapture();
-        _mockFs.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
-        _mockFs.Setup(f => f.GetFiles(_autoSaveDir, "*.txt", false)).Throws(new IOException("unavailable"));
-
-        _sut.ClearRecoveryFiles();
-        System.Diagnostics.Trace.Flush();
-
-        trace.Messages.Should().Contain("Failed to clear auto-save recovery files");
+        var contentPath = Path.Combine(_autoSaveDir, contentFile);
+        var manifest = $$"""[{"Id":"shared","FileName":"test.txt","FilePath":"C:\\test.txt","ContentFile":"{{contentFile}}","IsUntitled":false,"CursorOffset":0,"ScrollOffset":0}]""";
+        _fileSystem.Setup(f => f.ReadAllText(manifestPath)).Returns(manifest);
+        _fileSystem.Setup(f => f.FileExists(contentPath)).Returns(true);
+        _fileSystem.Setup(f => f.ReadAllText(contentPath)).Returns(content);
+        return contentPath;
     }
 
-    [Fact]
-    public void IsEnabled_DefaultsToTrue()
+    private sealed class InlineDispatcherService : IDispatcherService
     {
-        _sut.IsEnabled.Should().BeTrue();
-    }
+        public bool IsInvoking { get; private set; }
 
-    [Fact]
-    public void IntervalSeconds_DefaultsTo60()
-    {
-        _sut.IntervalSeconds.Should().Be(60);
+        public void Invoke(Action action) => action();
+
+        public Task InvokeAsync(Action action)
+        {
+            action();
+            return Task.CompletedTask;
+        }
+
+        public Task<T> InvokeAsync<T>(Func<T> func)
+        {
+            IsInvoking = true;
+            try
+            {
+                return Task.FromResult(func());
+            }
+            finally
+            {
+                IsInvoking = false;
+            }
+        }
+
+        public bool CheckAccess() => true;
     }
 }

@@ -6,4 +6,12 @@ public static class CrashRecoveryStartupPolicy
     {
         return hasRecoveryFiles && !hasAnotherRunningInstance;
     }
+
+    public static bool ShouldClearRecoveryFiles(
+        bool userRequestedRecovery,
+        bool recoveryDataLoaded,
+        bool allEntriesRecovered)
+    {
+        return !userRequestedRecovery || (recoveryDataLoaded && allEntriesRecovered);
+    }
 }

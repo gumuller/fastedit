@@ -190,16 +190,36 @@ public partial class MainWindow : FluentWindow
 
                 if (result == Services.Interfaces.DialogResult.Yes)
                 {
-                    var entries = _autoSaveService.GetRecoveryEntries();
-                    foreach (var entry in entries)
+                    var recovery = _autoSaveService.GetRecoveryEntries();
+                    var tabRecovery = _viewModel.RecoverTabs(recovery.Entries);
+                    var recoveredAll = recovery.Success && tabRecovery.Success;
+                    var recoveryProgressSaved = recoveredAll ||
+                        tabRecovery.RecoveredEntryIds.Count == 0 ||
+                        _autoSaveService.RecordRecoveredEntries(tabRecovery.RecoveredEntryIds);
+                    if (CrashRecoveryStartupPolicy.ShouldClearRecoveryFiles(
+                        userRequestedRecovery: true,
+                        recoveryDataLoaded: recovery.Success,
+                        allEntriesRecovered: recoveredAll))
                     {
-                        var tab = _viewModel.RecoverTab(entry);
-                        if (tab != null) _viewModel.Tabs.Add(tab);
+                        TryClearRecoveryFiles(
+                            "Recovered content is open, but the recovery files could not be cleared.");
                     }
-                    if (_viewModel.Tabs.Count > 0)
-                        _viewModel.SelectedTab = _viewModel.Tabs[0];
+                    else
+                    {
+                        var detail = !recoveryProgressSaved
+                            ? "Recovered files could not be marked complete."
+                            : recovery.ErrorMessage ?? "One or more files could not be recovered.";
+                        ReportRecoveryFailure(detail);
+                    }
                 }
-                _autoSaveService.ClearRecoveryFiles();
+                else if (CrashRecoveryStartupPolicy.ShouldClearRecoveryFiles(
+                    userRequestedRecovery: false,
+                    recoveryDataLoaded: false,
+                    allEntriesRecovered: false))
+                {
+                    TryClearRecoveryFiles(
+                        "The recovery files could not be cleared after recovery was declined.");
+                }
             }
 
             await _viewModel.RestoreSessionAsync();
@@ -222,6 +242,26 @@ public partial class MainWindow : FluentWindow
         ApplyKeyBindings();
     }
 
+    private void TryClearRecoveryFiles(string failureMessage)
+    {
+        if (_autoSaveService.ClearRecoveryFiles())
+            return;
+
+        ReportRecoveryFailure(failureMessage);
+    }
+
+    private void ReportRecoveryFailure(string detail)
+    {
+        Trace.TraceWarning("Crash recovery did not complete: {0}", detail);
+        if (_viewModel != null)
+            _viewModel.StatusText = "Crash recovery incomplete; recovery files were retained.";
+        _dialogService.ShowMessage(
+            $"{detail}\n\nRecovery files were retained so you can try again.",
+            "Crash Recovery",
+            DialogButtons.Ok,
+            DialogIcon.Warning);
+    }
+
     private bool _isClosingConfirmed;
 
     private void SaveWindowState()
@@ -242,40 +282,48 @@ public partial class MainWindow : FluentWindow
         if (_viewModel == null) return;
 
         if (_isClosingConfirmed)
-        {
-            SaveEditorState();
-            SaveWindowState();
-            _viewModel.SaveSession();
             return;
-        }
-
-        if (!_viewModel.HasUnsavedChanges())
-        {
-            _isClosingConfirmed = true;
-            SaveEditorState();
-            SaveWindowState();
-            _viewModel.SaveSession();
-            return;
-        }
 
         e.Cancel = true;
+        if (_viewModel.HasUnsavedChanges() && !await _viewModel.ConfirmExitAsync())
+            return;
 
-        var canClose = await _viewModel.ConfirmExitAsync();
-        if (canClose)
+        IsEnabled = false;
+        _ = Dispatcher.BeginInvoke(
+            new Action(PersistSessionAndClose),
+            System.Windows.Threading.DispatcherPriority.Background);
+    }
+
+    private void PersistSessionAndClose()
+    {
+        if (_viewModel == null)
         {
-            _isClosingConfirmed = true;
-            // Defer the Close() call — calling it synchronously from inside an
-            // async-void Closing handler (even after the await) can race with
-            // WPF's internal "window is closing" state and throw
-            // "Cannot set Visibility / call Close … while a Window is closing".
-            _ = Dispatcher.BeginInvoke(new Action(() =>
-            {
-                SaveEditorState();
-                SaveWindowState();
-                _viewModel.SaveSession();
-                Close();
-            }), System.Windows.Threading.DispatcherPriority.Background);
+            IsEnabled = true;
+            return;
         }
+
+        try
+        {
+            SaveEditorState();
+            SaveWindowState();
+            _viewModel.SaveSession();
+        }
+        catch (Exception ex)
+        {
+            IsEnabled = true;
+            Trace.TraceError("Failed to persist the session during shutdown: {0}", ex);
+            if (_viewModel != null)
+                _viewModel.StatusText = "Unable to save the current session; FastEdit remains open.";
+            _dialogService.ShowMessage(
+                $"FastEdit could not save the current session:\n\n{ex.Message}",
+                "FastEdit - Save Failed",
+                DialogButtons.Ok,
+                DialogIcon.Error);
+            return;
+        }
+
+        _isClosingConfirmed = true;
+        Close();
     }
 
     private void SaveEditorState()

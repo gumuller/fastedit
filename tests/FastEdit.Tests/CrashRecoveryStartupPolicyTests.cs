@@ -20,4 +20,23 @@ public class CrashRecoveryStartupPolicyTests
 
         Assert.Equal(expected, result);
     }
+
+    [Theory]
+    [InlineData(false, false, false, true)]
+    [InlineData(true, false, false, false)]
+    [InlineData(true, true, false, false)]
+    [InlineData(true, true, true, true)]
+    public void ShouldClearRecoveryFiles_RequiresCompleteRequestedRecovery(
+        bool userRequestedRecovery,
+        bool recoveryDataLoaded,
+        bool allEntriesRecovered,
+        bool expected)
+    {
+        var result = CrashRecoveryStartupPolicy.ShouldClearRecoveryFiles(
+            userRequestedRecovery,
+            recoveryDataLoaded,
+            allEntriesRecovered);
+
+        Assert.Equal(expected, result);
+    }
 }

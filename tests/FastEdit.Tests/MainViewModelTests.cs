@@ -299,6 +299,29 @@ public class MainViewModelTests
     }
 
     [Fact]
+    public async Task CloseTab_EditedUntitledTab_PromptsAndKeepsTabOnCancel()
+    {
+        var tab = CreateMockTab("Untitled-1");
+        _tabFactory.Setup(f => f.CreateUntitled(null)).Returns(tab);
+        _sut.NewFileCommand.Execute(null);
+        tab.Content = "unsaved";
+        _dialogService.Setup(d => d.ShowMessage(
+                It.IsAny<string>(), It.IsAny<string>(),
+                DialogButtons.YesNoCancel, DialogIcon.Warning))
+            .Returns(Services.Interfaces.DialogResult.Cancel);
+
+        await _sut.CloseTabCoreAsync(tab);
+
+        Assert.True(tab.IsModified);
+        Assert.Single(_sut.Tabs);
+        _dialogService.Verify(d => d.ShowMessage(
+            It.Is<string>(message => message.Contains("Untitled-1")),
+            It.IsAny<string>(),
+            DialogButtons.YesNoCancel,
+            DialogIcon.Warning), Times.Once);
+    }
+
+    [Fact]
     public async Task CloseTab_ModifiedTab_No_RemovesWithoutSaving()
     {
         var tab = CreateMockTab("test.txt", isModified: true);
@@ -500,6 +523,24 @@ public class MainViewModelTests
     }
 
     [Fact]
+    public async Task ConfirmExit_EditedUntitledTab_PromptsAndCanCancel()
+    {
+        var tab = CreateMockTab("Untitled-1");
+        _tabFactory.Setup(f => f.CreateUntitled(null)).Returns(tab);
+        _sut.NewFileCommand.Execute(null);
+        tab.Content = "unsaved";
+        _dialogService.Setup(d => d.ShowMessage(
+                It.IsAny<string>(), It.IsAny<string>(),
+                DialogButtons.YesNoCancel, DialogIcon.Warning))
+            .Returns(Services.Interfaces.DialogResult.Cancel);
+
+        var canExit = await _sut.ConfirmExitAsync();
+
+        Assert.False(canExit);
+        Assert.True(tab.IsModified);
+    }
+
+    [Fact]
     public async Task ConfirmExit_No_ReturnsTrue()
     {
         var tab = CreateMockTab("test.txt", isModified: true);
@@ -513,6 +554,42 @@ public class MainViewModelTests
             .Returns(Services.Interfaces.DialogResult.No);
 
         Assert.True(await _sut.ConfirmExitAsync());
+    }
+
+    [Fact]
+    public async Task ConfirmExit_EditDuringSave_ReturnsFalse()
+    {
+        var tab = CreateMockTab("test.txt", @"C:\test.txt");
+        tab.Content = "snapshot";
+        _tabFactory.Setup(f => f.CreateUntitled(null)).Returns(tab);
+        _sut.NewFileCommand.Execute(null);
+        tab.IsModified = true;
+        _dialogService.Setup(d => d.ShowMessage(
+                It.IsAny<string>(), It.IsAny<string>(),
+                DialogButtons.YesNoCancel, DialogIcon.Warning))
+            .Returns(Services.Interfaces.DialogResult.Yes);
+        var writeStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var writeCompletion = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        _fileService.Setup(f => f.WriteFileWithEncodingAsync(
+                tab.FilePath,
+                "snapshot",
+                It.IsAny<System.Text.Encoding>(),
+                It.IsAny<bool>()))
+            .Returns(() =>
+            {
+                writeStarted.SetResult();
+                return writeCompletion.Task;
+            });
+
+        var confirmTask = _sut.ConfirmExitAsync();
+        await writeStarted.Task;
+        tab.Content = "newer edit";
+        writeCompletion.SetResult();
+
+        Assert.False(await confirmTask);
+        Assert.True(tab.IsModified);
     }
 
     // --- SaveSession ---
@@ -543,7 +620,23 @@ public class MainViewModelTests
         _sut.SaveSession();
 
         _fileSystemService.Verify(f => f.CreateDirectory(It.IsAny<string>()), Times.Once);
-        _fileSystemService.Verify(f => f.WriteAllText(It.IsAny<string>(), "hello world"), Times.Once);
+        _fileSystemService.Verify(f => f.WriteAllTextAtomic(It.IsAny<string>(), "hello world"), Times.Once);
+    }
+
+    [Fact]
+    public void SaveSession_SettingsFailure_DoesNotCleanPreviousSessionFiles()
+    {
+        var tab = CreateMockTab("Untitled-1");
+        tab.Content = "hello world";
+        _tabFactory.Setup(f => f.CreateUntitled(null)).Returns(tab);
+        _sut.NewFileCommand.Execute(null);
+        _settingsService.Setup(s => s.Save()).Throws(new IOException("disk full"));
+
+        Assert.Throws<IOException>(() => _sut.SaveSession());
+
+        _fileSystemService.Verify(
+            f => f.GetFiles(It.IsAny<string>(), "*.tmp", false),
+            Times.Never);
     }
 
     [Fact]
@@ -579,6 +672,235 @@ public class MainViewModelTests
         {
             File.Delete(tempFile);
         }
+    }
+
+    [Fact]
+    public async Task LoadSession_CancelledReplacement_KeepsCurrentWorkspace()
+    {
+        var current = CreateMockTab("current.txt", isModified: true);
+        _tabFactory.Setup(f => f.CreateUntitled(null)).Returns(current);
+        _sut.NewFileCommand.Execute(null);
+        current.IsModified = true;
+        _workspaceService.Setup(w => w.LoadNamedSession("saved"))
+            .Returns(new SessionData());
+        _dialogService.Setup(d => d.ShowMessage(
+                It.IsAny<string>(), It.IsAny<string>(),
+                DialogButtons.YesNoCancel, DialogIcon.Warning))
+            .Returns(Services.Interfaces.DialogResult.Cancel);
+
+        await _sut.LoadSessionCommand.ExecuteAsync("saved");
+
+        Assert.Same(current, Assert.Single(_sut.Tabs));
+        Assert.Same(current, _sut.SelectedTab);
+        _tabFactory.Verify(f => f.Create(), Times.Never);
+    }
+
+    [Fact]
+    public async Task LoadSession_SaveFailure_KeepsCurrentWorkspace()
+    {
+        var current = CreateMockTab("current.txt", @"C:\current.txt");
+        current.Content = "unsaved";
+        _tabFactory.Setup(f => f.CreateUntitled(null)).Returns(current);
+        _sut.NewFileCommand.Execute(null);
+        current.IsModified = true;
+        _workspaceService.Setup(w => w.LoadNamedSession("saved"))
+            .Returns(new SessionData());
+        _dialogService.Setup(d => d.ShowMessage(
+                It.IsAny<string>(), It.IsAny<string>(),
+                DialogButtons.YesNoCancel, DialogIcon.Warning))
+            .Returns(Services.Interfaces.DialogResult.Yes);
+        _fileService.Setup(f => f.WriteFileWithEncodingAsync(
+                current.FilePath,
+                current.Content,
+                It.IsAny<System.Text.Encoding>(),
+                It.IsAny<bool>()))
+            .ThrowsAsync(new IOException("disk full"));
+
+        await _sut.LoadSessionCommand.ExecuteAsync("saved");
+
+        Assert.Same(current, Assert.Single(_sut.Tabs));
+        Assert.Same(current, _sut.SelectedTab);
+        Assert.Contains("Error saving", _sut.StatusText);
+    }
+
+    [Fact]
+    public async Task LoadSession_DiscardChoiceIsNotPromptedTwiceWithoutNewEdits()
+    {
+        var current = CreateMockTab("current.txt", isModified: true);
+        _tabFactory.Setup(f => f.CreateUntitled(null)).Returns(current);
+        _sut.NewFileCommand.Execute(null);
+        current.IsModified = true;
+        _workspaceService.Setup(w => w.LoadNamedSession("saved"))
+            .Returns(new SessionData());
+        _dialogService.Setup(d => d.ShowMessage(
+                It.IsAny<string>(), It.IsAny<string>(),
+                DialogButtons.YesNoCancel, DialogIcon.Warning))
+            .Returns(Services.Interfaces.DialogResult.No);
+
+        await _sut.LoadSessionCommand.ExecuteAsync("saved");
+
+        Assert.Empty(_sut.Tabs);
+        _dialogService.Verify(d => d.ShowMessage(
+            It.IsAny<string>(), It.IsAny<string>(),
+            DialogButtons.YesNoCancel, DialogIcon.Warning), Times.Once);
+    }
+
+    [Fact]
+    public async Task LoadSession_StagingFailure_KeepsCurrentWorkspace()
+    {
+        var current = CreateMockTab("current.txt");
+        current.SetContentBaseline("keep", isModified: false);
+        _tabFactory.Setup(f => f.CreateUntitled(null)).Returns(current);
+        _sut.NewFileCommand.Execute(null);
+        var tempFile = Path.GetTempFileName();
+        try
+        {
+            var session = new SessionData
+            {
+                Files = { new SessionFileEntry { FilePath = tempFile } }
+            };
+            _workspaceService.Setup(w => w.LoadNamedSession("saved")).Returns(session);
+            _fileSystemService.Setup(f => f.FileExists(tempFile)).Returns(true);
+            var staged = CreateMockTab("staged.txt");
+            _tabFactory.Setup(f => f.Create()).Returns(staged);
+            _fileService.Setup(f => f.ReadFileWithEncodingAsync(tempFile))
+                .ThrowsAsync(new IOException("read failed"));
+
+            await _sut.LoadSessionCommand.ExecuteAsync("saved");
+
+            Assert.Same(current, Assert.Single(_sut.Tabs));
+            Assert.Same(current, _sut.SelectedTab);
+            Assert.Equal("keep", current.Content);
+            Assert.Contains("Failed to load session", _sut.StatusText);
+        }
+        finally
+        {
+            File.Delete(tempFile);
+        }
+    }
+
+    [Fact]
+    public async Task LoadSession_EditDuringStaging_ReconfirmsBeforeReplacement()
+    {
+        var current = CreateMockTab("current.txt");
+        current.SetContentBaseline("original", isModified: false);
+        _tabFactory.Setup(f => f.CreateUntitled(null)).Returns(current);
+        _sut.NewFileCommand.Execute(null);
+        var tempFile = Path.GetTempFileName();
+        try
+        {
+            var loadStarted = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var loadCompletion = new TaskCompletionSource<FileReadResult>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            _workspaceService.Setup(w => w.LoadNamedSession("saved"))
+                .Returns(new SessionData
+                {
+                    Files = { new SessionFileEntry { FilePath = tempFile } }
+                });
+            _fileSystemService.Setup(f => f.FileExists(tempFile)).Returns(true);
+            _tabFactory.Setup(f => f.Create()).Returns(CreateMockTab("staged.txt"));
+            _fileService.Setup(f => f.ReadFileWithEncodingAsync(tempFile))
+                .Returns(() =>
+                {
+                    loadStarted.SetResult();
+                    return loadCompletion.Task;
+                });
+            _dialogService.Setup(d => d.ShowMessage(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    DialogButtons.YesNoCancel, DialogIcon.Warning))
+                .Returns(Services.Interfaces.DialogResult.Cancel);
+
+            var loadTask = _sut.LoadSessionCommand.ExecuteAsync("saved");
+            await loadStarted.Task;
+            current.Content = "edited while loading";
+            loadCompletion.SetResult(new FileReadResult(
+                "replacement",
+                System.Text.Encoding.UTF8,
+                false));
+            await loadTask;
+
+            Assert.Same(current, Assert.Single(_sut.Tabs));
+            Assert.Equal("edited while loading", current.Content);
+            Assert.True(current.IsModified);
+        }
+        finally
+        {
+            File.Delete(tempFile);
+        }
+    }
+
+    [Fact]
+    public void AutoSaveIds_SavedPathsAreFullPathHashes()
+    {
+        var first = MainViewModel.CreateSavedFileAutoSaveId(@"C:\Users\alice\one.txt");
+        var second = MainViewModel.CreateSavedFileAutoSaveId(@"C:\Users\alice\two.txt");
+        var shortPath = MainViewModel.CreateSavedFileAutoSaveId(@"C:\a");
+
+        Assert.NotEqual(first, second);
+        Assert.StartsWith("file-", shortPath);
+        Assert.Equal(69, shortPath.Length);
+        Assert.Equal(
+            first,
+            MainViewModel.CreateSavedFileAutoSaveId(@"c:\users\ALICE\one.txt"));
+    }
+
+    [Fact]
+    public void AutoSaveIds_UntitledTabsRemainStableAcrossReordering()
+    {
+        var first = CreateMockTab("first");
+        var second = CreateMockTab("second");
+        _tabFactory.SetupSequence(f => f.CreateUntitled(null))
+            .Returns(first)
+            .Returns(second);
+        _sut.NewFileCommand.Execute(null);
+        _sut.NewFileCommand.Execute(null);
+        first.Content = "one";
+        second.Content = "two";
+        var idsBefore = _sut.GetAutoSaveEntries()
+            .ToDictionary(entry => entry.Content, entry => entry.Id);
+
+        _sut.Tabs.Move(0, 1);
+        var idsAfter = _sut.GetAutoSaveEntries()
+            .ToDictionary(entry => entry.Content, entry => entry.Id);
+
+        Assert.Equal(idsBefore["one"], idsAfter["one"]);
+        Assert.Equal(idsBefore["two"], idsAfter["two"]);
+        Assert.NotEqual(idsBefore["one"], idsBefore["two"]);
+    }
+
+    [Fact]
+    public void RecoverTab_MarksRecoveredContentModified()
+    {
+        var tab = CreateMockTab("recovered.txt");
+        _tabFactory.Setup(f => f.CreateUntitled("recovered")).Returns(tab);
+
+        var recovered = _sut.RecoverTab(new AutoSaveEntry(
+            "id", "recovered.txt", @"C:\recovered.txt", "recovered", false));
+
+        Assert.True(recovered.IsModified);
+        Assert.Equal(@"C:\recovered.txt", recovered.FilePath);
+    }
+
+    [Fact]
+    public void RecoverTabs_PartialFailureReportsFailureAndKeepsRecoveredTabs()
+    {
+        var first = CreateMockTab("one.txt");
+        _tabFactory.Setup(f => f.CreateUntitled("one")).Returns(first);
+        _tabFactory.Setup(f => f.CreateUntitled("two"))
+            .Throws(new InvalidOperationException("restore failed"));
+        var entries = new[]
+        {
+            new AutoSaveEntry("one", "one.txt", null, "one", true),
+            new AutoSaveEntry("two", "two.txt", null, "two", true)
+        };
+
+        var recovery = _sut.RecoverTabs(entries);
+
+        Assert.False(recovery.Success);
+        Assert.Equal(new[] { "one" }, recovery.RecoveredEntryIds);
+        Assert.Same(first, Assert.Single(_sut.Tabs));
+        Assert.Contains("recovery files were retained", _sut.StatusText);
     }
 
     // --- RestoreSession ---

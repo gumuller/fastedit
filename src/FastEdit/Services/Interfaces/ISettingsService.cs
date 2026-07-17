@@ -2,6 +2,8 @@ namespace FastEdit.Services.Interfaces;
 
 public interface ISettingsService
 {
+    event EventHandler? AutoSaveIntervalChanged;
+
     string ThemeName { get; set; }
     string? LastOpenedFolder { get; set; }
     List<SessionFile> OpenFiles { get; set; }

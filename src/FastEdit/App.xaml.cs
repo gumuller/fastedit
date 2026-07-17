@@ -116,6 +116,7 @@ public partial class App : Application
         var autoSave = Services.GetRequiredService<AutoSaveService>();
         var mainVm = Services.GetRequiredService<MainViewModel>();
         autoSave.SetEntryProvider(() => mainVm.GetAutoSaveEntries());
+        autoSave.IntervalSeconds = settingsService.AutoSaveIntervalSeconds;
         autoSave.Start();
     }
 

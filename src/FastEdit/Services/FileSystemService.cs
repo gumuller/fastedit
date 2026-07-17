@@ -18,6 +18,27 @@ public class FileSystemService : IFileSystemService
     public Task<string> ReadAllTextAsync(string path) => File.ReadAllTextAsync(path);
     public void WriteAllText(string path, string content) => File.WriteAllText(path, content);
     public void WriteAllText(string path, string content, Encoding encoding) => File.WriteAllText(path, content, encoding);
+    public void WriteAllTextAtomic(string path, string content)
+    {
+        var directory = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(directory))
+            Directory.CreateDirectory(directory);
+
+        var tempPath = Path.Combine(directory ?? string.Empty, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            File.WriteAllText(tempPath, content);
+            if (File.Exists(path))
+                File.Replace(tempPath, path, destinationBackupFileName: null, ignoreMetadataErrors: true);
+            else
+                File.Move(tempPath, path);
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+                File.Delete(tempPath);
+        }
+    }
     public void WriteAllBytes(string path, byte[] bytes) => File.WriteAllBytes(path, bytes);
     public void CopyFile(string source, string destination, bool overwrite = false) => File.Copy(source, destination, overwrite);
     public void DeleteFile(string path) => File.Delete(path);

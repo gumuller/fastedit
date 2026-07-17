@@ -22,6 +22,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     private VirtualizedByteBuffer? _byteBuffer;
     private LargeFileDocument? _largeFileDoc;
     private bool _disposed;
+    private bool _isSettingContentBaseline;
 
     private Encoding _fileEncoding = new UTF8Encoding(false);
     private bool _hasBom;
@@ -107,6 +108,8 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
 
     public Encoding FileEncoding => _fileEncoding;
     public bool HasBom => _hasBom;
+    public string AutoSaveIdentity { get; } = Guid.NewGuid().ToString("N");
+    public long ChangeVersion { get; private set; }
 
     public EditorTabViewModel(IFileService fileService, IFileSystemService fileSystemService, IDialogService dialogService)
     {
@@ -139,6 +142,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
             _byteBuffer = new VirtualizedByteBuffer(filePath);
             _byteBuffer.ModificationsChanged += (s, e) =>
             {
+                ChangeVersion++;
                 IsModified = _byteBuffer.HasModifications;
             };
         }
@@ -153,7 +157,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         {
             Mode = FileOpenMode.Text;
             var result = await _fileService.ReadFileWithEncodingAsync(filePath);
-            Content = result.Content;
+            SetContentBaseline(result.Content, isModified: false);
             _fileEncoding = result.Encoding;
             _hasBom = result.HasBom;
             Encoding = GetEncodingDisplayName(result.Encoding, result.HasBom);
@@ -209,14 +213,16 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
                 return false; // User cancelled
         }
 
-        await _fileService.WriteFileWithEncodingAsync(savePath, Content, _fileEncoding, _hasBom);
+        var changeVersion = ChangeVersion;
+        var content = Content;
+        await _fileService.WriteFileWithEncodingAsync(savePath, content, _fileEncoding, _hasBom);
 
         // Update metadata after successful save
         FilePath = savePath;
         FileName = Path.GetFileName(savePath);
         SyntaxLanguage = Mode == FileOpenMode.Text ? SyntaxLanguageResolver.Resolve(savePath) : string.Empty;
-        IsModified = false;
-        return true;
+        IsModified = ChangeVersion != changeVersion;
+        return !IsModified;
     }
 
     [RelayCommand]
@@ -260,14 +266,18 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         }
         else
         {
-            await _fileService.WriteFileWithEncodingAsync(savePath, Content, _fileEncoding, _hasBom);
+            var changeVersion = ChangeVersion;
+            var content = Content;
+            await _fileService.WriteFileWithEncodingAsync(savePath, content, _fileEncoding, _hasBom);
+            IsModified = ChangeVersion != changeVersion;
         }
 
         FilePath = savePath;
         FileName = Path.GetFileName(savePath);
         SyntaxLanguage = SyntaxLanguageResolver.Resolve(savePath);
-        IsModified = false;
-        return true;
+        if (Mode != FileOpenMode.Text)
+            IsModified = false;
+        return !IsModified;
     }
 
     [RelayCommand]
@@ -299,7 +309,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
             }
 
             var result = await _fileService.ReadFileWithEncodingAsync(FilePath);
-            Content = result.Content;
+            SetContentBaseline(result.Content, isModified: false);
             _fileEncoding = result.Encoding;
             _hasBom = result.HasBom;
             Encoding = GetEncodingDisplayName(result.Encoding, result.HasBom);
@@ -311,12 +321,13 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
             _largeFileDoc?.Dispose();
             _largeFileDoc = null;
             Mode = FileOpenMode.Binary;
-            Content = string.Empty;
+            SetContentBaseline(string.Empty, isModified: false);
             Encoding = "Binary";
             SyntaxLanguage = string.Empty;
             _byteBuffer = new VirtualizedByteBuffer(FilePath);
             _byteBuffer.ModificationsChanged += (s, e) =>
             {
+                ChangeVersion++;
                 IsModified = _byteBuffer.HasModifications;
             };
         }
@@ -324,9 +335,24 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
 
     partial void OnContentChanged(string value)
     {
-        if (!string.IsNullOrEmpty(FilePath))
+        if (!_isSettingContentBaseline)
         {
+            ChangeVersion++;
             IsModified = true;
+        }
+    }
+
+    public void SetContentBaseline(string content, bool isModified)
+    {
+        _isSettingContentBaseline = true;
+        try
+        {
+            Content = content;
+            IsModified = isModified;
+        }
+        finally
+        {
+            _isSettingContentBaseline = false;
         }
     }
 
@@ -336,7 +362,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         _disposed = true;
 
         ReleaseLoadedResources();
-        Content = string.Empty;
+        SetContentBaseline(string.Empty, isModified: false);
 
         GC.SuppressFinalize(this);
     }
