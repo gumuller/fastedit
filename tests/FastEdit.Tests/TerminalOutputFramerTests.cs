@@ -8,16 +8,17 @@ public class TerminalOutputFramerTests
     private const string CommandToken = "00112233445566778899aabbccddeeff";
 
     [Fact]
-    public void Append_OrdinaryLineSplitAcrossChunks_EmitsOneCompleteLine()
+    public void Append_OrdinaryLineSplitAcrossChunks_EmitsSafePartialContentPromptly()
     {
-        var framer = new TerminalOutputFramer();
+        var framer = new TerminalOutputFramer(emitPartialChunks: true);
 
-        Assert.Empty(framer.Append("ordinary par"));
-        var frames = framer.Append("tial output\r\n");
+        var firstFrames = framer.Append("ordinary par");
+        var secondFrames = framer.Append("tial output\r\n");
+        var completedFrames = framer.Complete();
 
-        var frame = Assert.Single(frames);
-        Assert.Equal(TerminalOutputFrameKind.Output, frame.Kind);
-        Assert.Equal("ordinary partial output\n", frame.Text);
+        Assert.Equal("ordinary par", Assert.Single(firstFrames).Text);
+        Assert.Equal("tial output\n", Assert.Single(secondFrames).Text);
+        Assert.Empty(completedFrames);
     }
 
     [Fact]
@@ -103,7 +104,7 @@ public class TerminalOutputFramerTests
     [Fact]
     public void Append_SentinelSplitAcrossChunks_ParsesOnceAndNeverEmitsMarker()
     {
-        var framer = new TerminalOutputFramer();
+        var framer = new TerminalOutputFramer(emitPartialChunks: true);
 
         Assert.Empty(framer.Append("##FASTEDIT_SENT"));
         Assert.Empty(framer.Append($"INEL##42|{CommandToken}|C:\\work"));
@@ -119,26 +120,41 @@ public class TerminalOutputFramerTests
     }
 
     [Fact]
+    public void Append_ProtocolSeparatorBeforeSentinel_IsConsumedWithoutDroppingUserBlankLines()
+    {
+        var framer = new TerminalOutputFramer();
+
+        var frames = framer.Append(
+            $"HELLO\n\n\n{TerminalOutputFramer.SentinelPrefix}42|{CommandToken}|C:\\work\r\n");
+
+        Assert.Equal("HELLO\n\n", string.Concat(
+            frames.Where(frame => frame.Kind == TerminalOutputFrameKind.Output)
+                .Select(frame => frame.Text)));
+        Assert.Single(frames, frame => frame.Kind == TerminalOutputFrameKind.Sentinel);
+    }
+
+    [Fact]
     public void Append_MultipleChunkedLines_PreservesPerStreamOrder()
     {
         var framer = new TerminalOutputFramer();
 
         var firstFrames = framer.Append("first\nsec");
         var secondFrames = framer.Append("ond\nthird\n");
+        var completedFrames = framer.Complete();
 
-        Assert.Equal("first\n", Assert.Single(firstFrames).Text);
         Assert.Equal(
-            ["second\n", "third\n"],
-            secondFrames.Select(frame => frame.Text));
+            "first\nsecond\nthird\n",
+            string.Concat(firstFrames.Concat(secondFrames).Concat(completedFrames)
+                .Select(frame => frame.Text)));
     }
 
     [Fact]
     public void Complete_PreservesOrdinaryUnterminatedOutput()
     {
-        var framer = new TerminalOutputFramer();
-        Assert.Empty(framer.Append("unterminated"));
+        var framer = new TerminalOutputFramer(emitPartialChunks: true);
+        var frames = framer.Append("unterminated");
 
-        var frame = Assert.Single(framer.Complete());
+        var frame = Assert.Single(frames);
 
         Assert.Equal(TerminalOutputFrameKind.Output, frame.Kind);
         Assert.Equal("unterminated", frame.Text);

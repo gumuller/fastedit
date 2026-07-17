@@ -186,6 +186,42 @@ public class CommandRunnerServiceTests
     }
 
     [Fact]
+    public async Task ExecuteCommand_EmitsUnterminatedStdoutBeforeLaterStderr()
+    {
+        await using var sut = new CommandRunnerService();
+        await StartReadyShellAsync(sut);
+        var output = new StringBuilder();
+        sut.OutputReceived += text => output.Append(text);
+
+        var completed = WaitForNextCompletionAsync(sut);
+        await sut.ExecuteCommandAsync(
+            "[Console]::Out.Write('O1'); [Console]::Out.Flush(); " +
+            "Start-Sleep -Milliseconds 200; [Console]::Error.WriteLine('E1')");
+        await completed;
+
+        var text = output.ToString();
+        Assert.Contains("O1", text);
+        Assert.Contains("E1", text);
+        Assert.True(
+            text.IndexOf("O1", StringComparison.Ordinal) <
+            text.IndexOf("E1", StringComparison.Ordinal),
+            $"Expected stdout before stderr, but received: {text}");
+    }
+
+    [Fact]
+    public async Task ExecuteCommand_ConsumesOnlyProtocolSeparatorNewLine()
+    {
+        await using var sut = new CommandRunnerService();
+        await StartReadyShellAsync(sut);
+        var output = new StringBuilder();
+        sut.OutputReceived += text => output.Append(text);
+
+        await ExecuteAndWaitAsync(sut, "Write-Output 'HELLO'");
+
+        Assert.Equal("HELLO\n", output.ToString());
+    }
+
+    [Fact]
     public async Task SetupLikeUserOutput_IsNotSuppressed()
     {
         await using var sut = new CommandRunnerService();

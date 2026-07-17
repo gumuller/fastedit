@@ -46,13 +46,13 @@ internal sealed class TerminalOutputFramer
         var frames = new List<TerminalOutputFrame>();
         var start = 0;
 
-        for (var i = _scanIndex; i < _pending.Length; i++)
+        for (var index = _scanIndex; index < _pending.Length; index++)
         {
-            if (_pending[i] != '\n')
+            if (_pending[index] != '\n')
                 continue;
 
-            AddCompleteLineFrames(_pending.ToString(start, i - start), frames);
-            start = i + 1;
+            AddCompleteLineFrames(_pending.ToString(start, index - start), frames);
+            start = index + 1;
         }
 
         if (start > 0)
@@ -66,7 +66,6 @@ internal sealed class TerminalOutputFramer
         }
 
         DrainSafePartialOutput(frames);
-
         return frames;
     }
 
@@ -77,6 +76,7 @@ internal sealed class TerminalOutputFramer
         _deferredBlankLineCount = 0;
         if (_pending.Length > 0)
             frames.Add(CreateFrame(_pending.ToString(), hasNewLine: false));
+
         _pending.Clear();
         _scanIndex = 0;
         _hasEmittedPartialLineContent = false;
@@ -135,7 +135,6 @@ internal sealed class TerminalOutputFramer
             return ParseSentinel(line[(sentinelIndex + SentinelPrefix.Length)..]);
 
         var cleaned = CommandRunnerService.StripAnsiCodes(line);
-
         return new TerminalOutputFrame(
             TerminalOutputFrameKind.Output,
             hasNewLine ? cleaned + "\n" : cleaned,
@@ -182,19 +181,19 @@ internal sealed class TerminalOutputFramer
         var output = CommandRunnerService.StripAnsiCodes(_pending.ToString(0, length));
         _pending.Remove(0, length);
         _scanIndex = _pending.Length;
-        if (!string.IsNullOrEmpty(output))
-        {
-            AddDeferredBlankLines(frames, _deferredBlankLineCount);
-            _deferredBlankLineCount = 0;
-            _hasEmittedPartialLineContent = true;
-            frames.Add(new TerminalOutputFrame(
-                TerminalOutputFrameKind.Output,
-                output,
-                0,
-                Guid.Empty,
-                "",
-                false));
-        }
+        if (string.IsNullOrEmpty(output))
+            return;
+
+        AddDeferredBlankLines(frames, _deferredBlankLineCount);
+        _deferredBlankLineCount = 0;
+        _hasEmittedPartialLineContent = true;
+        frames.Add(new TerminalOutputFrame(
+            TerminalOutputFrameKind.Output,
+            output,
+            0,
+            Guid.Empty,
+            "",
+            false));
     }
 
     private static int GetPossibleSentinelPrefixLength(string text)
@@ -215,7 +214,11 @@ internal sealed class TerminalOutputFramer
         var tokenSeparator = idSeparator < 0 ? -1 : payload.IndexOf('|', idSeparator + 1);
         if (idSeparator <= 0 ||
             tokenSeparator <= idSeparator + 1 ||
-            !int.TryParse(payload.AsSpan(0, idSeparator), NumberStyles.None, CultureInfo.InvariantCulture, out var commandId) ||
+            !int.TryParse(
+                payload.AsSpan(0, idSeparator),
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out var commandId) ||
             !Guid.TryParseExact(
                 payload.AsSpan(idSeparator + 1, tokenSeparator - idSeparator - 1),
                 "N",
