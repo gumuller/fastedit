@@ -175,6 +175,7 @@ internal sealed class TerminalOutputFramer
 
     private void EmitPartialPrefix(List<TerminalOutputFrame> frames, int length)
     {
+        length -= GetIncompleteAnsiSuffixLength(_pending.ToString(0, length));
         if (length <= 0)
             return;
 
@@ -206,6 +207,27 @@ internal sealed class TerminalOutputFramer
         }
 
         return 0;
+    }
+
+    private static int GetIncompleteAnsiSuffixLength(string text)
+    {
+        var escapeIndex = text.LastIndexOf('\x1B');
+        if (escapeIndex < 0)
+            return 0;
+
+        if (escapeIndex == text.Length - 1)
+            return 1;
+
+        if (text[escapeIndex + 1] != '[')
+            return 0;
+
+        for (var index = escapeIndex + 2; index < text.Length; index++)
+        {
+            if (text[index] is >= '\x40' and <= '\x7E')
+                return 0;
+        }
+
+        return text.Length - escapeIndex;
     }
 
     private static TerminalOutputFrame ParseSentinel(string payload)

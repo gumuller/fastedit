@@ -36,6 +36,51 @@ public class TerminalOutputFramerTests
     }
 
     [Fact]
+    public void Append_StreamingStdout_RetainsSplitColorSequenceUntilComplete()
+    {
+        var framer = new TerminalOutputFramer(emitPartialChunks: true);
+
+        Assert.Empty(framer.Append("\x1B[31"));
+        var frames = framer.Append("mRED\x1B[0m\n");
+
+        Assert.Equal("RED\n", Assert.Single(frames).Text);
+    }
+
+    [Fact]
+    public void Append_StreamingStdout_EmitsTextBeforeSplitResetWithoutLeakingEscape()
+    {
+        var framer = new TerminalOutputFramer(emitPartialChunks: true);
+
+        var firstFrames = framer.Append("\x1B[31mRED\x1B[0");
+        var secondFrames = framer.Append("m plain");
+
+        Assert.Equal("RED", Assert.Single(firstFrames).Text);
+        Assert.Equal(" plain", Assert.Single(secondFrames).Text);
+    }
+
+    [Fact]
+    public void Append_StreamingStdout_SplitResetBeforeSentinelPreservesFraming()
+    {
+        var framer = new TerminalOutputFramer(emitPartialChunks: true);
+        var frames = new List<TerminalOutputFrame>();
+
+        frames.AddRange(framer.Append("\x1B[31mRED\x1B[0"));
+        frames.AddRange(framer.Append(
+            $"m\n\n{TerminalOutputFramer.SentinelPrefix}42|{CommandToken}|C:\\work\n"));
+
+        Assert.Equal(
+            "RED\n",
+            string.Concat(frames
+                .Where(frame => frame.Kind == TerminalOutputFrameKind.Output)
+                .Select(frame => frame.Text)));
+        var sentinel = Assert.Single(
+            frames,
+            frame => frame.Kind == TerminalOutputFrameKind.Sentinel);
+        Assert.True(sentinel.IsValidSentinel);
+        Assert.Equal(42, sentinel.CommandId);
+    }
+
+    [Fact]
     public void Append_StreamingStdout_PreservesLaterLineTerminators()
     {
         var framer = new TerminalOutputFramer(emitPartialChunks: true);
