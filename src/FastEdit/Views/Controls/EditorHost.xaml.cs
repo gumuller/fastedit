@@ -1459,15 +1459,11 @@ public partial class EditorHost : UserControl
         if (e.PropertyName == nameof(EditorTabViewModel.Content))
         {
             if (IsTextMode(vm) && TextEditor.Text != vm.Content)
-            {
                 TextEditor.Text = vm.Content;
-                ScheduleStateRestore(vm);
-            }
         }
         else if (e.PropertyName == nameof(EditorTabViewModel.Mode))
         {
             UpdateEditor(vm);
-            ScheduleStateRestore(vm);
         }
     }
 
