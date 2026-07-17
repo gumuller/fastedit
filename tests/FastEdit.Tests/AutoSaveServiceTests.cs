@@ -934,78 +934,50 @@ public class AutoSaveServiceTests
     public void CompleteRecovery_ManifestIdentityCorruptionRetainsSourceGeneration(
         string? corruptIdentity)
     {
-        var sourceManifestPath = Path.Combine(_autoSaveDir, "manifest-crashed.json");
-        var sourceContentPath = Path.Combine(_autoSaveDir, "crashed.txt");
-        var sourceManifest = """
-            [{
-              "Id":"old",
-              "TabIdentity":"stable",
-              "FileName":"recovered.txt",
-              "FilePath":null,
-              "ContentFile":"crashed.txt",
-              "IsUntitled":true,
-              "CursorOffset":0,
-              "ScrollOffset":0
-            }]
-            """;
-        var files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        var result = CompleteRecoveryWithManifestCorruption(manifestEntry =>
         {
-            [sourceManifestPath] = sourceManifest,
-            [sourceContentPath] = "recovered"
-        };
-        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
-        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
-            .Returns(() => files.Keys
-                .Where(path =>
-                    Path.GetFileName(path).StartsWith(
-                        "manifest",
-                        StringComparison.OrdinalIgnoreCase))
-                .ToArray());
-        _fileSystem.Setup(f => f.FileExists(It.IsAny<string>()))
-            .Returns((string path) => files.ContainsKey(path));
-        _fileSystem.Setup(f => f.ReadAllText(It.IsAny<string>()))
-            .Returns((string path) => files[path]);
-        _fileSystem.Setup(f => f.WriteAllTextAtomic(
-                It.IsAny<string>(),
-                It.IsAny<string>()))
-            .Callback<string, string>((path, content) =>
-            {
-                if (path != sourceManifestPath &&
-                    Path.GetFileName(path).StartsWith(
-                        "manifest-",
-                        StringComparison.Ordinal))
-                {
-                    var manifest = JsonNode.Parse(content)!.AsArray();
-                    var manifestEntry = manifest[0]!.AsObject();
-                    if (corruptIdentity == null)
-                        manifestEntry.Remove("TabIdentity");
-                    else
-                        manifestEntry["TabIdentity"] = corruptIdentity;
-                    content = manifest.ToJsonString(
-                        new JsonSerializerOptions { WriteIndented = true });
-                }
+            if (corruptIdentity == null)
+                manifestEntry.Remove("TabIdentity");
+            else
+                manifestEntry["TabIdentity"] = corruptIdentity;
+        });
 
-                files[path] = content;
-            });
-        var recovery = _sut.GetRecoveryEntries();
-        var replacement = new AutoSaveEntry(
-            "tab-stable",
-            "recovered.txt",
-            null,
-            "recovered",
-            true,
-            TabIdentity: "stable");
-
-        var completed = _sut.CompleteRecovery(
-            new[] { replacement },
-            recovery.Entries.Select(entry => entry.Id),
-            allEntriesRecovered: true);
-
-        completed.Should().BeFalse();
-        files.Should().ContainKey(sourceManifestPath);
-        files[sourceManifestPath].Should().Be(sourceManifest);
+        result.Completed.Should().BeFalse();
+        result.Files.Should().ContainKey(result.SourceManifestPath);
+        result.Files[result.SourceManifestPath].Should().Be(result.SourceManifest);
         _fileSystem.Verify(f => f.MoveFile(
-            sourceManifestPath,
+            result.SourceManifestPath,
+            It.IsAny<string>(),
+            false), Times.Never);
+    }
+
+    [Theory]
+    [InlineData("crashed.txt")]
+    [InlineData(@"..\crashed.txt")]
+    public void CompleteRecovery_ManifestContentFileCorruptionRetainsSourceGeneration(
+        string corruptContentFile)
+    {
+        var result = CompleteRecoveryWithManifestCorruption(
+            manifestEntry => manifestEntry["ContentFile"] = corruptContentFile);
+
+        result.Completed.Should().BeFalse();
+        result.Files.Should().ContainKey(result.SourceManifestPath);
+        result.Files[result.SourceManifestPath].Should().Be(result.SourceManifest);
+        _fileSystem.Verify(
+            f => f.ReadAllText(result.SourceContentPath),
+            Times.Once);
+        var corruptPath = Path.Combine(_autoSaveDir, corruptContentFile);
+        if (!string.Equals(
+                corruptPath,
+                result.SourceContentPath,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            _fileSystem.Verify(
+                f => f.ReadAllText(corruptPath),
+                Times.Never);
+        }
+        _fileSystem.Verify(f => f.MoveFile(
+            result.SourceManifestPath,
             It.IsAny<string>(),
             false), Times.Never);
     }
@@ -1079,6 +1051,86 @@ public class AutoSaveServiceTests
         _fileSystem.Setup(f => f.ReadAllText(contentPath)).Returns(content);
         return contentPath;
     }
+
+    private CorruptRecoveryResult CompleteRecoveryWithManifestCorruption(
+        Action<JsonObject> corruptManifest)
+    {
+        var sourceManifestPath = Path.Combine(_autoSaveDir, "manifest-crashed.json");
+        var sourceContentPath = Path.Combine(_autoSaveDir, "crashed.txt");
+        var sourceManifest = """
+            [{
+              "Id":"old",
+              "TabIdentity":"stable",
+              "FileName":"recovered.txt",
+              "FilePath":null,
+              "ContentFile":"crashed.txt",
+              "IsUntitled":true,
+              "CursorOffset":0,
+              "ScrollOffset":0
+            }]
+            """;
+        var files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            [sourceManifestPath] = sourceManifest,
+            [sourceContentPath] = "recovered"
+        };
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(() => files.Keys
+                .Where(path =>
+                    Path.GetFileName(path).StartsWith(
+                        "manifest",
+                        StringComparison.OrdinalIgnoreCase))
+                .ToArray());
+        _fileSystem.Setup(f => f.FileExists(It.IsAny<string>()))
+            .Returns((string path) => files.ContainsKey(path));
+        _fileSystem.Setup(f => f.ReadAllText(It.IsAny<string>()))
+            .Returns((string path) => files[path]);
+        _fileSystem.Setup(f => f.WriteAllTextAtomic(
+                It.IsAny<string>(),
+                It.IsAny<string>()))
+            .Callback<string, string>((path, content) =>
+            {
+                if (path != sourceManifestPath &&
+                    Path.GetFileName(path).StartsWith(
+                        "manifest-",
+                        StringComparison.Ordinal))
+                {
+                    var manifest = JsonNode.Parse(content)!.AsArray();
+                    corruptManifest(manifest[0]!.AsObject());
+                    content = manifest.ToJsonString(
+                        new JsonSerializerOptions { WriteIndented = true });
+                }
+
+                files[path] = content;
+            });
+        var recovery = _sut.GetRecoveryEntries();
+        var replacement = new AutoSaveEntry(
+            "tab-stable",
+            "recovered.txt",
+            null,
+            "recovered",
+            true,
+            TabIdentity: "stable");
+        var completed = _sut.CompleteRecovery(
+            new[] { replacement },
+            recovery.Entries.Select(entry => entry.Id),
+            allEntriesRecovered: true);
+
+        return new CorruptRecoveryResult(
+            completed,
+            sourceManifestPath,
+            sourceContentPath,
+            sourceManifest,
+            files);
+    }
+
+    private sealed record CorruptRecoveryResult(
+        bool Completed,
+        string SourceManifestPath,
+        string SourceContentPath,
+        string SourceManifest,
+        IReadOnlyDictionary<string, string> Files);
 
     private sealed class InlineDispatcherService : IDispatcherService
     {

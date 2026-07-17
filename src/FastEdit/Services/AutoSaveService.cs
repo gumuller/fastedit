@@ -156,10 +156,18 @@ public sealed class AutoSaveService : IAutoSaveService
 
             _fileSystem.CreateDirectory(_autoSaveDir);
             var manifest = new List<AutoSaveManifestEntry>(snapshot.Length);
+            var contentFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var entry in snapshot)
             {
                 var contentFile = $"{_activeContentPrefix}{entry.Id}.txt";
+                if (!IsSafeSameDirectoryFileName(contentFile) ||
+                    !contentFiles.Add(contentFile))
+                {
+                    throw new InvalidDataException(
+                        $"The auto-save identity for '{entry.FileName}' is not storage-safe and unique.");
+                }
+
                 _fileSystem.WriteAllTextAtomic(
                     Path.Combine(_autoSaveDir, contentFile),
                     entry.Content);
@@ -200,6 +208,7 @@ public sealed class AutoSaveService : IAutoSaveService
         var storedById = storedManifest.ToDictionary(entry => entry.Id, StringComparer.Ordinal);
         foreach (var entry in snapshot)
         {
+            var expectedContentFile = $"{_activeContentPrefix}{entry.Id}.txt";
             if (!storedById.TryGetValue(entry.Id, out var stored) ||
                 !string.Equals(
                     stored.TabIdentity,
@@ -207,6 +216,11 @@ public sealed class AutoSaveService : IAutoSaveService
                     StringComparison.Ordinal) ||
                 stored.FileName != entry.FileName ||
                 stored.FilePath != entry.FilePath ||
+                !IsSafeSameDirectoryFileName(stored.ContentFile) ||
+                !string.Equals(
+                    stored.ContentFile,
+                    expectedContentFile,
+                    StringComparison.Ordinal) ||
                 stored.IsUntitled != entry.IsUntitled ||
                 stored.CursorOffset != entry.CursorOffset ||
                 stored.ScrollOffset != entry.ScrollOffset)
@@ -224,6 +238,12 @@ public sealed class AutoSaveService : IAutoSaveService
             }
         }
     }
+
+    private static bool IsSafeSameDirectoryFileName(string fileName) =>
+        !string.IsNullOrWhiteSpace(fileName) &&
+        !Path.IsPathRooted(fileName) &&
+        string.Equals(Path.GetFileName(fileName), fileName, StringComparison.Ordinal) &&
+        fileName.IndexOfAny(Path.GetInvalidFileNameChars()) < 0;
 
     public bool MarkCleanShutdown()
     {

@@ -1380,7 +1380,7 @@ public class MainViewModelTests
                     new()
                     {
                         FilePath = "Untitled-1",
-                        TabIdentity = "shared-identity",
+                        TabIdentity = "SHARED-IDENTITY",
                         IsUntitled = true,
                         Content = "staged content"
                     },
@@ -1415,7 +1415,8 @@ public class MainViewModelTests
             Assert.Equal("live content", liveUntitled.Content);
             Assert.NotEqual(
                 liveUntitled.AutoSaveIdentity,
-                stagedUntitled.AutoSaveIdentity);
+                stagedUntitled.AutoSaveIdentity,
+                StringComparer.OrdinalIgnoreCase);
             var autoSaveEntries = _sut.GetAutoSaveEntries()
                 .Where(entry =>
                     entry.Content is "live content" or "staged content")
@@ -1423,7 +1424,10 @@ public class MainViewModelTests
             Assert.Equal(2, autoSaveEntries.Count);
             Assert.Equal(
                 2,
-                autoSaveEntries.Select(entry => entry.Id).Distinct().Count());
+                autoSaveEntries
+                    .Select(entry => entry.Id)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Count());
             Assert.Equal(
                 new[] { "live content", "staged content" },
                 autoSaveEntries

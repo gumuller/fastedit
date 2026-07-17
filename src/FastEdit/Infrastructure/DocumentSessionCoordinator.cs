@@ -7,6 +7,9 @@ namespace FastEdit.Infrastructure;
 
 public sealed class DocumentSessionCoordinator
 {
+    private const int MaxPersistedTabIdentityLength = 128;
+    private static readonly StringComparer StorageIdentityComparer =
+        StringComparer.OrdinalIgnoreCase;
     private readonly ISettingsService _settingsService;
     private readonly IFileSystemService _fileSystemService;
     private readonly IEditorTabFactory _tabFactory;
@@ -214,8 +217,12 @@ public sealed class DocumentSessionCoordinator
             {
                 var tab = await RestoreSessionFileAsync(sessionFile);
                 if (tab != null)
+                {
+                    tab.CursorOffset = sessionFile.CursorOffset;
+                    tab.ScrollOffset = sessionFile.ScrollOffset;
                     restoredCandidates.Add(
                         new RestoredTabCandidate(tab, index, sessionFile.TabIdentity));
+                }
             }
             catch (Exception ex)
             {
@@ -355,10 +362,18 @@ public sealed class DocumentSessionCoordinator
         IReadOnlyList<EditorTabViewModel> tabs)
     {
         var entries = new List<AutoSaveEntry>();
+        var usedIdentities = new HashSet<string>(StorageIdentityComparer);
         foreach (var tab in tabs)
         {
             if (!tab.IsModified && !string.IsNullOrEmpty(tab.FilePath))
                 continue;
+
+            if (!HasValidPersistedIdentity(tab.AutoSaveIdentity) ||
+                !usedIdentities.Add(tab.AutoSaveIdentity))
+            {
+                throw new InvalidOperationException(
+                    $"Tab '{tab.FileName}' does not have a unique storage-safe identity.");
+            }
 
             entries.Add(new AutoSaveEntry(
                 $"tab-{tab.AutoSaveIdentity}",
@@ -529,10 +544,10 @@ public sealed class DocumentSessionCoordinator
         do
         {
             identity = _tabIdentityGenerator();
-            if (string.IsNullOrWhiteSpace(identity))
+            if (!HasValidPersistedIdentity(identity))
             {
                 throw new InvalidOperationException(
-                    "The tab identity generator returned an empty identity.");
+                    "The tab identity generator returned an invalid storage identity.");
             }
         }
         while (usedIdentities.Contains(identity) ||
@@ -547,12 +562,12 @@ public sealed class DocumentSessionCoordinator
     {
         var usedIdentities = liveTabs
             .Select(tab => tab.AutoSaveIdentity)
-            .ToHashSet(StringComparer.Ordinal);
+            .ToHashSet(StorageIdentityComparer);
         var reservedPersistedIdentities = descriptors
             .Select(descriptor => descriptor.PersistedIdentity)
             .Where(HasValidPersistedIdentity)
             .Cast<string>()
-            .ToHashSet(StringComparer.Ordinal);
+            .ToHashSet(StorageIdentityComparer);
         var owners = liveTabs
             .Select(PersistedTabOwner.FromLiveTab)
             .ToList();
@@ -620,7 +635,11 @@ public sealed class DocumentSessionCoordinator
     }
 
     internal static bool HasValidPersistedIdentity(string? identity) =>
-        !string.IsNullOrWhiteSpace(identity);
+        !string.IsNullOrWhiteSpace(identity) &&
+        identity.Length <= MaxPersistedTabIdentityLength &&
+        identity.IndexOfAny(Path.GetInvalidFileNameChars()) < 0 &&
+        !identity.Contains(Path.DirectorySeparatorChar) &&
+        !identity.Contains(Path.AltDirectorySeparatorChar);
 
     private void PersistUntitledContent(
         EditorTabViewModel tab,

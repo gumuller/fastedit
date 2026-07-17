@@ -11,7 +11,7 @@ namespace FastEdit.Tests;
 public class RecoveryIdentityPipelineTests
 {
     [Fact]
-    public void DivergentGenerations_RekeyAndRoundTripWithoutContentLoss()
+    public void CaseVariantGenerations_RekeyAndRoundTripWithoutContentLoss()
     {
         var autoSaveDirectory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -22,7 +22,7 @@ public class RecoveryIdentityPipelineTests
             [Path.Combine(autoSaveDirectory, "manifest-a.json")] =
                 Manifest("a.txt", "shared"),
             [Path.Combine(autoSaveDirectory, "manifest-b.json")] =
-                Manifest("b.txt", "shared"),
+                Manifest("b.txt", "SHARED"),
             [Path.Combine(autoSaveDirectory, "a.txt")] = "first edit",
             [Path.Combine(autoSaveDirectory, "b.txt")] = "second edit"
         };
@@ -42,7 +42,8 @@ public class RecoveryIdentityPipelineTests
                 tab.SetContentBaseline(content ?? string.Empty, isModified: true);
                 return tab;
             });
-        var generatedIdentities = new Queue<string>(new[] { "rekeyed" });
+        var generatedIdentities = new Queue<string>(
+            new[] { "SHARED", "rekeyed" });
         var coordinator = new DocumentSessionCoordinator(
             settings.Object,
             fileSystem.Object,
@@ -69,11 +70,19 @@ public class RecoveryIdentityPipelineTests
         Assert.Equal(
             new[] { "first edit", "second edit" },
             tabs.Select(tab => tab.Content).Order().ToArray());
-        Assert.Equal(2, tabs.Select(tab => tab.AutoSaveIdentity).Distinct().Count());
+        Assert.Equal(
+            2,
+            tabs.Select(tab => tab.AutoSaveIdentity)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Count());
         Assert.Contains(tabs, tab => tab.AutoSaveIdentity == "shared");
         Assert.Contains(tabs, tab => tab.AutoSaveIdentity == "rekeyed");
         var replacementEntries = coordinator.CreateAutoSaveEntries(tabs);
-        Assert.Equal(2, replacementEntries.Select(entry => entry.Id).Distinct().Count());
+        Assert.Equal(
+            2,
+            replacementEntries.Select(entry => entry.Id)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Count());
 
         var subsequentAutoSave = new AutoSaveService(
             fileSystem.Object,
@@ -94,7 +103,9 @@ public class RecoveryIdentityPipelineTests
             subsequentTabs.Select(tab => tab.Content).Order().ToArray());
         Assert.Equal(
             2,
-            subsequentTabs.Select(tab => tab.AutoSaveIdentity).Distinct().Count());
+            subsequentTabs.Select(tab => tab.AutoSaveIdentity)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Count());
     }
 
     private static string Manifest(string contentFile, string tabIdentity) =>

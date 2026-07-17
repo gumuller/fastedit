@@ -96,7 +96,7 @@ public class DocumentSessionCoordinatorTests
     }
 
     [Fact]
-    public async Task StageNamedSession_DivergentIdentityCollisionRekeysForNextAutoSave()
+    public async Task StageNamedSession_CaseVariantIdentityCollisionRekeysForNextAutoSave()
     {
         var first = CreateTab();
         first.SetContentBaseline("first", isModified: true);
@@ -104,11 +104,13 @@ public class DocumentSessionCoordinatorTests
         second.SetContentBaseline("second", isModified: true);
         _tabFactory.Setup(factory => factory.CreateUntitled("first")).Returns(first);
         _tabFactory.Setup(factory => factory.CreateUntitled("second")).Returns(second);
+        var generatedIdentities = new Queue<string>(
+            new[] { "SHARED", "rekeyed" });
         var sut = new DocumentSessionCoordinator(
             _settingsService.Object,
             _fileSystemService.Object,
             _tabFactory.Object,
-            () => "rekeyed");
+            generatedIdentities.Dequeue);
         var session = new SessionData
         {
             ActiveTabIndex = 1,
@@ -117,7 +119,7 @@ public class DocumentSessionCoordinatorTests
                 new SessionFileEntry
                 {
                     FilePath = "Untitled-1",
-                    TabIdentity = "shared",
+                    TabIdentity = "SHARED",
                     IsUntitled = true,
                     Content = "first"
                 },
@@ -136,9 +138,14 @@ public class DocumentSessionCoordinatorTests
 
         Assert.Equal(new[] { first, second }, staged.Tabs);
         Assert.Equal(1, staged.ActiveTabIndex);
-        Assert.Equal("shared", first.AutoSaveIdentity);
+        Assert.Equal("SHARED", first.AutoSaveIdentity);
         Assert.Equal("rekeyed", second.AutoSaveIdentity);
-        Assert.Equal(2, autoSaveEntries.Select(entry => entry.Id).Distinct().Count());
+        Assert.Equal(
+            2,
+            autoSaveEntries
+                .Select(entry => entry.Id)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Count());
         Assert.Equal(
             new[] { "first", "second" },
             autoSaveEntries.Select(entry => entry.Content).ToArray());
@@ -170,6 +177,66 @@ public class DocumentSessionCoordinatorTests
         _fileSystemService.Verify(
             service => service.WriteAllTextAtomic(It.IsAny<string>(), "discard"),
             Times.Never);
+    }
+
+    [Fact]
+    public async Task ShutdownSession_RestoresViewStateBeforeDuplicatePlanning()
+    {
+        var filePath = Path.GetTempFileName();
+        try
+        {
+            await File.WriteAllTextAsync(filePath, "same");
+            var original = CreateTab(Path.GetFileName(filePath), filePath);
+            original.SetContentBaseline("same", isModified: false);
+            original.CursorOffset = 17;
+            original.ScrollOffset = 8.5;
+            _settingsService.SetupProperty(
+                service => service.OpenFiles,
+                new List<SessionFile>());
+            _settingsService.SetupProperty(service => service.ActiveTabIndex, 0);
+            _sut.PersistShutdownSession(new[] { original }, original);
+            var persisted = Assert.Single(_settingsService.Object.OpenFiles);
+            Assert.Equal(filePath, persisted.FilePath);
+            Assert.Equal(17, persisted.CursorOffset);
+            Assert.Equal(8.5, persisted.ScrollOffset);
+            var restored = CreateTab();
+            _fileSystemService.Setup(service => service.FileExists(filePath))
+                .Returns(true);
+            _fileService.Setup(service => service.ReadFileWithEncodingAsync(filePath))
+                .ReturnsAsync(new FileReadResult("same", Encoding.UTF8, false));
+            _tabFactory.Setup(factory => factory.Create()).Returns(restored);
+
+            using var restoredSession = await _sut.RestoreShutdownSessionAsync();
+
+            var candidate = Assert.Single(restoredSession.Candidates);
+            Assert.Equal(17, candidate.Tab.CursorOffset);
+            Assert.Equal(8.5, candidate.Tab.ScrollOffset);
+            var live = CreateTab(Path.GetFileName(filePath), filePath);
+            live.RestoreAutoSaveIdentity(original.AutoSaveIdentity);
+            live.SetContentBaseline("same", isModified: false);
+            var liveTabs = new List<EditorTabViewModel> { live };
+
+            var adoption = _sut.AdoptRestoredTabs(
+                restoredSession,
+                liveTabs,
+                liveTabs.Add);
+
+            Assert.Equal(2, liveTabs.Count);
+            Assert.Contains(restored, liveTabs);
+            Assert.Empty(adoption.DiscardedDuplicateTabs);
+            Assert.NotEqual(
+                live.AutoSaveIdentity,
+                restored.AutoSaveIdentity,
+                StringComparer.OrdinalIgnoreCase);
+            Assert.Same(restored, adoption.SelectedTab);
+            original.Dispose();
+            foreach (var tab in liveTabs)
+                tab.Dispose();
+        }
+        finally
+        {
+            File.Delete(filePath);
+        }
     }
 
     [Fact]
@@ -421,7 +488,7 @@ public class DocumentSessionCoordinatorTests
     }
 
     [Fact]
-    public void PlanRecoveryBatch_InvalidIdentitySkipsReservedGeneratorCollision()
+    public void PlanRecoveryBatch_UnsafeIdentitySkipsReservedGeneratorCollision()
     {
         var generated = new Queue<string>(new[] { "persisted", "generated" });
         var sut = new DocumentSessionCoordinator(
@@ -437,7 +504,7 @@ public class DocumentSessionCoordinatorTests
                 null,
                 "legacy",
                 true,
-                TabIdentity: " "),
+                TabIdentity: @"..\legacy"),
             new AutoSaveEntry(
                 "persisted",
                 "Untitled-2",
