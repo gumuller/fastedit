@@ -115,6 +115,7 @@ public partial class MainViewModel : ObservableObject
     public event Action? MacroStopRecordingRequested;
     public event Action<int>? MacroPlaybackRequested;
     public event Action? ToggleFilterPanelRequested;
+    public event Action? EditorStateCaptureRequested;
 
     public MainViewModel(
         IFileService fileService,
@@ -673,6 +674,7 @@ public partial class MainViewModel : ObservableObject
         var name = _dialogService.ShowInputDialog("Save Session As", "Session name:");
         if (string.IsNullOrWhiteSpace(name)) return;
 
+        EditorStateCaptureRequested?.Invoke();
         var session = _sessionCoordinator.CreateNamedSession(Tabs, SelectedTab);
         session.Name = name;
         try
@@ -890,6 +892,7 @@ public partial class MainViewModel : ObservableObject
 
     public void SaveSession()
     {
+        EditorStateCaptureRequested?.Invoke();
         _sessionCoordinator.PersistShutdownSession(Tabs, SelectedTab);
     }
 
@@ -967,6 +970,7 @@ public partial class MainViewModel : ObservableObject
 
     public IReadOnlyList<AutoSaveEntry> GetAutoSaveEntries()
     {
+        EditorStateCaptureRequested?.Invoke();
         return _sessionCoordinator.CreateAutoSaveEntries(Tabs);
     }
 

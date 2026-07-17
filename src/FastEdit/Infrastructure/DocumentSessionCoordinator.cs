@@ -8,12 +8,14 @@ namespace FastEdit.Infrastructure;
 public sealed class DocumentSessionCoordinator
 {
     private const int MaxPersistedTabIdentityLength = 128;
+    private const int MaxIdentityGenerationAttempts = 32;
     private static readonly StringComparer StorageIdentityComparer =
         StringComparer.OrdinalIgnoreCase;
     private readonly ISettingsService _settingsService;
     private readonly IFileSystemService _fileSystemService;
     private readonly IEditorTabFactory _tabFactory;
     private readonly Func<string> _tabIdentityGenerator;
+    private readonly Func<string> _fallbackTabIdentityGenerator;
     private readonly HashSet<EditorTabViewModel> _shutdownDiscardedTabs = new();
 
     public DocumentSessionCoordinator(
@@ -24,6 +26,7 @@ public sealed class DocumentSessionCoordinator
             settingsService,
             fileSystemService,
             tabFactory,
+            () => Guid.NewGuid().ToString("N"),
             () => Guid.NewGuid().ToString("N"))
     {
     }
@@ -32,12 +35,15 @@ public sealed class DocumentSessionCoordinator
         ISettingsService settingsService,
         IFileSystemService fileSystemService,
         IEditorTabFactory tabFactory,
-        Func<string> tabIdentityGenerator)
+        Func<string> tabIdentityGenerator,
+        Func<string>? fallbackTabIdentityGenerator = null)
     {
         _settingsService = settingsService;
         _fileSystemService = fileSystemService;
         _tabFactory = tabFactory;
         _tabIdentityGenerator = tabIdentityGenerator;
+        _fallbackTabIdentityGenerator = fallbackTabIdentityGenerator ??
+            (() => Guid.NewGuid().ToString("N"));
     }
 
     public SessionData CreateNamedSession(
@@ -250,7 +256,17 @@ public sealed class DocumentSessionCoordinator
                 candidate.TabIdentity,
                 candidate.Tab))
             .ToArray();
-        var plan = PlanPersistedTabBatch(descriptors, liveTabs);
+        PersistedTabBatchPlan plan;
+        try
+        {
+            plan = PlanPersistedTabBatch(descriptors, liveTabs);
+        }
+        catch
+        {
+            foreach (var candidate in candidates)
+                candidate.Tab.Dispose();
+            throw;
+        }
         var plannedBySource = plan.Candidates.ToDictionary(
             candidate => candidate.Descriptor.SourceIndex);
         var duplicatesBySource = plan.Duplicates.ToDictionary(
@@ -540,21 +556,37 @@ public sealed class DocumentSessionCoordinator
         IReadOnlySet<string> usedIdentities,
         IReadOnlySet<string> reservedPersistedIdentities)
     {
-        string identity;
-        do
+        for (var attempt = 0; attempt < MaxIdentityGenerationAttempts; attempt++)
         {
-            identity = _tabIdentityGenerator();
-            if (!HasValidPersistedIdentity(identity))
-            {
-                throw new InvalidOperationException(
-                    "The tab identity generator returned an invalid storage identity.");
-            }
+            var identity = _tabIdentityGenerator();
+            if (IsAvailableIdentity(
+                    identity,
+                    usedIdentities,
+                    reservedPersistedIdentities))
+                return identity;
         }
-        while (usedIdentities.Contains(identity) ||
-               reservedPersistedIdentities.Contains(identity));
 
-        return identity;
+        for (var attempt = 0; attempt < MaxIdentityGenerationAttempts; attempt++)
+        {
+            var identity = _fallbackTabIdentityGenerator();
+            if (IsAvailableIdentity(
+                    identity,
+                    usedIdentities,
+                    reservedPersistedIdentities))
+                return identity;
+        }
+
+        throw new InvalidOperationException(
+            "Unable to generate a unique storage-safe tab identity.");
     }
+
+    private static bool IsAvailableIdentity(
+        string? identity,
+        IReadOnlySet<string> usedIdentities,
+        IReadOnlySet<string> reservedPersistedIdentities) =>
+        HasValidPersistedIdentity(identity) &&
+        !usedIdentities.Contains(identity!) &&
+        !reservedPersistedIdentities.Contains(identity!);
 
     private PersistedTabBatchPlan PlanPersistedTabBatch(
         IReadOnlyList<PersistedTabDescriptor> descriptors,

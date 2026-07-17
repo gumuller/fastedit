@@ -525,6 +525,116 @@ public class DocumentSessionCoordinatorTests
     }
 
     [Fact]
+    public void PlanRecoveryBatch_AlwaysCollidingGeneratorUsesFallback()
+    {
+        var sut = new DocumentSessionCoordinator(
+            _settingsService.Object,
+            _fileSystemService.Object,
+            _tabFactory.Object,
+            () => "SHARED",
+            () => "fallback");
+        var entries = new[]
+        {
+            new AutoSaveEntry(
+                "first",
+                "Untitled-1",
+                null,
+                "first",
+                true,
+                TabIdentity: "shared"),
+            new AutoSaveEntry(
+                "second",
+                "Untitled-2",
+                null,
+                "second",
+                true,
+                TabIdentity: "SHARED")
+        };
+
+        var plan = sut.PlanRecoveryBatch(
+            entries,
+            Array.Empty<EditorTabViewModel>());
+
+        Assert.Equal(
+            new[] { "shared", "fallback" },
+            plan.Candidates.Select(candidate => candidate.AssignedIdentity));
+    }
+
+    [Fact]
+    public async Task StageNamedSession_FallbackCollisionDisposesStagedOwnership()
+    {
+        var first = CreateTab();
+        first.SetContentBaseline("first", isModified: true);
+        var second = CreateTab();
+        second.SetContentBaseline("second", isModified: true);
+        _tabFactory.Setup(factory => factory.CreateUntitled("first")).Returns(first);
+        _tabFactory.Setup(factory => factory.CreateUntitled("second")).Returns(second);
+        var sut = new DocumentSessionCoordinator(
+            _settingsService.Object,
+            _fileSystemService.Object,
+            _tabFactory.Object,
+            () => "shared",
+            () => "SHARED");
+        var session = new SessionData
+        {
+            Files =
+            {
+                new SessionFileEntry
+                {
+                    FilePath = "Untitled-1",
+                    TabIdentity = "shared",
+                    IsUntitled = true,
+                    Content = "first"
+                },
+                new SessionFileEntry
+                {
+                    FilePath = "Untitled-2",
+                    TabIdentity = "SHARED",
+                    IsUntitled = true,
+                    Content = "second"
+                }
+            }
+        };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => sut.StageNamedSessionAsync(session));
+
+        Assert.Empty(first.Content);
+        Assert.Empty(second.Content);
+    }
+
+    [Fact]
+    public void AdoptRestoredTabs_FallbackCollisionDisposesTransferredOwnership()
+    {
+        var first = CreateTab("Untitled-1");
+        first.SetContentBaseline("first", isModified: true);
+        var second = CreateTab("Untitled-2");
+        second.SetContentBaseline("second", isModified: true);
+        var sut = new DocumentSessionCoordinator(
+            _settingsService.Object,
+            _fileSystemService.Object,
+            _tabFactory.Object,
+            () => "shared",
+            () => "SHARED");
+        using var restoredSession = new RestoredDocumentSession(
+            new[]
+            {
+                new RestoredTabCandidate(first, 0, "shared"),
+                new RestoredTabCandidate(second, 1, "SHARED")
+            },
+            activeTabIndex: 0);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            sut.AdoptRestoredTabs(
+                restoredSession,
+                Array.Empty<EditorTabViewModel>(),
+                _ => throw new InvalidOperationException()));
+
+        Assert.Empty(first.Content);
+        Assert.Empty(second.Content);
+    }
+
+    [Fact]
     public void PlanRecoveryBatch_ExactSavedDuplicatePromotesAvailableValidIdentity()
     {
         var sut = new DocumentSessionCoordinator(

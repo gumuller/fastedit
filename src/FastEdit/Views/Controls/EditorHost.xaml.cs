@@ -61,6 +61,8 @@ public partial class EditorHost : UserControl
     private CancellationTokenSource? _externalReloadCts;
     private int _externalChangeActive;
     private bool _isRuntimeAttached;
+    private EditorTabViewModel? _pendingStateRestoreVm;
+    private int _stateRestoreVersion;
 
     private static readonly IReadOnlyDictionary<MacroAction, Action<EditorHost, MacroStep, ITextToolsService?>> MacroStepHandlers =
         new Dictionary<MacroAction, Action<EditorHost, MacroStep, ITextToolsService?>>
@@ -279,6 +281,7 @@ public partial class EditorHost : UserControl
         if (_currentVm != null)
         {
             UpdateEditor(_currentVm);
+            ScheduleStateRestore(_currentVm);
         }
     }
 
@@ -286,6 +289,7 @@ public partial class EditorHost : UserControl
     {
         if (!_isRuntimeAttached)
             return;
+        SaveStateToViewModel();
         _isRuntimeAttached = false;
 
         _filterRefreshCoordinator.Cancel();
@@ -1431,18 +1435,21 @@ public partial class EditorHost : UserControl
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
         CancelExternalReload();
-        if (e.OldValue is EditorTabViewModel oldVm)
-        {
-            oldVm.PropertyChanged -= OnViewModelPropertyChanged;
-        }
-
-        _currentVm = e.NewValue as EditorTabViewModel;
-
-        if (_currentVm != null)
-        {
-            _currentVm.PropertyChanged += OnViewModelPropertyChanged;
-            UpdateEditor(_currentVm);
-        }
+        var incomingVm = e.NewValue as EditorTabViewModel;
+        EditorStateTransitionCoordinator.Transition(
+            e.OldValue as EditorTabViewModel,
+            incomingVm,
+            SaveStateToViewModel,
+            vm => vm.PropertyChanged -= OnViewModelPropertyChanged,
+            vm =>
+            {
+                _currentVm = vm;
+                vm.PropertyChanged += OnViewModelPropertyChanged;
+                UpdateEditor(vm);
+            },
+            ScheduleStateRestore);
+        if (incomingVm == null)
+            _currentVm = null;
     }
 
     private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
@@ -1454,11 +1461,13 @@ public partial class EditorHost : UserControl
             if (IsTextMode(vm) && TextEditor.Text != vm.Content)
             {
                 TextEditor.Text = vm.Content;
+                ScheduleStateRestore(vm);
             }
         }
         else if (e.PropertyName == nameof(EditorTabViewModel.Mode))
         {
             UpdateEditor(vm);
+            ScheduleStateRestore(vm);
         }
     }
 
@@ -1789,23 +1798,84 @@ public partial class EditorHost : UserControl
     // --- Session State Save ---
     public void SaveStateToViewModel()
     {
-        if (_currentVm == null) return;
-        _currentVm.CursorOffset = TextEditor.CaretOffset;
-        _currentVm.ScrollOffset = TextEditor.VerticalOffset;
+        if (_currentVm != null)
+            SaveStateToViewModel(_currentVm);
     }
 
     public void RestoreStateFromViewModel()
     {
-        if (_currentVm == null) return;
+        if (_currentVm != null)
+            RestoreStateFromViewModel(_currentVm);
+    }
 
-        if (_currentVm.CursorOffset > 0 && _currentVm.CursorOffset <= TextEditor.Document.TextLength)
-        {
-            TextEditor.CaretOffset = _currentVm.CursorOffset;
-        }
-        if (_currentVm.ScrollOffset > 0)
-        {
-            TextEditor.ScrollToVerticalOffset(_currentVm.ScrollOffset);
-        }
+    private void SaveStateToViewModel(EditorTabViewModel vm)
+    {
+        if (!ReferenceEquals(_currentVm, vm) ||
+            ReferenceEquals(_pendingStateRestoreVm, vm) ||
+            !IsTextMode(vm))
+            return;
+
+        vm.CursorOffset = TextEditor.CaretOffset;
+        vm.ScrollOffset = TextEditor.VerticalOffset;
+    }
+
+    private void ScheduleStateRestore(EditorTabViewModel vm)
+    {
+        if (!IsTextMode(vm))
+            return;
+
+        var cursorOffset = vm.CursorOffset;
+        var scrollOffset = vm.ScrollOffset;
+        var restoreVersion = ++_stateRestoreVersion;
+        _pendingStateRestoreVm = vm;
+        _ = Dispatcher.BeginInvoke(
+            new Action(() =>
+            {
+                if (restoreVersion != _stateRestoreVersion ||
+                    !ReferenceEquals(_currentVm, vm))
+                {
+                    return;
+                }
+
+                try
+                {
+                    RestoreStateFromViewModel(
+                        vm,
+                        cursorOffset,
+                        scrollOffset);
+                }
+                finally
+                {
+                    if (restoreVersion == _stateRestoreVersion)
+                        _pendingStateRestoreVm = null;
+                }
+            }),
+            System.Windows.Threading.DispatcherPriority.Loaded);
+    }
+
+    private void RestoreStateFromViewModel(EditorTabViewModel vm)
+    {
+        RestoreStateFromViewModel(
+            vm,
+            vm.CursorOffset,
+            vm.ScrollOffset);
+    }
+
+    private void RestoreStateFromViewModel(
+        EditorTabViewModel vm,
+        int cursorOffset,
+        double scrollOffset)
+    {
+        if (!ReferenceEquals(_currentVm, vm) || !IsTextMode(vm))
+            return;
+
+        TextEditor.CaretOffset =
+            EditorStateTransitionCoordinator.ClampCursorOffset(
+                cursorOffset,
+                TextEditor.Document.TextLength);
+        TextEditor.ScrollToVerticalOffset(
+            EditorStateTransitionCoordinator.ClampScrollOffset(
+                scrollOffset));
     }
 
     private static IHighlightingDefinition? GetHighlightingForLanguage(string language)

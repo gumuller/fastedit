@@ -29,6 +29,7 @@ public interface IFileSystemService
     string GetFileNameWithoutExtension(string path);
     string GetExtension(string path);
     long GetFileSize(string path);
+    FileAttributes GetAttributes(string path);
     DateTime GetLastWriteTime(string path);
     IEnumerable<string> EnumerateFiles(string path, string searchPattern = "*", bool recursive = false);
     IEnumerable<string> EnumerateDirectories(string path);

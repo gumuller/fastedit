@@ -1009,6 +1009,58 @@ public class MainViewModelTests
     }
 
     [Fact]
+    public void GetAutoSaveEntries_CapturesActiveEditorStateBeforeComposition()
+    {
+        var tab = CreateMockTab("Untitled-1", isModified: true);
+        tab.Content = "draft";
+        _sut.Tabs.Add(tab);
+        _sut.SelectedTab = tab;
+        var captureCalls = 0;
+        _sut.EditorStateCaptureRequested += () =>
+        {
+            captureCalls++;
+            tab.CursorOffset = 23;
+            tab.ScrollOffset = 4.5;
+        };
+
+        var entry = Assert.Single(_sut.GetAutoSaveEntries());
+
+        Assert.Equal(1, captureCalls);
+        Assert.Equal(23, entry.CursorOffset);
+        Assert.Equal(4.5, entry.ScrollOffset);
+    }
+
+    [Fact]
+    public void SaveSessionAs_CapturesActiveEditorStateBeforeComposition()
+    {
+        var tab = CreateMockTab("Untitled-1", isModified: true);
+        tab.Content = "draft";
+        _sut.Tabs.Add(tab);
+        _sut.SelectedTab = tab;
+        _dialogService.Setup(service => service.ShowInputDialog(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<string?>()))
+            .Returns("captured");
+        _sut.EditorStateCaptureRequested += () =>
+        {
+            tab.CursorOffset = 31;
+            tab.ScrollOffset = 6.5;
+        };
+        SessionData? savedSession = null;
+        _workspaceService.Setup(service => service.SaveNamedSession(
+                "captured",
+                It.IsAny<SessionData>()))
+            .Callback<string, SessionData>((_, session) => savedSession = session);
+
+        _sut.SaveSessionAsCommand.Execute(null);
+
+        var savedFile = Assert.Single(savedSession!.Files);
+        Assert.Equal(31, savedFile.CursorOffset);
+        Assert.Equal(6.5, savedFile.ScrollOffset);
+    }
+
+    [Fact]
     public void AutoSaveIds_UntitledTabsRemainStableAcrossReordering()
     {
         var first = CreateMockTab("first");
