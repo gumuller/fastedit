@@ -14,7 +14,6 @@ public sealed class AutoSaveService : IAutoSaveService
     private readonly string _shutdownMarkerPath;
     private readonly string _resolvedEntriesPath;
     private readonly string _activeGenerationMarkerPath;
-    private readonly string _activeCleanupIntentPath;
     private readonly SemaphoreSlim _runGate = new(1, 1);
     private readonly object _timerSync = new();
     private readonly object _persistenceSync = new();
@@ -80,9 +79,7 @@ public sealed class AutoSaveService : IAutoSaveService
             StopTimer();
             IntervalSeconds = _settings.AutoSaveIntervalSeconds;
             _fileSystem.CreateDirectory(_autoSaveDir);
-            CleanupRetiredGenerations();
-            var intendedCleanupGenerations = CleanupIntendedManifestlessGenerations();
-            PreserveAbandonedManifestlessGenerations(intendedCleanupGenerations);
+            RunStartupMaintenance();
             var wasCleanShutdown = _fileSystem.FileExists(_shutdownMarkerPath);
             if (wasCleanShutdown)
                 _fileSystem.DeleteFile(_shutdownMarkerPath);
@@ -466,7 +463,6 @@ public sealed class AutoSaveService : IAutoSaveService
                     manifestPath,
                     contentPaths,
                     markerPath,
-                    cleanupIntentPath: null,
                     out var cleanupComplete))
                 {
                     retiredManifests.Add(manifestPath);
@@ -503,28 +499,9 @@ public sealed class AutoSaveService : IAutoSaveService
     {
         try
         {
-            var contentPaths = _fileSystem.GetFiles(
-                    _autoSaveDir,
-                    $"{_activeContentPrefix}*.txt")
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            if (_fileSystem.FileExists(_activeManifestPath))
-                contentPaths.UnionWith(GetGenerationContentPaths(_activeManifestPath));
-
-            if (!TryWriteCleanupIntent(_activeCleanupIntentPath, contentPaths))
-                return false;
-
-            if (!_fileSystem.FileExists(_activeManifestPath) && contentPaths.Count > 0)
-            {
-                if (!TryWriteSyntheticManifest(
-                    _activeManifestPath,
-                    contentPaths))
-                {
-                    return false;
-                }
-            }
-
             if (_fileSystem.FileExists(_activeManifestPath))
             {
+                var contentPaths = GetGenerationContentPaths(_activeManifestPath);
                 var retired = RetireGeneration(
                     _activeManifestPath,
                     contentPaths,
@@ -554,8 +531,6 @@ public sealed class AutoSaveService : IAutoSaveService
 
             if (_fileSystem.FileExists(_activeGenerationMarkerPath))
                 _fileSystem.DeleteFile(_activeGenerationMarkerPath);
-            if (_fileSystem.FileExists(_activeCleanupIntentPath))
-                _fileSystem.DeleteFile(_activeCleanupIntentPath);
             return true;
         }
         catch (Exception ex)
@@ -618,9 +593,6 @@ public sealed class AutoSaveService : IAutoSaveService
             var markerPath = originalManifestName == null
                 ? null
                 : GetGenerationMarkerPath(Path.Combine(_autoSaveDir, originalManifestName));
-            var cleanupIntentPath = originalManifestName == null
-                ? null
-                : GetCleanupIntentPathForManifestName(originalManifestName);
             if (markerPath != null)
             {
                 try
@@ -634,23 +606,6 @@ public sealed class AutoSaveService : IAutoSaveService
                     Trace.TraceWarning(
                         "Failed to clean quarantined auto-save marker '{0}': {1}",
                         markerPath,
-                        ex);
-                }
-            }
-
-            if (cleanupIntentPath != null)
-            {
-                try
-                {
-                    if (_fileSystem.FileExists(cleanupIntentPath))
-                        _fileSystem.DeleteFile(cleanupIntentPath);
-                }
-                catch (Exception ex)
-                {
-                    cleanupComplete = false;
-                    Trace.TraceWarning(
-                        "Failed to clean auto-save cleanup intent '{0}': {1}",
-                        cleanupIntentPath,
                         ex);
                 }
             }
@@ -683,7 +638,6 @@ public sealed class AutoSaveService : IAutoSaveService
         string manifestPath,
         IReadOnlyCollection<string> contentPaths,
         string? markerPath,
-        string? cleanupIntentPath,
         out bool cleanupComplete)
     {
         cleanupComplete = false;
@@ -738,23 +692,6 @@ public sealed class AutoSaveService : IAutoSaveService
             }
         }
 
-        if (cleanupIntentPath != null)
-        {
-            try
-            {
-                if (_fileSystem.FileExists(cleanupIntentPath))
-                    _fileSystem.DeleteFile(cleanupIntentPath);
-            }
-            catch (Exception ex)
-            {
-                cleanupComplete = false;
-                Trace.TraceWarning(
-                    "Failed to delete auto-save cleanup intent '{0}': {1}",
-                    cleanupIntentPath,
-                    ex);
-            }
-        }
-
         if (cleanupComplete)
         {
             try
@@ -795,6 +732,13 @@ public sealed class AutoSaveService : IAutoSaveService
                 Path.Combine(_autoSaveDir, $"active-{generationId}.lock"));
         }
         return intendedGenerations;
+    }
+
+    private void RunStartupMaintenance()
+    {
+        CleanupRetiredGenerations();
+        var intendedCleanupGenerations = CleanupIntendedManifestlessGenerations();
+        PreserveAbandonedManifestlessGenerations(intendedCleanupGenerations);
     }
 
     private bool CleanupIntendedGeneration(
@@ -942,8 +886,9 @@ public sealed class AutoSaveService : IAutoSaveService
 
         foreach (var markerPath in _fileSystem.GetFiles(_autoSaveDir, "active-*.lock"))
         {
-            var generationId = GetGenerationId(markerPath, "active-");
-            if (generationId == null)
+            var markerName = Path.GetFileNameWithoutExtension(markerPath);
+            const string markerPrefix = "active-";
+            if (!markerName.StartsWith(markerPrefix, StringComparison.OrdinalIgnoreCase))
                 continue;
 
             var generationId = markerName[markerPrefix.Length..];
@@ -962,21 +907,27 @@ public sealed class AutoSaveService : IAutoSaveService
                 $"{generationId}-*.txt");
             if (contentPaths.Length == 0)
             {
-                try
-                {
-                    _fileSystem.DeleteFile(markerPath);
-                }
-                catch (Exception ex)
-                {
-                    Trace.TraceWarning(
-                        "Failed to delete abandoned auto-save marker '{0}': {1}",
-                        markerPath,
-                        ex);
-                }
+                TryDeleteAbandonedMarker(markerPath);
                 continue;
             }
 
             TryWriteSyntheticManifest(manifestPath, contentPaths);
+        }
+    }
+
+    private void TryDeleteAbandonedMarker(string markerPath)
+    {
+        try
+        {
+            if (_fileSystem.FileExists(markerPath))
+                _fileSystem.DeleteFile(markerPath);
+        }
+        catch (Exception ex)
+        {
+            Trace.TraceWarning(
+                "Failed to delete abandoned auto-save marker '{0}': {1}",
+                markerPath,
+                ex);
         }
     }
 
@@ -1082,23 +1033,6 @@ public sealed class AutoSaveService : IAutoSaveService
         return Path.Combine(_autoSaveDir, $"active-{generationId}.lock");
     }
 
-    private string GetCleanupIntentPath(string generationId) =>
-        Path.Combine(_autoSaveDir, $"cleanup-{generationId}.json");
-
-    private string? GetCleanupIntentPathForManifestName(string manifestName)
-    {
-        var generationId = GetGenerationId(manifestName, "manifest-");
-        return generationId == null ? null : GetCleanupIntentPath(generationId);
-    }
-
-    private static string? GetGenerationId(string path, string prefix)
-    {
-        var fileName = Path.GetFileNameWithoutExtension(path);
-        return fileName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-            ? fileName[prefix.Length..]
-            : null;
-    }
-
     private string[] CaptureRecoveryContentPaths(IEnumerable<string> manifestPaths)
     {
         var contentPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1174,11 +1108,6 @@ public sealed class AutoSaveService : IAutoSaveService
         public bool IsUntitled { get; set; }
         public int CursorOffset { get; set; }
         public double ScrollOffset { get; set; }
-    }
-
-    private sealed class CleanupIntent
-    {
-        public string[] ContentFiles { get; set; } = Array.Empty<string>();
     }
 
     private sealed record RecoveryOrigin(string ManifestName, string EntryId);

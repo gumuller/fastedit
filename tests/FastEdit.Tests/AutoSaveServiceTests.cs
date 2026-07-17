@@ -622,7 +622,6 @@ public class AutoSaveServiceTests
         string? cleanupIntentPath = null;
         var manifestWriteAttempts = 0;
         var contentDeleteAttempts = 0;
-        var cleanupOperations = new List<string>();
 
         _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
         _fileSystem.Setup(f => f.FileExists(It.IsAny<string>()))
@@ -661,9 +660,6 @@ public class AutoSaveServiceTests
                 {
                     throw new IOException("manifest write failed");
                 }
-                if (Path.GetFileName(path).StartsWith("cleanup-", StringComparison.OrdinalIgnoreCase))
-                    cleanupOperations.Add("intent");
-
                 existingFiles.Add(path);
                 fileContents[path] = content;
             });
@@ -686,7 +682,6 @@ public class AutoSaveServiceTests
         _sut.Stop();
 
         _sut.MarkCleanShutdown().Should().BeFalse();
-        cleanupOperations.Take(2).Should().Equal("intent", "quarantine");
         existingFiles.Should().Contain(activeContentPath!);
         existingFiles.Should().Contain(activeMarkerPath!);
         existingFiles.Should().Contain(cleanupIntentPath!);
