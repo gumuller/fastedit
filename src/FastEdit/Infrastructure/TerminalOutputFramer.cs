@@ -28,6 +28,7 @@ internal sealed class TerminalOutputFramer
     private readonly bool _parseSentinels;
     private readonly bool _emitPartialChunks;
     private int _scanIndex;
+    private bool _hasPendingNewLine;
 
     public TerminalOutputFramer(bool parseSentinels = true, bool emitPartialChunks = false)
     {
@@ -49,7 +50,7 @@ internal sealed class TerminalOutputFramer
             if (_pending[i] != '\n')
                 continue;
 
-            frames.Add(CreateFrame(_pending.ToString(start, i - start), hasNewLine: true));
+            AddCompleteLine(frames, _pending.ToString(start, i - start));
             start = i + 1;
         }
 
@@ -70,16 +71,42 @@ internal sealed class TerminalOutputFramer
 
     public IReadOnlyList<TerminalOutputFrame> Complete()
     {
-        if (_pending.Length == 0)
+        if (_pending.Length == 0 && !_hasPendingNewLine)
             return Array.Empty<TerminalOutputFrame>();
 
-        var frame = CreateFrame(_pending.ToString(), hasNewLine: false);
+        var frames = new List<TerminalOutputFrame>();
+        FlushPendingNewLine(frames);
+        if (_pending.Length > 0)
+            frames.Add(CreateFrame(_pending.ToString()));
+
         _pending.Clear();
         _scanIndex = 0;
-        return [frame];
+        return frames;
     }
 
-    private TerminalOutputFrame CreateFrame(string rawLine, bool hasNewLine)
+    private void AddCompleteLine(List<TerminalOutputFrame> frames, string rawLine)
+    {
+        var frame = CreateFrame(rawLine);
+        if (!_parseSentinels)
+        {
+            frames.Add(frame with { Text = frame.Text + "\n" });
+            return;
+        }
+
+        if (frame.Kind == TerminalOutputFrameKind.Sentinel)
+        {
+            _hasPendingNewLine = false;
+            frames.Add(frame);
+            return;
+        }
+
+        FlushPendingNewLine(frames);
+        if (!string.IsNullOrEmpty(frame.Text))
+            frames.Add(frame);
+        _hasPendingNewLine = true;
+    }
+
+    private TerminalOutputFrame CreateFrame(string rawLine)
     {
         var line = rawLine.TrimEnd('\r');
         var sentinelIndex = _parseSentinels
@@ -92,7 +119,7 @@ internal sealed class TerminalOutputFramer
 
         return new TerminalOutputFrame(
             TerminalOutputFrameKind.Output,
-            hasNewLine ? cleaned + "\n" : cleaned,
+            cleaned,
             0,
             Guid.Empty,
             "",
@@ -106,9 +133,6 @@ internal sealed class TerminalOutputFramer
             EmitPartialPrefix(frames, _pending.Length);
             return;
         }
-
-        if (_pending.Length <= MaxBufferedOutputLength)
-            return;
 
         if (_parseSentinels)
         {
@@ -132,7 +156,8 @@ internal sealed class TerminalOutputFramer
             return;
         }
 
-        EmitPartialPrefix(frames, _pending.Length);
+        if (_pending.Length > MaxBufferedOutputLength)
+            EmitPartialPrefix(frames, _pending.Length);
     }
 
     private void EmitPartialPrefix(List<TerminalOutputFrame> frames, int length)
@@ -145,6 +170,7 @@ internal sealed class TerminalOutputFramer
         _scanIndex = _pending.Length;
         if (!string.IsNullOrEmpty(output))
         {
+            FlushPendingNewLine(frames);
             frames.Add(new TerminalOutputFrame(
                 TerminalOutputFrameKind.Output,
                 output,
@@ -153,6 +179,21 @@ internal sealed class TerminalOutputFramer
                 "",
                 false));
         }
+    }
+
+    private void FlushPendingNewLine(List<TerminalOutputFrame> frames)
+    {
+        if (!_hasPendingNewLine)
+            return;
+
+        frames.Add(new TerminalOutputFrame(
+            TerminalOutputFrameKind.Output,
+            "\n",
+            0,
+            Guid.Empty,
+            "",
+            false));
+        _hasPendingNewLine = false;
     }
 
     private static int GetPossibleSentinelPrefixLength(string text)

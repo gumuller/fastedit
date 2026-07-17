@@ -102,9 +102,17 @@ public partial class CommandRunnerPanel : UserControl
 
             if (_activeTab != null)
             {
-                await _activeTab.Service.StartShellAsync(
-                    _desiredWorkingDirectory,
-                    cancellationToken);
+                try
+                {
+                    await _activeTab.Service.StartShellAsync(
+                        _desiredWorkingDirectory,
+                        cancellationToken);
+                }
+                finally
+                {
+                    if (_shutdownRequested)
+                        await ShutdownTabsCoreAsync(CancellationToken.None);
+                }
             }
         }
         finally
@@ -119,28 +127,7 @@ public partial class CommandRunnerPanel : UserControl
         await _lifecycleGate.WaitAsync(cancellationToken);
         try
         {
-            if (_tabs.Count == 0)
-                return;
-
-            var tabs = _tabs.ToArray();
-            foreach (var tab in tabs)
-                UnsubscribeFromRunner(tab);
-
-            var shutdownTask = Task.WhenAll(tabs.Select(tab => tab.Service.ShutdownAsync()));
-            try
-            {
-                await shutdownTask.WaitAsync(cancellationToken);
-            }
-            finally
-            {
-                _tabs.Clear();
-                _activeTab = null;
-                _promptRun = null;
-                _inputRun = null;
-                StopButton.IsEnabled = false;
-                TabStripPanel.Children.Clear();
-                TerminalBox.Document = new FlowDocument();
-            }
+            await ShutdownTabsCoreAsync(cancellationToken);
         }
         finally
         {
@@ -171,6 +158,32 @@ public partial class CommandRunnerPanel : UserControl
         catch (OperationCanceledException)
         {
             Trace.TraceWarning("Terminal panel shutdown exceeded 5000 ms while unloading.");
+        }
+    }
+
+    private async Task ShutdownTabsCoreAsync(CancellationToken cancellationToken)
+    {
+        if (_tabs.Count == 0)
+            return;
+
+        var tabs = _tabs.ToArray();
+        foreach (var tab in tabs)
+            UnsubscribeFromRunner(tab);
+
+        var shutdownTask = Task.WhenAll(tabs.Select(tab => tab.Service.ShutdownAsync()));
+        try
+        {
+            await shutdownTask.WaitAsync(cancellationToken);
+        }
+        finally
+        {
+            _tabs.Clear();
+            _activeTab = null;
+            _promptRun = null;
+            _inputRun = null;
+            StopButton.IsEnabled = false;
+            TabStripPanel.Children.Clear();
+            TerminalBox.Document = new FlowDocument();
         }
     }
 

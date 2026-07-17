@@ -2,6 +2,7 @@ using System.IO;
 using System.Threading;
 using System.Windows;
 using System.Windows.Media;
+using System.Windows.Threading;
 using FastEdit.Services.Interfaces;
 using FastEdit.Views.Controls;
 using Xunit;
@@ -46,6 +47,43 @@ public class CommandRunnerPanelLifecycleTests
         });
     }
 
+    [Fact]
+    public async Task StartupCompletingAfterUnloadTimeout_ShutsDownRunnerBeforeReload()
+    {
+        await RunOnStaThreadAsync(async () =>
+        {
+            var factory = new FakeCommandRunnerFactory(blockFirstStart: true);
+            var panel = new CommandRunnerPanel { RunnerFactory = factory };
+            AddTerminalResources(panel);
+
+            var startup = panel.EnsureStartedAsync();
+            var first = Assert.Single(factory.Created);
+            await first.StartEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+            using (var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(50)))
+            {
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                    () => panel.ShutdownAsync(timeout.Token));
+            }
+
+            first.AllowStart();
+            await startup.WaitAsync(TimeSpan.FromSeconds(2));
+
+            Assert.Equal(1, first.ShutdownCount);
+            Assert.Equal(0, first.SubscriptionCount);
+            Assert.False(first.IsRunning);
+
+            panel.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent, panel));
+
+            Assert.Equal(2, factory.Created.Count);
+            var second = factory.Created[1];
+            Assert.Equal(1, second.StartCount);
+            Assert.Equal(4, second.SubscriptionCount);
+
+            await panel.ShutdownAsync();
+        });
+    }
+
     private static void AddTerminalResources(FrameworkElement element)
     {
         element.Resources["EditorForegroundBrush"] = Brushes.White;
@@ -57,11 +95,19 @@ public class CommandRunnerPanelLifecycleTests
     private static Task RunOnStaThreadAsync(Func<Task> action)
     {
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(async () =>
+        var thread = new Thread(() =>
         {
             try
             {
-                await action();
+                var dispatcher = Dispatcher.CurrentDispatcher;
+                SynchronizationContext.SetSynchronizationContext(
+                    new DispatcherSynchronizationContext(dispatcher));
+                var task = action();
+                _ = task.ContinueWith(
+                    _ => dispatcher.BeginInvokeShutdown(DispatcherPriority.Normal),
+                    TaskScheduler.Default);
+                Dispatcher.Run();
+                task.GetAwaiter().GetResult();
                 completion.TrySetResult();
             }
             catch (Exception ex)
@@ -76,11 +122,18 @@ public class CommandRunnerPanelLifecycleTests
 
     private sealed class FakeCommandRunnerFactory : ICommandRunnerFactory
     {
+        private readonly bool _blockFirstStart;
+
+        public FakeCommandRunnerFactory(bool blockFirstStart = false)
+        {
+            _blockFirstStart = blockFirstStart;
+        }
+
         public List<FakeCommandRunner> Created { get; } = new();
 
         public ICommandRunner Create()
         {
-            var runner = new FakeCommandRunner();
+            var runner = new FakeCommandRunner(_blockFirstStart && Created.Count == 0);
             Created.Add(runner);
             return runner;
         }
@@ -92,15 +145,25 @@ public class CommandRunnerPanelLifecycleTests
         private Action<string>? _workingDirectoryChanged;
         private Action? _commandStarted;
         private Action? _commandCompleted;
+        private readonly TaskCompletionSource _allowStart =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public int StartCount { get; private set; }
         public int ShutdownCount { get; private set; }
         public int SubscriptionCount { get; private set; }
         public string? InitialDirectory { get; private set; }
         public string WorkingDirectory { get; private set; } = Environment.CurrentDirectory;
+        public TaskCompletionSource StartEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
         public IReadOnlyList<string> History => Array.Empty<string>();
         public bool IsRunning { get; private set; }
         public bool IsBusy => false;
+
+        public FakeCommandRunner(bool blockStart)
+        {
+            if (!blockStart)
+                _allowStart.TrySetResult();
+        }
 
         public event Action<string>? OutputReceived
         {
@@ -158,18 +221,21 @@ public class CommandRunnerPanelLifecycleTests
             }
         }
 
-        public Task StartShellAsync(
+        public async Task StartShellAsync(
             string? initialDirectory = null,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             StartCount++;
+            StartEntered.TrySetResult();
+            await _allowStart.Task.WaitAsync(cancellationToken);
             InitialDirectory = initialDirectory;
             if (initialDirectory != null)
                 WorkingDirectory = initialDirectory;
             IsRunning = true;
-            return Task.CompletedTask;
         }
+
+        public void AllowStart() => _allowStart.TrySetResult();
 
         public Task ExecuteCommandAsync(
             string command,
