@@ -154,19 +154,62 @@ public class TerminalOutputFramerTests
     }
 
     [Fact]
-    public void Append_StreamingStdout_BoundsMalformedAnsiAndRecoversAtTerminator()
+    public void Append_StreamingStdout_BoundsMalformedAnsiAndRecoversImmediately()
     {
         var framer = new TerminalOutputFramer(emitPartialChunks: true);
+        var frames = new List<TerminalOutputFrame>();
+        var largestBufferedLength = 0;
 
-        Assert.Empty(framer.Append("\x1B[" + new string('3', 10000)));
-        Assert.True(framer.BufferedCharacterCount <= 256);
-        var frames = framer.Append(
-            $"mVISIBLE\n\n{TerminalOutputFramer.SentinelPrefix}42|{CommandToken}|C:\\work\n");
+        for (var chunkIndex = 0; chunkIndex < 20; chunkIndex++)
+        {
+            var chunk = chunkIndex == 0
+                ? "\x1B[" + new string('3', 32)
+                : new string('3', 32);
+            frames.AddRange(framer.Append(chunk));
+            largestBufferedLength = Math.Max(
+                largestBufferedLength,
+                framer.BufferedCharacterCount);
+        }
 
-        Assert.Equal("VISIBLE\n", string.Concat(
+        var malformedOutput = string.Concat(frames.Select(frame => frame.Text));
+        Assert.NotEmpty(malformedOutput);
+        Assert.All(malformedOutput, character => Assert.Equal('3', character));
+        Assert.InRange(
+            largestBufferedLength,
+            0,
+            TerminalOutputFramer.MaxRetainedAnsiSequenceLength);
+
+        frames.AddRange(framer.Append(
+            $"RECOVERED\n\n{TerminalOutputFramer.SentinelPrefix}42|{CommandToken}|C:\\work\n"));
+
+        Assert.EndsWith("RECOVERED\n", string.Concat(
             frames.Where(frame => frame.Kind == TerminalOutputFrameKind.Output)
                 .Select(frame => frame.Text)));
-        Assert.Equal(TerminalOutputFrameKind.Sentinel, frames[^1].Kind);
+        Assert.True(framer.BufferedCharacterCount <=
+                    TerminalOutputFramer.MaxRetainedAnsiSequenceLength);
+        Assert.Single(
+            frames,
+            frame => frame.Kind == TerminalOutputFrameKind.Sentinel &&
+                     frame.IsValidSentinel);
+    }
+
+    [Fact]
+    public void Append_StreamingStdout_NearLimitCsiStillCompletes()
+    {
+        var framer = new TerminalOutputFramer(emitPartialChunks: true);
+        var parameters = new string(
+            '3',
+            TerminalOutputFramer.MaxRetainedAnsiSequenceLength - 2);
+
+        Assert.Empty(framer.Append("\x1B[" + parameters));
+        Assert.Equal(
+            TerminalOutputFramer.MaxRetainedAnsiSequenceLength,
+            framer.BufferedCharacterCount);
+
+        var frame = Assert.Single(framer.Append("mVALID"));
+
+        Assert.Equal("VALID", frame.Text);
+        Assert.Equal(0, framer.BufferedCharacterCount);
     }
 
     [Fact]

@@ -21,6 +21,7 @@ internal readonly record struct TerminalOutputFrame(
 internal sealed class TerminalOutputFramer
 {
     internal const string SentinelPrefix = "##FASTEDIT_SENTINEL##";
+    internal const int MaxRetainedAnsiSequenceLength = 256;
     private const int MaxBufferedOutputLength = 8192;
     private const int MaxSentinelLength = 65536;
 
@@ -254,9 +255,7 @@ internal sealed class TerminalOutputFramer
 
     private sealed class AnsiEscapeFilter
     {
-        private const int MaxPendingEscapeLength = 256;
         private readonly StringBuilder _pendingEscape = new();
-        private bool _discardingCsi;
 
         public int BufferedCharacterCount => _pendingEscape.Length;
 
@@ -268,23 +267,6 @@ internal sealed class TerminalOutputFramer
             var output = new StringBuilder(text.Length);
             foreach (var character in text)
             {
-                if (_discardingCsi)
-                {
-                    if (character is >= '\x40' and <= '\x7E')
-                    {
-                        _discardingCsi = false;
-                    }
-                    else if (character is < '\x20' or > '\x3F')
-                    {
-                        _discardingCsi = false;
-                        if (character == '\x1B')
-                            _pendingEscape.Append(character);
-                        else
-                            output.Append(character);
-                    }
-                    continue;
-                }
-
                 if (_pendingEscape.Length == 0)
                 {
                     if (character == '\x1B')
@@ -319,10 +301,9 @@ internal sealed class TerminalOutputFramer
 
                 if (character is >= '\x20' and <= '\x3F')
                 {
-                    if (_pendingEscape.Length >= MaxPendingEscapeLength)
+                    if (_pendingEscape.Length >= MaxRetainedAnsiSequenceLength)
                     {
                         _pendingEscape.Clear();
-                        _discardingCsi = true;
                     }
                     else
                     {
@@ -344,13 +325,11 @@ internal sealed class TerminalOutputFramer
         public void EndLine()
         {
             _pendingEscape.Clear();
-            _discardingCsi = false;
         }
 
         public void Complete()
         {
             _pendingEscape.Clear();
-            _discardingCsi = false;
         }
     }
 }
