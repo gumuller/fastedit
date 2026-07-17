@@ -159,6 +159,7 @@ public class TerminalOutputFramerTests
         var framer = new TerminalOutputFramer(emitPartialChunks: true);
 
         Assert.Empty(framer.Append("\x1B[" + new string('3', 10000)));
+        Assert.True(framer.BufferedCharacterCount <= 256);
         var frames = framer.Append(
             $"mVISIBLE\n\n{TerminalOutputFramer.SentinelPrefix}42|{CommandToken}|C:\\work\n");
 
