@@ -31,7 +31,7 @@ public class DiffServiceTests
     {
         var result = _sut.ComputeDiff("line1\nline2", "line1\nline1.5\nline2");
 
-        Assert.True(result.RightDiffLines.Any(d => d.Type == ChangeType.Inserted));
+        Assert.Contains(result.RightDiffLines, d => d.Type == ChangeType.Inserted);
     }
 
     [Fact]
@@ -39,7 +39,7 @@ public class DiffServiceTests
     {
         var result = _sut.ComputeDiff("line1\nline2\nline3", "line1\nline3");
 
-        Assert.True(result.LeftDiffLines.Any(d => d.Type == ChangeType.Deleted));
+        Assert.Contains(result.LeftDiffLines, d => d.Type == ChangeType.Deleted);
     }
 
     [Fact]

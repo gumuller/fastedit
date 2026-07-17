@@ -1,7 +1,8 @@
 # FastEdit Build Script
 # Builds self-contained packages for x64 and arm64, creates portable zips and NSIS installers
 param(
-    [string]$Version = "1.0.0",
+    [string]$Version,
+    [switch]$IncrementBuildCounter,
     [switch]$SkipInstaller,
     [switch]$Sign
 )
@@ -14,9 +15,32 @@ $Runtimes = @("win-x64", "win-arm64")
 $SignScript = Join-Path $PSScriptRoot "sign.ps1"
 $PublicCertPath = Join-Path $OutputDir "FastEdit-SelfSigned.cer"
 
+if ($IncrementBuildCounter -and -not [string]::IsNullOrWhiteSpace($Version)) {
+    throw "Specify either -Version or -IncrementBuildCounter, not both."
+}
+if (-not $IncrementBuildCounter -and [string]::IsNullOrWhiteSpace($Version)) {
+    throw "Specify -Version <version> or -IncrementBuildCounter."
+}
+
 # Clean output
 if (Test-Path $OutputDir) { Remove-Item $OutputDir -Recurse -Force }
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
+
+if ($IncrementBuildCounter) {
+    $versionFile = Join-Path $OutputDir "release-version.txt"
+    dotnet msbuild $ProjectPath `
+        -t:IncrementReleaseVersion `
+        "-p:BuildVersionOutputFile=$versionFile" `
+        -nologo `
+        -verbosity:minimal
+
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $versionFile)) {
+        throw "Failed to increment the release version."
+    }
+
+    $Version = (Get-Content $versionFile -Raw).Trim()
+    Remove-Item $versionFile
+}
 
 Write-Host "=== FastEdit Build v$Version ===" -ForegroundColor Cyan
 
@@ -29,10 +53,7 @@ foreach ($rid in $Runtimes) {
     Write-Host ""
     Write-Host "--- Building $arch ---" -ForegroundColor Yellow
 
-    # Publish self-contained, single-dir, trimmed.
-    # SkipBuildCounterIncrement=true so the explicit -p:Version wins and the
-    # build.counter file doesn't advance once per arch (which would produce
-    # e.g. 1.1.4 x64 and 1.1.5 arm64 within a single release).
+    # Publish both architectures with the one version selected above.
     dotnet publish $ProjectPath `
         -c Release `
         -r $rid `
@@ -40,10 +61,7 @@ foreach ($rid in $Runtimes) {
         -p:PublishSingleFile=false `
         -p:PublishTrimmed=false `
         -p:IncludeNativeLibrariesForSelfExtract=true `
-        -p:Version=$Version `
-        -p:FileVersion=$Version `
-        -p:AssemblyVersion=$Version `
-        -p:SkipBuildCounterIncrement=true `
+        -p:ReleaseVersion=$Version `
         -o $publishDir
 
     if ($LASTEXITCODE -ne 0) {

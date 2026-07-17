@@ -88,7 +88,7 @@ public class LruCacheTests
     }
 
     [Fact]
-    public void Concurrent_Access_Does_Not_Throw()
+    public async Task Concurrent_Access_Does_Not_Throw()
     {
         var cache = new LruCache<int, int>(100);
         var tasks = new List<Task>();
@@ -106,6 +106,6 @@ public class LruCacheTests
             }));
         }
 
-        Task.WaitAll(tasks.ToArray()); // should not throw
+        await Task.WhenAll(tasks);
     }
 }
