@@ -1180,7 +1180,7 @@ public class MainViewModelTests
             var stagedFirst = CreateMockTab();
             var stagedSecond = CreateMockTab();
             var liveFirst = CreateMockTab(Path.GetFileName(firstPath), firstPath);
-            liveFirst.SetContentBaseline("live", isModified: false);
+            liveFirst.SetContentBaseline("staged", isModified: false);
             var secondLoadStarted = new TaskCompletionSource(
                 TaskCreationOptions.RunContinuationsAsynchronously);
             var secondLoadCompletion = new TaskCompletionSource<FileReadResult>(
@@ -1359,7 +1359,7 @@ public class MainViewModelTests
     }
 
     [Fact]
-    public async Task RestoreSession_ProvenUntitledIdentityDuringLaterLoad_KeepsSingleOwner()
+    public async Task RestoreSession_DivergentUntitledIdentityDuringLaterLoad_RekeysForNextAutoSave()
     {
         var laterPath = Path.GetTempFileName();
         try
@@ -1405,12 +1405,32 @@ public class MainViewModelTests
                 new FileReadResult("later", System.Text.Encoding.UTF8, false));
             await restoreTask;
 
-            Assert.Single(_sut.Tabs.Where(tab => string.IsNullOrEmpty(tab.FilePath)));
+            var untitledTabs = _sut.Tabs
+                .Where(tab => string.IsNullOrEmpty(tab.FilePath))
+                .ToList();
+            Assert.Equal(2, untitledTabs.Count);
             Assert.Contains(liveUntitled, _sut.Tabs);
-            Assert.DoesNotContain(stagedUntitled, _sut.Tabs);
-            Assert.Empty(stagedUntitled.Content);
+            Assert.Contains(stagedUntitled, _sut.Tabs);
+            Assert.Equal("staged content", stagedUntitled.Content);
             Assert.Equal("live content", liveUntitled.Content);
-            Assert.Same(liveUntitled, _sut.SelectedTab);
+            Assert.NotEqual(
+                liveUntitled.AutoSaveIdentity,
+                stagedUntitled.AutoSaveIdentity);
+            var autoSaveEntries = _sut.GetAutoSaveEntries()
+                .Where(entry =>
+                    entry.Content is "live content" or "staged content")
+                .ToList();
+            Assert.Equal(2, autoSaveEntries.Count);
+            Assert.Equal(
+                2,
+                autoSaveEntries.Select(entry => entry.Id).Distinct().Count());
+            Assert.Equal(
+                new[] { "live content", "staged content" },
+                autoSaveEntries
+                    .Select(entry => entry.Content)
+                    .Order()
+                    .ToArray());
+            Assert.Same(stagedUntitled, _sut.SelectedTab);
         }
         finally
         {

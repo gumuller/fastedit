@@ -879,7 +879,7 @@ public partial class MainViewModel : ObservableObject
     public async Task RestoreSessionAsync()
     {
         using var restoredSession =
-            await _sessionCoordinator.RestoreShutdownSessionAsync(Tabs);
+            await _sessionCoordinator.RestoreShutdownSessionAsync();
         var adoption = _sessionCoordinator.AdoptRestoredTabs(
             restoredSession,
             Tabs,

@@ -95,13 +95,38 @@ public sealed class DocumentSessionCoordinator
                     await tab.LoadFileAsync(entry.FilePath);
                 }
 
-                if (!string.IsNullOrEmpty(entry.TabIdentity))
-                    tab.RestoreAutoSaveIdentity(entry.TabIdentity);
                 tab.CursorOffset = entry.CursorOffset;
                 tab.ScrollOffset = entry.ScrollOffset;
             }
 
-            return new StagedDocumentSession(stagedTabs, session.ActiveTabIndex);
+            var descriptors = stagedTabs
+                .Select((tab, index) => PersistedTabDescriptor.FromTab(
+                    index,
+                    session.Files[index].TabIdentity,
+                    tab))
+                .ToArray();
+            var plan = PlanPersistedTabBatch(
+                descriptors,
+                Array.Empty<EditorTabViewModel>());
+            var adoptedTabs = new List<EditorTabViewModel>(plan.Candidates.Count);
+            var adoptedIndexes = new Dictionary<int, int>();
+            foreach (var candidate in plan.Candidates)
+            {
+                var tab = stagedTabs[candidate.Descriptor.SourceIndex];
+                tab.RestoreAutoSaveIdentity(candidate.AssignedIdentity);
+                adoptedIndexes[candidate.Descriptor.SourceIndex] = adoptedTabs.Count;
+                adoptedTabs.Add(tab);
+            }
+
+            foreach (var duplicate in plan.Duplicates)
+                stagedTabs[duplicate.Descriptor.SourceIndex].Dispose();
+
+            var activeTabIndex = ResolvePlannedActiveIndex(
+                session.ActiveTabIndex,
+                adoptedTabs.Count,
+                adoptedIndexes,
+                plan.Duplicates);
+            return new StagedDocumentSession(adoptedTabs, activeTabIndex);
         }
         catch
         {
@@ -173,8 +198,7 @@ public sealed class DocumentSessionCoordinator
         return new UnsavedChangesPreparationResult(true);
     }
 
-    public async Task<RestoredDocumentSession> RestoreShutdownSessionAsync(
-        IReadOnlyList<EditorTabViewModel> existingTabs)
+    public async Task<RestoredDocumentSession> RestoreShutdownSessionAsync()
     {
         var restoredCandidates = new List<RestoredTabCandidate>();
         var openFiles = _settingsService.OpenFiles;
@@ -188,10 +212,7 @@ public sealed class DocumentSessionCoordinator
             var sessionFile = openFiles[index];
             try
             {
-                var tab = await RestoreSessionFileAsync(
-                    existingTabs,
-                    restoredCandidates.Select(candidate => candidate.Tab),
-                    sessionFile);
+                var tab = await RestoreSessionFileAsync(sessionFile);
                 if (tab != null)
                     restoredCandidates.Add(
                         new RestoredTabCandidate(tab, index, sessionFile.TabIdentity));
@@ -216,6 +237,17 @@ public sealed class DocumentSessionCoordinator
         Action<EditorTabViewModel> adoptTab)
     {
         var candidates = restoredSession.TakeCandidates();
+        var descriptors = candidates
+            .Select((candidate, index) => PersistedTabDescriptor.FromTab(
+                index,
+                candidate.TabIdentity,
+                candidate.Tab))
+            .ToArray();
+        var plan = PlanPersistedTabBatch(descriptors, liveTabs);
+        var plannedBySource = plan.Candidates.ToDictionary(
+            candidate => candidate.Descriptor.SourceIndex);
+        var duplicatesBySource = plan.Duplicates.ToDictionary(
+            duplicate => duplicate.Descriptor.SourceIndex);
         var adoptedTabs = new List<EditorTabViewModel>(candidates.Count);
         var discardedDuplicates = new List<EditorTabViewModel>();
         EditorTabViewModel? selectedTab = null;
@@ -223,16 +255,20 @@ public sealed class DocumentSessionCoordinator
         for (var index = 0; index < candidates.Count; index++)
         {
             var candidate = candidates[index];
-            var duplicate = FindOpenDuplicate(liveTabs, candidate);
-            if (duplicate != null)
+            if (duplicatesBySource.TryGetValue(index, out var duplicate))
             {
                 candidate.Tab.Dispose();
                 discardedDuplicates.Add(candidate.Tab);
                 if (candidate.SessionIndex == restoredSession.ActiveTabIndex)
-                    selectedTab = duplicate;
+                {
+                    selectedTab = duplicate.Owner.LiveTab ??
+                        candidates[duplicate.Owner.PlannedSourceIndex!.Value].Tab;
+                }
                 continue;
             }
 
+            var planned = plannedBySource[index];
+            candidate.Tab.RestoreAutoSaveIdentity(planned.AssignedIdentity);
             if (string.IsNullOrEmpty(candidate.Tab.FilePath))
             {
                 candidate.Tab.FileName = UntitledTabNameAllocator.Allocate(
@@ -356,53 +392,21 @@ public sealed class DocumentSessionCoordinator
         IReadOnlyList<AutoSaveEntry> entries,
         IReadOnlyList<EditorTabViewModel> liveTabs)
     {
-        var usedIdentities = liveTabs
-            .Select(tab => tab.AutoSaveIdentity)
-            .ToHashSet(StringComparer.Ordinal);
-        var reservedPersistedIdentities = entries
-            .Select(entry => entry.TabIdentity)
-            .Where(identity => !string.IsNullOrEmpty(identity))
-            .Cast<string>()
-            .ToHashSet(StringComparer.Ordinal);
-        var logicalOwners = liveTabs
-            .Select(tab => RecoveryLogicalOwner.FromLiveTab(tab))
-            .ToList();
-        var candidates = new List<PlannedRecoveryEntry>(entries.Count);
-        var duplicateEntryIds = new List<string>();
-
-        foreach (var entry in entries)
-        {
-            if (!string.IsNullOrEmpty(entry.TabIdentity) &&
-                logicalOwners.Any(owner =>
-                    string.Equals(
-                        owner.OriginalIdentity,
-                        entry.TabIdentity,
-                        StringComparison.Ordinal) &&
-                    owner.IsEquivalentTo(entry)))
-            {
-                duplicateEntryIds.Add(entry.Id);
-                continue;
-            }
-
-            var assignedIdentity = entry.TabIdentity;
-            if (string.IsNullOrEmpty(assignedIdentity) ||
-                usedIdentities.Contains(assignedIdentity))
-            {
-                assignedIdentity = GenerateUniqueTabIdentity(
-                    usedIdentities,
-                    reservedPersistedIdentities);
-            }
-
-            usedIdentities.Add(assignedIdentity);
-            candidates.Add(new PlannedRecoveryEntry(entry, assignedIdentity));
-            if (!string.IsNullOrEmpty(entry.TabIdentity))
-            {
-                logicalOwners.Add(
-                    RecoveryLogicalOwner.FromRecoveryEntry(entry));
-            }
-        }
-
-        return new RecoveryBatchPlan(candidates, duplicateEntryIds);
+        var descriptors = entries
+            .Select((entry, index) => PersistedTabDescriptor.FromRecoveryEntry(
+                index,
+                entry))
+            .ToArray();
+        var plan = PlanPersistedTabBatch(descriptors, liveTabs);
+        return new RecoveryBatchPlan(
+            plan.Candidates
+                .Select(candidate => new PlannedRecoveryEntry(
+                    entries[candidate.Descriptor.SourceIndex],
+                    candidate.AssignedIdentity))
+                .ToArray(),
+            plan.Duplicates
+                .Select(duplicate => entries[duplicate.Descriptor.SourceIndex].Id)
+                .ToArray());
     }
 
     public TabRecoveryResult RecoverTabs(
@@ -460,8 +464,6 @@ public sealed class DocumentSessionCoordinator
             StringComparison.Ordinal);
 
     private async Task<EditorTabViewModel?> RestoreSessionFileAsync(
-        IReadOnlyList<EditorTabViewModel> existingTabs,
-        IEnumerable<EditorTabViewModel> restoredTabs,
         SessionFile sessionFile)
     {
         if (sessionFile.IsUntitled)
@@ -477,26 +479,17 @@ public sealed class DocumentSessionCoordinator
             }
 
             var untitledTab = _tabFactory.CreateUntitled(content);
-            if (!string.IsNullOrEmpty(sessionFile.TabIdentity))
-                untitledTab.RestoreAutoSaveIdentity(sessionFile.TabIdentity);
             untitledTab.FileName = Path.GetFileName(sessionFile.FilePath);
             return untitledTab;
         }
 
-        if (!_fileSystemService.FileExists(sessionFile.FilePath) ||
-            existingTabs.Concat(restoredTabs).Any(tab =>
-                !string.IsNullOrEmpty(tab.FilePath) &&
-                HasSameOpenIdentity(tab.FilePath, sessionFile.FilePath)))
-        {
+        if (!_fileSystemService.FileExists(sessionFile.FilePath))
             return null;
-        }
 
         var tab = _tabFactory.Create();
         try
         {
             await tab.LoadFileAsync(sessionFile.FilePath);
-            if (!string.IsNullOrEmpty(sessionFile.TabIdentity))
-                tab.RestoreAutoSaveIdentity(sessionFile.TabIdentity);
             return tab;
         }
         catch
@@ -506,27 +499,26 @@ public sealed class DocumentSessionCoordinator
         }
     }
 
-    private static EditorTabViewModel? FindOpenDuplicate(
-        IReadOnlyList<EditorTabViewModel> liveTabs,
-        RestoredTabCandidate candidate)
+    private static int ResolvePlannedActiveIndex(
+        int requestedSourceIndex,
+        int adoptedCount,
+        IReadOnlyDictionary<int, int> adoptedIndexes,
+        IReadOnlyList<DuplicatePersistedTab> duplicates)
     {
-        if (!string.IsNullOrEmpty(candidate.TabIdentity))
+        if (adoptedIndexes.TryGetValue(requestedSourceIndex, out var adoptedIndex))
+            return adoptedIndex;
+
+        var duplicate = duplicates.FirstOrDefault(item =>
+            item.Descriptor.SourceIndex == requestedSourceIndex);
+        if (duplicate?.Owner.PlannedSourceIndex is int ownerSourceIndex &&
+            adoptedIndexes.TryGetValue(ownerSourceIndex, out var ownerIndex))
         {
-            var identityDuplicate = liveTabs.FirstOrDefault(tab =>
-                string.Equals(
-                    tab.AutoSaveIdentity,
-                    candidate.TabIdentity,
-                    StringComparison.Ordinal));
-            if (identityDuplicate != null)
-                return identityDuplicate;
+            return ownerIndex;
         }
 
-        if (string.IsNullOrEmpty(candidate.Tab.FilePath))
-            return null;
-
-        return liveTabs.FirstOrDefault(tab =>
-            !string.IsNullOrEmpty(tab.FilePath) &&
-            HasSameOpenIdentity(tab.FilePath, candidate.Tab.FilePath));
+        return adoptedCount == 0
+            ? 0
+            : Math.Clamp(requestedSourceIndex, 0, adoptedCount - 1);
     }
 
     private string GenerateUniqueTabIdentity(
@@ -548,6 +540,87 @@ public sealed class DocumentSessionCoordinator
 
         return identity;
     }
+
+    private PersistedTabBatchPlan PlanPersistedTabBatch(
+        IReadOnlyList<PersistedTabDescriptor> descriptors,
+        IReadOnlyList<EditorTabViewModel> liveTabs)
+    {
+        var usedIdentities = liveTabs
+            .Select(tab => tab.AutoSaveIdentity)
+            .ToHashSet(StringComparer.Ordinal);
+        var reservedPersistedIdentities = descriptors
+            .Select(descriptor => descriptor.PersistedIdentity)
+            .Where(HasValidPersistedIdentity)
+            .Cast<string>()
+            .ToHashSet(StringComparer.Ordinal);
+        var owners = liveTabs
+            .Select(PersistedTabOwner.FromLiveTab)
+            .ToList();
+        var candidates = new List<PlannedPersistedTab>(descriptors.Count);
+        var duplicates = new List<DuplicatePersistedTab>();
+
+        foreach (var descriptor in descriptors)
+        {
+            var duplicateOwner = owners.FirstOrDefault(owner =>
+                owner.IsExactDuplicateOf(descriptor));
+            if (duplicateOwner != null)
+            {
+                if (HasValidPersistedIdentity(descriptor.PersistedIdentity) &&
+                    duplicateOwner.PlannedSourceIndex is int ownerSourceIndex &&
+                    !usedIdentities.Contains(descriptor.PersistedIdentity!))
+                {
+                    var candidateIndex = candidates.FindIndex(candidate =>
+                        candidate.Descriptor.SourceIndex == ownerSourceIndex);
+                    var ownerIndex = owners.IndexOf(duplicateOwner);
+                    var retainedCandidate = candidates[candidateIndex];
+                    if (!HasValidPersistedIdentity(duplicateOwner.ProofIdentity) ||
+                        !string.Equals(
+                            retainedCandidate.AssignedIdentity,
+                            duplicateOwner.ProofIdentity,
+                            StringComparison.Ordinal))
+                    {
+                        usedIdentities.Remove(retainedCandidate.AssignedIdentity);
+                        usedIdentities.Add(descriptor.PersistedIdentity!);
+                        candidates[candidateIndex] = retainedCandidate with
+                        {
+                            AssignedIdentity = descriptor.PersistedIdentity!
+                        };
+                        duplicateOwner = duplicateOwner with
+                        {
+                            ProofIdentity = descriptor.PersistedIdentity
+                        };
+                        owners[ownerIndex] = duplicateOwner;
+                    }
+                }
+
+                duplicates.Add(new DuplicatePersistedTab(
+                    descriptor,
+                    duplicateOwner));
+                continue;
+            }
+
+            var assignedIdentity = descriptor.PersistedIdentity;
+            if (!HasValidPersistedIdentity(assignedIdentity) ||
+                usedIdentities.Contains(assignedIdentity!))
+            {
+                assignedIdentity = GenerateUniqueTabIdentity(
+                    usedIdentities,
+                    reservedPersistedIdentities);
+            }
+
+            usedIdentities.Add(assignedIdentity!);
+            var planned = new PlannedPersistedTab(
+                descriptor,
+                assignedIdentity!);
+            candidates.Add(planned);
+            owners.Add(PersistedTabOwner.FromPlanned(planned));
+        }
+
+        return new PersistedTabBatchPlan(candidates, duplicates);
+    }
+
+    internal static bool HasValidPersistedIdentity(string? identity) =>
+        !string.IsNullOrWhiteSpace(identity);
 
     private void PersistUntitledContent(
         EditorTabViewModel tab,
@@ -721,38 +794,46 @@ public sealed record PlannedRecoveryEntry(
     AutoSaveEntry Entry,
     string AssignedIdentity);
 
-internal sealed record RecoveryLogicalOwner(
-    string OriginalIdentity,
+internal sealed record PersistedTabDescriptor(
+    int SourceIndex,
+    string? PersistedIdentity,
     string Content,
     bool IsUntitled,
     string? FilePath,
     int CursorOffset,
     double ScrollOffset)
 {
-    public static RecoveryLogicalOwner FromLiveTab(EditorTabViewModel tab) =>
+    public static PersistedTabDescriptor FromTab(
+        int sourceIndex,
+        string? persistedIdentity,
+        EditorTabViewModel tab) =>
         new(
-            tab.AutoSaveIdentity,
+            sourceIndex,
+            persistedIdentity,
             tab.Content,
             string.IsNullOrEmpty(tab.FilePath),
             string.IsNullOrEmpty(tab.FilePath) ? null : tab.FilePath,
             tab.CursorOffset,
             tab.ScrollOffset);
 
-    public static RecoveryLogicalOwner FromRecoveryEntry(AutoSaveEntry entry) =>
+    public static PersistedTabDescriptor FromRecoveryEntry(
+        int sourceIndex,
+        AutoSaveEntry entry) =>
         new(
-            entry.TabIdentity!,
+            sourceIndex,
+            entry.TabIdentity,
             entry.Content,
             entry.IsUntitled,
             entry.FilePath,
             entry.CursorOffset,
             entry.ScrollOffset);
 
-    public bool IsEquivalentTo(AutoSaveEntry entry)
+    public bool HasEquivalentState(PersistedTabDescriptor other)
     {
-        if (IsUntitled != entry.IsUntitled ||
-            !string.Equals(Content, entry.Content, StringComparison.Ordinal) ||
-            CursorOffset != entry.CursorOffset ||
-            ScrollOffset != entry.ScrollOffset)
+        if (IsUntitled != other.IsUntitled ||
+            !string.Equals(Content, other.Content, StringComparison.Ordinal) ||
+            CursorOffset != other.CursorOffset ||
+            ScrollOffset != other.ScrollOffset)
         {
             return false;
         }
@@ -761,9 +842,65 @@ internal sealed record RecoveryLogicalOwner(
             return true;
 
         return !string.IsNullOrEmpty(FilePath) &&
-            !string.IsNullOrEmpty(entry.FilePath) &&
+            !string.IsNullOrEmpty(other.FilePath) &&
             DocumentSessionCoordinator.HasSameOpenIdentity(
                 FilePath,
-                entry.FilePath);
+                other.FilePath);
     }
 }
+
+internal sealed record PersistedTabOwner(
+    string? ProofIdentity,
+    PersistedTabDescriptor Descriptor,
+    EditorTabViewModel? LiveTab,
+    int? PlannedSourceIndex)
+{
+    public static PersistedTabOwner FromLiveTab(EditorTabViewModel tab) =>
+        new(
+            tab.AutoSaveIdentity,
+            PersistedTabDescriptor.FromTab(-1, tab.AutoSaveIdentity, tab),
+            tab,
+            null);
+
+    public static PersistedTabOwner FromPlanned(PlannedPersistedTab planned) =>
+        new(
+            planned.Descriptor.PersistedIdentity,
+            planned.Descriptor,
+            null,
+            planned.Descriptor.SourceIndex);
+
+    public bool IsExactDuplicateOf(PersistedTabDescriptor candidate)
+    {
+        if (!Descriptor.HasEquivalentState(candidate))
+            return false;
+
+        var identitiesMatch =
+            DocumentSessionCoordinator.HasValidPersistedIdentity(
+                candidate.PersistedIdentity) &&
+            string.Equals(
+                ProofIdentity,
+                candidate.PersistedIdentity,
+                StringComparison.Ordinal);
+        var savedPathsMatch =
+            !Descriptor.IsUntitled &&
+            !candidate.IsUntitled &&
+            !string.IsNullOrEmpty(Descriptor.FilePath) &&
+            !string.IsNullOrEmpty(candidate.FilePath) &&
+            DocumentSessionCoordinator.HasSameOpenIdentity(
+                Descriptor.FilePath,
+                candidate.FilePath);
+        return identitiesMatch || savedPathsMatch;
+    }
+}
+
+internal sealed record PersistedTabBatchPlan(
+    IReadOnlyList<PlannedPersistedTab> Candidates,
+    IReadOnlyList<DuplicatePersistedTab> Duplicates);
+
+internal sealed record PlannedPersistedTab(
+    PersistedTabDescriptor Descriptor,
+    string AssignedIdentity);
+
+internal sealed record DuplicatePersistedTab(
+    PersistedTabDescriptor Descriptor,
+    PersistedTabOwner Owner);

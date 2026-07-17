@@ -96,6 +96,55 @@ public class DocumentSessionCoordinatorTests
     }
 
     [Fact]
+    public async Task StageNamedSession_DivergentIdentityCollisionRekeysForNextAutoSave()
+    {
+        var first = CreateTab();
+        first.SetContentBaseline("first", isModified: true);
+        var second = CreateTab();
+        second.SetContentBaseline("second", isModified: true);
+        _tabFactory.Setup(factory => factory.CreateUntitled("first")).Returns(first);
+        _tabFactory.Setup(factory => factory.CreateUntitled("second")).Returns(second);
+        var sut = new DocumentSessionCoordinator(
+            _settingsService.Object,
+            _fileSystemService.Object,
+            _tabFactory.Object,
+            () => "rekeyed");
+        var session = new SessionData
+        {
+            ActiveTabIndex = 1,
+            Files =
+            {
+                new SessionFileEntry
+                {
+                    FilePath = "Untitled-1",
+                    TabIdentity = "shared",
+                    IsUntitled = true,
+                    Content = "first"
+                },
+                new SessionFileEntry
+                {
+                    FilePath = "Untitled-2",
+                    TabIdentity = "shared",
+                    IsUntitled = true,
+                    Content = "second"
+                }
+            }
+        };
+
+        using var staged = await sut.StageNamedSessionAsync(session);
+        var autoSaveEntries = sut.CreateAutoSaveEntries(staged.Tabs);
+
+        Assert.Equal(new[] { first, second }, staged.Tabs);
+        Assert.Equal(1, staged.ActiveTabIndex);
+        Assert.Equal("shared", first.AutoSaveIdentity);
+        Assert.Equal("rekeyed", second.AutoSaveIdentity);
+        Assert.Equal(2, autoSaveEntries.Select(entry => entry.Id).Distinct().Count());
+        Assert.Equal(
+            new[] { "first", "second" },
+            autoSaveEntries.Select(entry => entry.Content).ToArray());
+    }
+
+    [Fact]
     public async Task PrepareDiscard_ExcludesOnlyExplicitlyDiscardedUntitledTab()
     {
         var discarded = CreateTab("Untitled-discarded");
@@ -331,6 +380,149 @@ public class DocumentSessionCoordinatorTests
     }
 
     [Fact]
+    public void PlanRecoveryBatch_RekeyedOwnerStillDedupesExactPersistedIdentity()
+    {
+        var live = CreateTab("Untitled-1");
+        live.RestoreAutoSaveIdentity("shared");
+        live.SetContentBaseline("live", isModified: true);
+        var generatorCalls = 0;
+        var sut = new DocumentSessionCoordinator(
+            _settingsService.Object,
+            _fileSystemService.Object,
+            _tabFactory.Object,
+            () =>
+            {
+                generatorCalls++;
+                return "rekeyed";
+            });
+        var entries = new[]
+        {
+            new AutoSaveEntry(
+                "first",
+                "Untitled-2",
+                null,
+                "same",
+                true,
+                TabIdentity: "shared"),
+            new AutoSaveEntry(
+                "duplicate",
+                "Untitled-2",
+                null,
+                "same",
+                true,
+                TabIdentity: "shared")
+        };
+
+        var plan = sut.PlanRecoveryBatch(entries, new[] { live });
+
+        Assert.Equal("rekeyed", Assert.Single(plan.Candidates).AssignedIdentity);
+        Assert.Equal(new[] { "duplicate" }, plan.DuplicateEntryIds);
+        Assert.Equal(1, generatorCalls);
+    }
+
+    [Fact]
+    public void PlanRecoveryBatch_InvalidIdentitySkipsReservedGeneratorCollision()
+    {
+        var generated = new Queue<string>(new[] { "persisted", "generated" });
+        var sut = new DocumentSessionCoordinator(
+            _settingsService.Object,
+            _fileSystemService.Object,
+            _tabFactory.Object,
+            generated.Dequeue);
+        var entries = new[]
+        {
+            new AutoSaveEntry(
+                "legacy",
+                "Untitled-1",
+                null,
+                "legacy",
+                true,
+                TabIdentity: " "),
+            new AutoSaveEntry(
+                "persisted",
+                "Untitled-2",
+                null,
+                "persisted",
+                true,
+                TabIdentity: "persisted")
+        };
+
+        var plan = sut.PlanRecoveryBatch(
+            entries,
+            Array.Empty<EditorTabViewModel>());
+
+        Assert.Equal(
+            new[] { "generated", "persisted" },
+            plan.Candidates.Select(candidate => candidate.AssignedIdentity));
+        Assert.Empty(plan.DuplicateEntryIds);
+    }
+
+    [Fact]
+    public void PlanRecoveryBatch_ExactSavedDuplicatePromotesAvailableValidIdentity()
+    {
+        var sut = new DocumentSessionCoordinator(
+            _settingsService.Object,
+            _fileSystemService.Object,
+            _tabFactory.Object,
+            () => "generated");
+        var entries = new[]
+        {
+            new AutoSaveEntry(
+                "legacy",
+                "saved.txt",
+                @"C:\saved.txt",
+                "same",
+                false,
+                TabIdentity: " "),
+            new AutoSaveEntry(
+                "persisted",
+                "saved.txt",
+                @"C:\saved.txt",
+                "same",
+                false,
+                TabIdentity: "valid")
+        };
+
+        var plan = sut.PlanRecoveryBatch(
+            entries,
+            Array.Empty<EditorTabViewModel>());
+
+        Assert.Equal("valid", Assert.Single(plan.Candidates).AssignedIdentity);
+        Assert.Equal(new[] { "persisted" }, plan.DuplicateEntryIds);
+    }
+
+    [Fact]
+    public void PlanRecoveryBatch_ExactSavedDuplicateRetainsFirstValidIdentity()
+    {
+        var entries = new[]
+        {
+            new AutoSaveEntry(
+                "first",
+                "saved.txt",
+                @"C:\saved.txt",
+                "same",
+                false,
+                TabIdentity: "first-identity"),
+            new AutoSaveEntry(
+                "duplicate",
+                "saved.txt",
+                @"C:\saved.txt",
+                "same",
+                false,
+                TabIdentity: "second-identity")
+        };
+
+        var plan = _sut.PlanRecoveryBatch(
+            entries,
+            Array.Empty<EditorTabViewModel>());
+
+        Assert.Equal(
+            "first-identity",
+            Assert.Single(plan.Candidates).AssignedIdentity);
+        Assert.Equal(new[] { "duplicate" }, plan.DuplicateEntryIds);
+    }
+
+    [Fact]
     public void AdoptRestoredTabs_CaseVariantIsNotDiscarded()
     {
         var live = CreateTab("File.txt", @"C:\CaseSensitive\File.txt");
@@ -404,7 +596,7 @@ public class DocumentSessionCoordinatorTests
     }
 
     [Fact]
-    public void AdoptRestoredTabs_StableIdentityDedupesAcrossNamedState()
+    public void AdoptRestoredTabs_DivergentNamedStateWithSameIdentityIsRekeyed()
     {
         var liveNamed = CreateTab("saved.txt", @"C:\saved.txt");
         liveNamed.RestoreAutoSaveIdentity("shared");
@@ -422,11 +614,38 @@ public class DocumentSessionCoordinatorTests
             liveTabs,
             liveTabs.Add);
 
-        Assert.Same(liveNamed, Assert.Single(liveTabs));
-        Assert.Same(stagedUntitled, Assert.Single(adoption.DiscardedDuplicateTabs));
-        Assert.Empty(stagedUntitled.Content);
+        Assert.Equal(2, liveTabs.Count);
+        Assert.Contains(stagedUntitled, liveTabs);
+        Assert.Empty(adoption.DiscardedDuplicateTabs);
+        Assert.NotEqual(liveNamed.AutoSaveIdentity, stagedUntitled.AutoSaveIdentity);
+        Assert.Equal("staged content", stagedUntitled.Content);
         Assert.Equal("live content", liveNamed.Content);
-        Assert.Same(liveNamed, adoption.SelectedTab);
+        Assert.Same(stagedUntitled, adoption.SelectedTab);
+    }
+
+    [Fact]
+    public void AdoptRestoredTabs_ExactStableIdentityDuplicateKeepsSingleOwner()
+    {
+        var live = CreateTab("Untitled-1");
+        live.RestoreAutoSaveIdentity("shared");
+        live.SetContentBaseline("same content", isModified: true);
+        var staged = CreateTab("Untitled-1");
+        staged.SetContentBaseline("same content", isModified: true);
+        var liveTabs = new List<EditorTabViewModel> { live };
+        using var restoredSession = new RestoredDocumentSession(
+            new[] { new RestoredTabCandidate(staged, 0, "shared") },
+            activeTabIndex: 0);
+
+        var adoption = _sut.AdoptRestoredTabs(
+            restoredSession,
+            liveTabs,
+            liveTabs.Add);
+
+        Assert.Same(live, Assert.Single(liveTabs));
+        Assert.Same(staged, Assert.Single(adoption.DiscardedDuplicateTabs));
+        Assert.Empty(staged.Content);
+        Assert.Equal("same content", live.Content);
+        Assert.Same(live, adoption.SelectedTab);
     }
 
     [Fact]

@@ -1,5 +1,7 @@
 using System.IO;
 using System.IO.Enumeration;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using FastEdit.Services;
 using FastEdit.Services.Interfaces;
 using FluentAssertions;
@@ -920,6 +922,88 @@ public class AutoSaveServiceTests
             recovery.Entries.Select(entry => entry.Id),
             allEntriesRecovered: true).Should().BeFalse();
 
+        _fileSystem.Verify(f => f.MoveFile(
+            sourceManifestPath,
+            It.IsAny<string>(),
+            false), Times.Never);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("corrupt")]
+    public void CompleteRecovery_ManifestIdentityCorruptionRetainsSourceGeneration(
+        string? corruptIdentity)
+    {
+        var sourceManifestPath = Path.Combine(_autoSaveDir, "manifest-crashed.json");
+        var sourceContentPath = Path.Combine(_autoSaveDir, "crashed.txt");
+        var sourceManifest = """
+            [{
+              "Id":"old",
+              "TabIdentity":"stable",
+              "FileName":"recovered.txt",
+              "FilePath":null,
+              "ContentFile":"crashed.txt",
+              "IsUntitled":true,
+              "CursorOffset":0,
+              "ScrollOffset":0
+            }]
+            """;
+        var files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            [sourceManifestPath] = sourceManifest,
+            [sourceContentPath] = "recovered"
+        };
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(() => files.Keys
+                .Where(path =>
+                    Path.GetFileName(path).StartsWith(
+                        "manifest",
+                        StringComparison.OrdinalIgnoreCase))
+                .ToArray());
+        _fileSystem.Setup(f => f.FileExists(It.IsAny<string>()))
+            .Returns((string path) => files.ContainsKey(path));
+        _fileSystem.Setup(f => f.ReadAllText(It.IsAny<string>()))
+            .Returns((string path) => files[path]);
+        _fileSystem.Setup(f => f.WriteAllTextAtomic(
+                It.IsAny<string>(),
+                It.IsAny<string>()))
+            .Callback<string, string>((path, content) =>
+            {
+                if (path != sourceManifestPath &&
+                    Path.GetFileName(path).StartsWith(
+                        "manifest-",
+                        StringComparison.Ordinal))
+                {
+                    var manifest = JsonNode.Parse(content)!.AsArray();
+                    var manifestEntry = manifest[0]!.AsObject();
+                    if (corruptIdentity == null)
+                        manifestEntry.Remove("TabIdentity");
+                    else
+                        manifestEntry["TabIdentity"] = corruptIdentity;
+                    content = manifest.ToJsonString(
+                        new JsonSerializerOptions { WriteIndented = true });
+                }
+
+                files[path] = content;
+            });
+        var recovery = _sut.GetRecoveryEntries();
+        var replacement = new AutoSaveEntry(
+            "tab-stable",
+            "recovered.txt",
+            null,
+            "recovered",
+            true,
+            TabIdentity: "stable");
+
+        var completed = _sut.CompleteRecovery(
+            new[] { replacement },
+            recovery.Entries.Select(entry => entry.Id),
+            allEntriesRecovered: true);
+
+        completed.Should().BeFalse();
+        files.Should().ContainKey(sourceManifestPath);
+        files[sourceManifestPath].Should().Be(sourceManifest);
         _fileSystem.Verify(f => f.MoveFile(
             sourceManifestPath,
             It.IsAny<string>(),

@@ -201,6 +201,10 @@ public sealed class AutoSaveService : IAutoSaveService
         foreach (var entry in snapshot)
         {
             if (!storedById.TryGetValue(entry.Id, out var stored) ||
+                !string.Equals(
+                    stored.TabIdentity,
+                    entry.TabIdentity,
+                    StringComparison.Ordinal) ||
                 stored.FileName != entry.FileName ||
                 stored.FilePath != entry.FilePath ||
                 stored.IsUntitled != entry.IsUntitled ||
