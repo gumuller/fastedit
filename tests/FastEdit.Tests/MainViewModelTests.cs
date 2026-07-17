@@ -19,6 +19,7 @@ public class MainViewModelTests
     private readonly Mock<IFileSystemService> _fileSystemService = new();
     private readonly Mock<IEditorTabFactory> _tabFactory = new();
     private readonly Mock<IWorkspaceService> _workspaceService = new();
+    private readonly DocumentSessionCoordinator _sessionCoordinator;
     private readonly FileTreeViewModel _fileTree;
     private readonly MainViewModel _sut;
 
@@ -39,6 +40,10 @@ public class MainViewModelTests
             _settingsService.Object,
             new Mock<IDialogService>().Object,
             _fileSystemService.Object);
+        _sessionCoordinator = new DocumentSessionCoordinator(
+            _settingsService.Object,
+            _fileSystemService.Object,
+            _tabFactory.Object);
 
         _sut = new MainViewModel(
             _fileService.Object,
@@ -48,6 +53,7 @@ public class MainViewModelTests
             _fileSystemService.Object,
             _tabFactory.Object,
             _workspaceService.Object,
+            _sessionCoordinator,
             _fileTree);
     }
 

@@ -1,6 +1,7 @@
 using System.Windows;
 using System.Diagnostics;
 using FastEdit.Helpers;
+using FastEdit.Infrastructure;
 using FastEdit.Services;
 using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
@@ -83,6 +84,7 @@ public partial class App : Application
                 services.AddSingleton<IGitService, GitService>();
                 services.AddSingleton<IKeyBindingService, KeyBindingService>();
                 services.AddSingleton<ILineFilterService, LineFilterService>();
+                services.AddSingleton<DocumentSessionCoordinator>();
 
                 // Factories
                 services.AddSingleton<IEditorTabFactory, EditorTabFactory>();
