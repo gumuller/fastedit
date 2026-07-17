@@ -187,6 +187,46 @@ public class DocumentSessionCoordinatorTests
         Assert.True(recovered.IsModified);
     }
 
+    [Fact]
+    public void AdoptRestoredTabs_CaseVariantIsNotDiscarded()
+    {
+        var live = CreateTab("File.txt", @"C:\CaseSensitive\File.txt");
+        var candidate = CreateTab("file.txt", @"C:\CaseSensitive\file.txt");
+        candidate.SetContentBaseline("candidate", isModified: false);
+        var liveTabs = new List<EditorTabViewModel> { live };
+        using var restoredSession = new RestoredDocumentSession(
+            new[] { new RestoredTabCandidate(candidate, 0) },
+            activeTabIndex: 0);
+
+        var adoption = _sut.AdoptRestoredTabs(
+            restoredSession,
+            liveTabs,
+            liveTabs.Add);
+
+        Assert.Equal(2, liveTabs.Count);
+        Assert.Empty(adoption.DiscardedDuplicateTabs);
+        Assert.Same(candidate, adoption.SelectedTab);
+        Assert.Equal("candidate", candidate.Content);
+    }
+
+    [Fact]
+    public void AdoptRestoredTabs_MissingActiveCandidateFallsBackToClampedLiveIndex()
+    {
+        var existing = CreateTab("existing.txt", @"C:\existing.txt");
+        var candidate = CreateTab("restored.txt", @"C:\restored.txt");
+        var liveTabs = new List<EditorTabViewModel> { existing };
+        using var restoredSession = new RestoredDocumentSession(
+            new[] { new RestoredTabCandidate(candidate, 0) },
+            activeTabIndex: 5);
+
+        var adoption = _sut.AdoptRestoredTabs(
+            restoredSession,
+            liveTabs,
+            liveTabs.Add);
+
+        Assert.Same(candidate, adoption.SelectedTab);
+    }
+
     private EditorTabViewModel CreateTab(
         string fileName = "test.txt",
         string filePath = "") =>

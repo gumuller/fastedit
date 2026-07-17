@@ -73,6 +73,19 @@ public class MainViewModelTests
         return tab;
     }
 
+    private static string ChangeFileNameCase(string filePath)
+    {
+        var directory = Path.GetDirectoryName(filePath)!;
+        var fileName = Path.GetFileName(filePath);
+        var firstLetter = fileName.First(char.IsLetter);
+        var replacement = char.IsUpper(firstLetter)
+            ? char.ToLowerInvariant(firstLetter)
+            : char.ToUpperInvariant(firstLetter);
+        return Path.Combine(
+            directory,
+            fileName.Replace(firstLetter, replacement));
+    }
+
     [Fact]
     public void TextToUpperCaseCommand_RaisesTextToolOperation()
     {
@@ -1155,6 +1168,126 @@ public class MainViewModelTests
         Assert.Empty(_sut.Tabs);
         Assert.Contains("Failed to restore session file", trace.Messages);
         Assert.Contains(filePath, trace.Messages);
+    }
+
+    [Fact]
+    public async Task RestoreSession_PathOpenedWhileLaterTabLoads_DiscardsStagedDuplicate()
+    {
+        var firstPath = Path.GetTempFileName();
+        var secondPath = Path.GetTempFileName();
+        try
+        {
+            var stagedFirst = CreateMockTab();
+            var stagedSecond = CreateMockTab();
+            var liveFirst = CreateMockTab(Path.GetFileName(firstPath), firstPath);
+            liveFirst.SetContentBaseline("live", isModified: false);
+            var secondLoadStarted = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var secondLoadCompletion = new TaskCompletionSource<FileReadResult>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            _settingsService.Setup(service => service.OpenFiles).Returns(
+                new List<SessionFile>
+                {
+                    new() { FilePath = firstPath },
+                    new() { FilePath = secondPath }
+                });
+            _settingsService.Setup(service => service.ActiveTabIndex).Returns(0);
+            _fileSystemService.Setup(service => service.FileExists(firstPath)).Returns(true);
+            _fileSystemService.Setup(service => service.FileExists(secondPath)).Returns(true);
+            _tabFactory.SetupSequence(factory => factory.Create())
+                .Returns(stagedFirst)
+                .Returns(stagedSecond);
+            _fileService.Setup(service => service.ReadFileWithEncodingAsync(firstPath))
+                .ReturnsAsync(new FileReadResult("staged", System.Text.Encoding.UTF8, false));
+            _fileService.Setup(service => service.ReadFileWithEncodingAsync(secondPath))
+                .Returns(() =>
+                {
+                    secondLoadStarted.SetResult();
+                    return secondLoadCompletion.Task;
+                });
+
+            var restoreTask = _sut.RestoreSessionAsync();
+            await secondLoadStarted.Task;
+            Assert.Equal("staged", stagedFirst.Content);
+            _sut.Tabs.Add(liveFirst);
+            secondLoadCompletion.SetResult(
+                new FileReadResult("second", System.Text.Encoding.UTF8, false));
+            await restoreTask;
+
+            Assert.Equal(
+                1,
+                _sut.Tabs.Count(tab =>
+                    !string.IsNullOrEmpty(tab.FilePath) &&
+                    MainViewModel.HasSameOpenIdentity(tab.FilePath, firstPath)));
+            Assert.DoesNotContain(stagedFirst, _sut.Tabs);
+            Assert.Empty(stagedFirst.Content);
+            Assert.Same(liveFirst, _sut.SelectedTab);
+        }
+        finally
+        {
+            foreach (var tab in _sut.Tabs)
+                tab.Dispose();
+            File.Delete(firstPath);
+            File.Delete(secondPath);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreSession_CaseVariantOpenedWhileLaterTabLoads_RetainsBothTabs()
+    {
+        var firstPath = Path.GetTempFileName();
+        var secondPath = Path.GetTempFileName();
+        try
+        {
+            var stagedFirst = CreateMockTab();
+            var stagedSecond = CreateMockTab();
+            var caseVariantPath = ChangeFileNameCase(firstPath);
+            var liveVariant = CreateMockTab(Path.GetFileName(caseVariantPath), caseVariantPath);
+            var secondLoadStarted = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var secondLoadCompletion = new TaskCompletionSource<FileReadResult>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            _settingsService.Setup(service => service.OpenFiles).Returns(
+                new List<SessionFile>
+                {
+                    new() { FilePath = firstPath },
+                    new() { FilePath = secondPath }
+                });
+            _settingsService.Setup(service => service.ActiveTabIndex).Returns(0);
+            _fileSystemService.Setup(service => service.FileExists(firstPath)).Returns(true);
+            _fileSystemService.Setup(service => service.FileExists(secondPath)).Returns(true);
+            _tabFactory.SetupSequence(factory => factory.Create())
+                .Returns(stagedFirst)
+                .Returns(stagedSecond);
+            _fileService.Setup(service => service.ReadFileWithEncodingAsync(firstPath))
+                .ReturnsAsync(new FileReadResult("staged", System.Text.Encoding.UTF8, false));
+            _fileService.Setup(service => service.ReadFileWithEncodingAsync(secondPath))
+                .Returns(() =>
+                {
+                    secondLoadStarted.SetResult();
+                    return secondLoadCompletion.Task;
+                });
+
+            var restoreTask = _sut.RestoreSessionAsync();
+            await secondLoadStarted.Task;
+            _sut.Tabs.Add(liveVariant);
+            secondLoadCompletion.SetResult(
+                new FileReadResult("second", System.Text.Encoding.UTF8, false));
+            await restoreTask;
+
+            Assert.Contains(liveVariant, _sut.Tabs);
+            Assert.Contains(stagedFirst, _sut.Tabs);
+            Assert.False(MainViewModel.HasSameOpenIdentity(firstPath, caseVariantPath));
+            Assert.Equal("staged", stagedFirst.Content);
+            Assert.Same(stagedFirst, _sut.SelectedTab);
+        }
+        finally
+        {
+            foreach (var tab in _sut.Tabs)
+                tab.Dispose();
+            File.Delete(firstPath);
+            File.Delete(secondPath);
+        }
     }
 
     // --- Toggle commands ---

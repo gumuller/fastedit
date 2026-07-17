@@ -158,18 +158,24 @@ public sealed class DocumentSessionCoordinator
     public async Task<RestoredDocumentSession> RestoreShutdownSessionAsync(
         IReadOnlyList<EditorTabViewModel> existingTabs)
     {
-        var restoredTabs = new List<EditorTabViewModel>();
+        var restoredCandidates = new List<RestoredTabCandidate>();
         var openFiles = _settingsService.OpenFiles;
         if (openFiles == null || openFiles.Count == 0)
-            return new RestoredDocumentSession(restoredTabs, _settingsService.ActiveTabIndex);
+            return new RestoredDocumentSession(
+                restoredCandidates,
+                _settingsService.ActiveTabIndex);
 
-        foreach (var sessionFile in openFiles)
+        for (var index = 0; index < openFiles.Count; index++)
         {
+            var sessionFile = openFiles[index];
             try
             {
-                var tab = await RestoreSessionFileAsync(existingTabs, restoredTabs, sessionFile);
+                var tab = await RestoreSessionFileAsync(
+                    existingTabs,
+                    restoredCandidates.Select(candidate => candidate.Tab),
+                    sessionFile);
                 if (tab != null)
-                    restoredTabs.Add(tab);
+                    restoredCandidates.Add(new RestoredTabCandidate(tab, index));
             }
             catch (Exception ex)
             {
@@ -180,7 +186,61 @@ public sealed class DocumentSessionCoordinator
             }
         }
 
-        return new RestoredDocumentSession(restoredTabs, _settingsService.ActiveTabIndex);
+        return new RestoredDocumentSession(
+            restoredCandidates,
+            _settingsService.ActiveTabIndex);
+    }
+
+    public RestoredSessionAdoptionResult AdoptRestoredTabs(
+        RestoredDocumentSession restoredSession,
+        IReadOnlyList<EditorTabViewModel> liveTabs,
+        Action<EditorTabViewModel> adoptTab)
+    {
+        var candidates = restoredSession.TakeCandidates();
+        var adoptedTabs = new List<EditorTabViewModel>(candidates.Count);
+        var discardedDuplicates = new List<EditorTabViewModel>();
+        EditorTabViewModel? selectedTab = null;
+
+        for (var index = 0; index < candidates.Count; index++)
+        {
+            var candidate = candidates[index];
+            var duplicate = FindOpenDuplicate(liveTabs, candidate.Tab);
+            if (duplicate != null)
+            {
+                candidate.Tab.Dispose();
+                discardedDuplicates.Add(candidate.Tab);
+                if (candidate.SessionIndex == restoredSession.ActiveTabIndex)
+                    selectedTab = duplicate;
+                continue;
+            }
+
+            try
+            {
+                adoptTab(candidate.Tab);
+                adoptedTabs.Add(candidate.Tab);
+                if (candidate.SessionIndex == restoredSession.ActiveTabIndex)
+                    selectedTab = candidate.Tab;
+            }
+            catch
+            {
+                if (!liveTabs.Contains(candidate.Tab))
+                    candidate.Tab.Dispose();
+                foreach (var remaining in candidates.Skip(index + 1))
+                    remaining.Tab.Dispose();
+                throw;
+            }
+        }
+
+        if (selectedTab == null && liveTabs.Count > 0)
+        {
+            selectedTab = liveTabs[
+                Math.Clamp(restoredSession.ActiveTabIndex, 0, liveTabs.Count - 1)];
+        }
+
+        return new RestoredSessionAdoptionResult(
+            adoptedTabs,
+            discardedDuplicates,
+            selectedTab);
     }
 
     public void PersistShutdownSession(
@@ -297,7 +357,7 @@ public sealed class DocumentSessionCoordinator
 
     private async Task<EditorTabViewModel?> RestoreSessionFileAsync(
         IReadOnlyList<EditorTabViewModel> existingTabs,
-        IReadOnlyList<EditorTabViewModel> restoredTabs,
+        IEnumerable<EditorTabViewModel> restoredTabs,
         SessionFile sessionFile)
     {
         if (sessionFile.IsUntitled)
@@ -343,6 +403,22 @@ public sealed class DocumentSessionCoordinator
             tab.Dispose();
             throw;
         }
+    }
+
+    private static EditorTabViewModel? FindOpenDuplicate(
+        IReadOnlyList<EditorTabViewModel> liveTabs,
+        EditorTabViewModel candidate)
+    {
+        if (string.IsNullOrEmpty(candidate.FilePath))
+        {
+            return liveTabs.FirstOrDefault(tab =>
+                string.IsNullOrEmpty(tab.FilePath) &&
+                tab.FileName == candidate.FileName);
+        }
+
+        return liveTabs.FirstOrDefault(tab =>
+            !string.IsNullOrEmpty(tab.FilePath) &&
+            HasSameOpenIdentity(tab.FilePath, candidate.FilePath));
     }
 
     private void PersistUntitledContent(
@@ -458,9 +534,50 @@ public sealed record UnsavedChangesPreparationResult(
     bool CanContinue,
     string? FailureMessage = null);
 
-public sealed record RestoredDocumentSession(
-    IReadOnlyList<EditorTabViewModel> Tabs,
-    int ActiveTabIndex);
+public sealed class RestoredDocumentSession : IDisposable
+{
+    private IReadOnlyList<RestoredTabCandidate>? _candidates;
+
+    internal RestoredDocumentSession(
+        IReadOnlyList<RestoredTabCandidate> candidates,
+        int activeTabIndex)
+    {
+        _candidates = candidates;
+        ActiveTabIndex = activeTabIndex;
+    }
+
+    public IReadOnlyList<RestoredTabCandidate> Candidates =>
+        _candidates ?? Array.Empty<RestoredTabCandidate>();
+
+    public int ActiveTabIndex { get; }
+
+    internal IReadOnlyList<RestoredTabCandidate> TakeCandidates()
+    {
+        var candidates = _candidates ??
+            throw new InvalidOperationException("Restored tabs have already been adopted.");
+        _candidates = null;
+        return candidates;
+    }
+
+    public void Dispose()
+    {
+        if (_candidates == null)
+            return;
+
+        foreach (var candidate in _candidates)
+            candidate.Tab.Dispose();
+        _candidates = null;
+    }
+}
+
+public sealed record RestoredTabCandidate(
+    EditorTabViewModel Tab,
+    int SessionIndex);
+
+public sealed record RestoredSessionAdoptionResult(
+    IReadOnlyList<EditorTabViewModel> AdoptedTabs,
+    IReadOnlyList<EditorTabViewModel> DiscardedDuplicateTabs,
+    EditorTabViewModel? SelectedTab);
 
 public sealed record TabRecoveryResult(
     bool Success,

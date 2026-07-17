@@ -878,14 +878,14 @@ public partial class MainViewModel : ObservableObject
 
     public async Task RestoreSessionAsync()
     {
-        var restoredSession = await _sessionCoordinator.RestoreShutdownSessionAsync(Tabs);
-        foreach (var tab in restoredSession.Tabs)
-            Tabs.Add(tab);
-        if (Tabs.Count == 0)
-            return;
-
-        var index = Math.Clamp(restoredSession.ActiveTabIndex, 0, Tabs.Count - 1);
-        SelectedTab = Tabs[index];
+        using var restoredSession =
+            await _sessionCoordinator.RestoreShutdownSessionAsync(Tabs);
+        var adoption = _sessionCoordinator.AdoptRestoredTabs(
+            restoredSession,
+            Tabs,
+            tab => Tabs.Add(tab));
+        if (adoption.SelectedTab != null)
+            SelectedTab = adoption.SelectedTab;
     }
 
     public void SaveSession()
