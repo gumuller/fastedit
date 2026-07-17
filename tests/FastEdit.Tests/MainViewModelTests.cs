@@ -25,7 +25,7 @@ public class MainViewModelTests
     public MainViewModelTests()
     {
         _themeService.Setup(t => t.AvailableThemes).Returns(new List<ThemeDefinition>());
-        _themeService.Setup(t => t.CurrentTheme).Returns((ThemeDefinition?)null);
+        _themeService.Setup(t => t.CurrentTheme).Returns((ThemeDefinition)null!);
         _settingsService.Setup(s => s.RecentFiles).Returns(new List<string>());
         _settingsService.Setup(s => s.WordWrapEnabled).Returns(false);
         _settingsService.Setup(s => s.ShowWhitespace).Returns(false);

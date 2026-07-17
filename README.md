@@ -127,14 +127,26 @@ Verify the cert thumbprint of any downloaded `.cer` matches the one printed in t
 git clone https://github.com/gumuller/fastedit.git
 cd fastedit
 
-# Build
-dotnet build
+# Restore and build
+dotnet restore
+dotnet build --configuration Release
 
 # Run
 dotnet run --project src/FastEdit
 
-# Run tests (349 tests)
-dotnet test
+# Run all tests
+dotnet test --configuration Release
+```
+
+Ordinary builds use the version in `build.counter` without modifying the tracked
+file. Release packaging must select a version explicitly:
+
+```powershell
+# Increment build.counter exactly once, then use that version for every package
+.\deploy\build.ps1 -IncrementBuildCounter
+
+# Or package a supplied version without changing build.counter
+.\deploy\build.ps1 -Version 1.2.0
 ```
 
 ## Requirements
@@ -157,7 +169,7 @@ FastEdit.sln
 │   ├── FastEdit.Core/         # Core engine (hex editor, binary detection)
 │   └── FastEdit.Theming/      # Theme definitions and loader
 └── tests/
-    └── FastEdit.Tests/        # 349 unit tests
+    └── FastEdit.Tests/        # Unit test suite
 ```
 
 ## Custom Themes

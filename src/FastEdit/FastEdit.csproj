@@ -7,51 +7,64 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <ApplicationIcon>fastedit.ico</ApplicationIcon>
-    <!-- Version is Major.Minor.BuildNumber — the 3rd component auto-increments
-         on every build via the IncrementBuildCounter target. -->
+    <!-- Version is Major.Minor.BuildNumber. Ordinary builds use the tracked
+         counter without changing it; releases increment it explicitly. -->
     <VersionPrefix>1.1</VersionPrefix>
     <BuildCounterFile>$(MSBuildThisFileDirectory)..\..\build.counter</BuildCounterFile>
   </PropertyGroup>
 
-  <!-- Read & increment the build counter before the assembly version is baked in.
-       WPF's XAML compiler creates a temporary *_wpftmp.csproj that also runs this
-       target; we only want to bump the counter once per real build, so skip the tmp. -->
-  <Target Name="IncrementBuildCounter"
-          BeforeTargets="GetAssemblyVersion;GenerateAssemblyInfo;CoreCompile"
-          Condition="'$(SkipBuildCounterIncrement)' != 'true' And !$(MSBuildProjectFile.Contains('_wpftmp'))">
+  <Target Name="ApplyBuildCounterVersion"
+          BeforeTargets="GetAssemblyVersion;GenerateAssemblyInfo;CoreCompile">
     <ReadLinesFromFile File="$(BuildCounterFile)" Condition="Exists('$(BuildCounterFile)')">
       <Output TaskParameter="Lines" PropertyName="_CurrentBuildCounter" />
     </ReadLinesFromFile>
     <PropertyGroup>
       <_CurrentBuildCounter Condition="'$(_CurrentBuildCounter)' == ''">0</_CurrentBuildCounter>
-      <_NewBuildCounter>$([MSBuild]::Add($(_CurrentBuildCounter), 1))</_NewBuildCounter>
-      <Version>$(VersionPrefix).$(_NewBuildCounter)</Version>
-      <AssemblyVersion>$(VersionPrefix).$(_NewBuildCounter)</AssemblyVersion>
-      <FileVersion>$(VersionPrefix).$(_NewBuildCounter)</FileVersion>
-      <InformationalVersion>$(VersionPrefix).$(_NewBuildCounter)</InformationalVersion>
+      <_BuildVersion Condition="'$(ReleaseVersion)' == ''">$(VersionPrefix).$(_CurrentBuildCounter)</_BuildVersion>
+      <_BuildVersion Condition="'$(ReleaseVersion)' != ''">$(ReleaseVersion)</_BuildVersion>
+      <Version>$(_BuildVersion)</Version>
+      <AssemblyVersion>$(_BuildVersion)</AssemblyVersion>
+      <FileVersion>$(_BuildVersion)</FileVersion>
+      <InformationalVersion>$(_BuildVersion)</InformationalVersion>
     </PropertyGroup>
-    <WriteLinesToFile File="$(BuildCounterFile)" Lines="$(_NewBuildCounter)" Overwrite="true" />
-    <Message Importance="high" Text="Build #$(_NewBuildCounter) — version $(Version)" />
+    <Message Importance="high"
+             Condition="!$(MSBuildProjectFile.Contains('_wpftmp'))"
+             Text="Build #$(_CurrentBuildCounter) — version $(Version)" />
   </Target>
 
-  <!-- For the WPF XAML temp project, propagate the same version from the counter file
-       without incrementing it, so the compiled assembly reports the correct version.
-       Also runs when the caller explicitly opts out of incrementing (e.g. Debug
-       builds from the IDE or repeated rebuilds in a test session) — but only if
-       the caller hasn't already provided an explicit Version, so deploy/build.ps1
-       can still win by passing -p:Version=x.y.z. -->
-  <Target Name="ReadBuildCounterForWpfTmp"
-          BeforeTargets="GetAssemblyVersion;GenerateAssemblyInfo;CoreCompile"
-          Condition="$(MSBuildProjectFile.Contains('_wpftmp')) Or '$(SkipBuildCounterIncrement)' == 'true'">
+  <Target Name="CaptureBuildCounter"
+          BeforeTargets="PrepareForBuild"
+          Condition="!$(MSBuildProjectFile.Contains('_wpftmp'))">
+    <ReadLinesFromFile File="$(BuildCounterFile)" Condition="Exists('$(BuildCounterFile)')">
+      <Output TaskParameter="Lines" PropertyName="_BuildCounterBeforeBuild" />
+    </ReadLinesFromFile>
+  </Target>
+
+  <Target Name="VerifyBuildCounterUnchanged"
+          AfterTargets="Build"
+          Condition="!$(MSBuildProjectFile.Contains('_wpftmp'))">
+    <ReadLinesFromFile File="$(BuildCounterFile)" Condition="Exists('$(BuildCounterFile)')">
+      <Output TaskParameter="Lines" PropertyName="_BuildCounterAfterBuild" />
+    </ReadLinesFromFile>
+    <Error Condition="'$(_BuildCounterBeforeBuild)' != '$(_BuildCounterAfterBuild)'"
+           Text="Ordinary builds must not modify build.counter. Use the IncrementReleaseVersion target for a release." />
+  </Target>
+
+  <Target Name="IncrementReleaseVersion">
     <ReadLinesFromFile File="$(BuildCounterFile)" Condition="Exists('$(BuildCounterFile)')">
       <Output TaskParameter="Lines" PropertyName="_CurrentBuildCounter" />
     </ReadLinesFromFile>
-    <PropertyGroup Condition="'$(_CurrentBuildCounter)' != '' And ('$(Version)' == '' Or '$(Version)' == '$(VersionPrefix)' Or '$(Version)' == '1.0.0')">
-      <Version>$(VersionPrefix).$(_CurrentBuildCounter)</Version>
-      <AssemblyVersion>$(VersionPrefix).$(_CurrentBuildCounter)</AssemblyVersion>
-      <FileVersion>$(VersionPrefix).$(_CurrentBuildCounter)</FileVersion>
-      <InformationalVersion>$(VersionPrefix).$(_CurrentBuildCounter)</InformationalVersion>
+    <PropertyGroup>
+      <_CurrentBuildCounter Condition="'$(_CurrentBuildCounter)' == ''">0</_CurrentBuildCounter>
+      <_NextBuildCounter>$([MSBuild]::Add($(_CurrentBuildCounter), 1))</_NextBuildCounter>
+      <_ReleaseVersion>$(VersionPrefix).$(_NextBuildCounter)</_ReleaseVersion>
     </PropertyGroup>
+    <WriteLinesToFile File="$(BuildCounterFile)" Lines="$(_NextBuildCounter)" Overwrite="true" />
+    <WriteLinesToFile File="$(BuildVersionOutputFile)"
+                      Lines="$(_ReleaseVersion)"
+                      Overwrite="true"
+                      Condition="'$(BuildVersionOutputFile)' != ''" />
+    <Message Importance="high" Text="Incremented release version to $(_ReleaseVersion)" />
   </Target>
 
   <ItemGroup>
