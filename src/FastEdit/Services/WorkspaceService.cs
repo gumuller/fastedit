@@ -37,7 +37,7 @@ public class WorkspaceService : IWorkspaceService
 
         var path = Path.Combine(_sessionsDir, $"{SanitizeFileName(name)}.json");
         var json = JsonSerializer.Serialize(session, new JsonSerializerOptions { WriteIndented = true });
-        _fileSystem.WriteAllText(path, json);
+        AtomicFileWriter.WriteAllText(_fileSystem, path, json);
     }
 
     public SessionData? LoadNamedSession(string name)
@@ -45,15 +45,9 @@ public class WorkspaceService : IWorkspaceService
         var path = Path.Combine(_sessionsDir, $"{SanitizeFileName(name)}.json");
         if (!_fileSystem.FileExists(path)) return null;
 
-        try
-        {
-            var json = _fileSystem.ReadAllText(path);
-            return JsonSerializer.Deserialize<SessionData>(json);
-        }
-        catch
-        {
-            return null;
-        }
+        var json = _fileSystem.ReadAllText(path);
+        return JsonSerializer.Deserialize<SessionData>(json)
+            ?? throw new InvalidDataException($"Session '{name}' contained no data.");
     }
 
     public void DeleteNamedSession(string name)
@@ -69,21 +63,15 @@ public class WorkspaceService : IWorkspaceService
     {
         if (!_fileSystem.FileExists(filePath)) return null;
 
-        try
-        {
-            var json = _fileSystem.ReadAllText(filePath);
-            return JsonSerializer.Deserialize<WorkspaceData>(json);
-        }
-        catch
-        {
-            return null;
-        }
+        var json = _fileSystem.ReadAllText(filePath);
+        return JsonSerializer.Deserialize<WorkspaceData>(json)
+            ?? throw new InvalidDataException($"Workspace '{filePath}' contained no data.");
     }
 
     public void SaveWorkspace(string filePath, WorkspaceData workspace)
     {
         var json = JsonSerializer.Serialize(workspace, new JsonSerializerOptions { WriteIndented = true });
-        _fileSystem.WriteAllText(filePath, json);
+        AtomicFileWriter.WriteAllText(_fileSystem, filePath, json);
     }
 
     private static string SanitizeFileName(string name)

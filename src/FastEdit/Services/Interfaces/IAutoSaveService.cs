@@ -9,7 +9,8 @@ public interface IAutoSaveService
     void Stop();
     void MarkCleanShutdown();
     bool HasRecoveryFiles();
-    List<AutoSaveEntry> GetRecoveryEntries();
+    RecoveryReadResult GetRecoveryEntries();
+    void RemoveRecoveryEntries(IEnumerable<string> entryIds);
     void ClearRecoveryFiles();
     void SaveNow(IEnumerable<AutoSaveEntry> entries);
 }
@@ -22,3 +23,7 @@ public record AutoSaveEntry(
     bool IsUntitled,
     int CursorOffset = 0,
     double ScrollOffset = 0);
+
+public record RecoveryReadResult(
+    IReadOnlyList<AutoSaveEntry> Entries,
+    IReadOnlyList<string> Failures);

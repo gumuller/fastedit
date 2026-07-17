@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 using FastEdit.Services.Interfaces;
@@ -187,32 +186,20 @@ public class SettingsService : ISettingsService
 
     private AppSettings LoadSettings()
     {
-        try
+        if (File.Exists(_settingsPath))
         {
-            if (File.Exists(_settingsPath))
-            {
-                var json = File.ReadAllText(_settingsPath);
-                return JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
-            }
+            var json = File.ReadAllText(_settingsPath);
+            return JsonSerializer.Deserialize<AppSettings>(json)
+                ?? throw new InvalidDataException("Settings file contained no data.");
         }
-        catch (Exception ex)
-        {
-            Trace.TraceWarning("Failed to load settings: {0}", ex.Message);
-        }
+
         return new AppSettings();
     }
 
     public void Save()
     {
-        try
-        {
-            var json = JsonSerializer.Serialize(_settings, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(_settingsPath, json);
-        }
-        catch (Exception ex)
-        {
-            Trace.TraceWarning("Failed to save settings: {0}", ex.Message);
-        }
+        var json = JsonSerializer.Serialize(_settings, new JsonSerializerOptions { WriteIndented = true });
+        AtomicFileWriter.WriteAllText(_settingsPath, json);
     }
 
     public string GetTempFilePath(string fileName)

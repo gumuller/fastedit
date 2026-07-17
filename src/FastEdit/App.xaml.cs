@@ -104,9 +104,23 @@ public partial class App : Application
         SyntaxHighlightingRegistrar.RegisterAll();
 
         // Apply saved theme from settings
-        var settingsService = Services.GetRequiredService<ISettingsService>();
-        var themeService = Services.GetRequiredService<IThemeService>();
-        themeService.ApplyTheme(settingsService.ThemeName);
+        try
+        {
+            var settingsService = Services.GetRequiredService<ISettingsService>();
+            var themeService = Services.GetRequiredService<IThemeService>();
+            themeService.ApplyTheme(settingsService.ThemeName);
+        }
+        catch (Exception ex)
+        {
+            Trace.TraceError("FastEdit startup failed while loading settings: {0}", ex);
+            MessageBox.Show(
+                $"FastEdit could not load its settings:\n\n{ex.Message}",
+                "Settings Error",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+            Shutdown(-1);
+            return;
+        }
 
         // Start main window
         var mainWindow = Services.GetRequiredService<MainWindow>();
@@ -152,8 +166,19 @@ public partial class App : Application
     protected override void OnExit(ExitEventArgs e)
     {
         var autoSave = Services.GetService<AutoSaveService>();
-        autoSave?.Stop();
-        autoSave?.MarkCleanShutdown();
+        try
+        {
+            autoSave?.MarkCleanShutdown();
+        }
+        catch (Exception ex)
+        {
+            Trace.TraceError("Failed to finalize auto-save state: {0}", ex);
+            MessageBox.Show(
+                $"FastEdit could not finalize recovery data:\n\n{ex.Message}",
+                "Auto-save Error",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
 
         _host?.Dispose();
         base.OnExit(e);

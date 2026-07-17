@@ -18,6 +18,7 @@ public interface IFileSystemService
     void WriteAllText(string path, string content, Encoding encoding);
     void WriteAllBytes(string path, byte[] bytes);
     void CopyFile(string source, string destination, bool overwrite = false);
+    void MoveFile(string source, string destination, bool overwrite = false);
     void DeleteFile(string path);
     void CreateDirectory(string path);
     string GetTempPath();

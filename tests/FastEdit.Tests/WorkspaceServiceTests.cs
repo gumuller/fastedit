@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text.Json;
 using FastEdit.Services;
 using FastEdit.Services.Interfaces;
 using FluentAssertions;
@@ -56,9 +57,13 @@ public class WorkspaceServiceTests
 
         _mockFs.Verify(f => f.CreateDirectory(_sessionsDir), Times.Once);
         _mockFs.Verify(f => f.WriteAllText(
-            Path.Combine(_sessionsDir, "MySession.json"),
+            It.Is<string>(path => path.StartsWith(Path.Combine(_sessionsDir, "MySession.json."))),
             It.Is<string>(s => s.Contains("MySession") && s.Contains("test.txt"))),
             Times.Once);
+        _mockFs.Verify(f => f.MoveFile(
+            It.IsAny<string>(),
+            Path.Combine(_sessionsDir, "MySession.json"),
+            true), Times.Once);
     }
 
     [Fact]
@@ -116,9 +121,13 @@ public class WorkspaceServiceTests
         _sut.SaveWorkspace(@"C:\project.fastedit-workspace", workspace);
 
         _mockFs.Verify(f => f.WriteAllText(
-            @"C:\project.fastedit-workspace",
+            It.Is<string>(path => path.StartsWith(@"C:\project.fastedit-workspace.")),
             It.Is<string>(s => s.Contains("Project") && s.Contains(@"C:\\src"))),
             Times.Once);
+        _mockFs.Verify(f => f.MoveFile(
+            It.IsAny<string>(),
+            @"C:\project.fastedit-workspace",
+            true), Times.Once);
     }
 
     [Fact]
@@ -147,8 +156,21 @@ public class WorkspaceServiceTests
         var session = new SessionData { Files = new() };
         _sut.SaveNamedSession("My<>Session", session);
 
-        _mockFs.Verify(f => f.WriteAllText(
+        _mockFs.Verify(f => f.MoveFile(
+            It.IsAny<string>(),
             Path.Combine(_sessionsDir, "My__Session.json"),
-            It.IsAny<string>()), Times.Once);
+            true), Times.Once);
+    }
+
+    [Fact]
+    public void LoadNamedSession_InvalidJson_ThrowsInsteadOfReturningMissing()
+    {
+        var path = Path.Combine(_sessionsDir, "Broken.json");
+        _mockFs.Setup(f => f.FileExists(path)).Returns(true);
+        _mockFs.Setup(f => f.ReadAllText(path)).Returns("not json");
+
+        var action = () => _sut.LoadNamedSession("Broken");
+
+        action.Should().Throw<JsonException>();
     }
 }
