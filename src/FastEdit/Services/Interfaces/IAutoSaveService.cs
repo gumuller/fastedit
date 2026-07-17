@@ -26,7 +26,8 @@ public record AutoSaveEntry(
     string Content,
     bool IsUntitled,
     int CursorOffset = 0,
-    double ScrollOffset = 0);
+    double ScrollOffset = 0,
+    string? TabIdentity = null);
 
 public record RecoveryEntriesResult(
     bool Success,

@@ -1290,6 +1290,136 @@ public class MainViewModelTests
         }
     }
 
+    [Fact]
+    public async Task RestoreSession_NewSameNameUntitledDuringLaterLoad_RetainsBothDocuments()
+    {
+        var laterPath = Path.GetTempFileName();
+        try
+        {
+            var restoredUntitled = CreateMockTab();
+            restoredUntitled.SetContentBaseline("restored content", isModified: true);
+            var restoredLater = CreateMockTab();
+            var newUntitled = CreateMockTab();
+            var laterLoadStarted = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var laterLoadCompletion = new TaskCompletionSource<FileReadResult>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            _settingsService.Setup(service => service.OpenFiles).Returns(
+                new List<SessionFile>
+                {
+                    new()
+                    {
+                        FilePath = "Untitled-1",
+                        TabIdentity = "restored-identity",
+                        IsUntitled = true,
+                        Content = "restored content"
+                    },
+                    new() { FilePath = laterPath }
+                });
+            _settingsService.Setup(service => service.ActiveTabIndex).Returns(0);
+            _fileSystemService.Setup(service => service.FileExists(laterPath)).Returns(true);
+            _tabFactory.Setup(factory => factory.CreateUntitled("restored content"))
+                .Returns(restoredUntitled);
+            _tabFactory.Setup(factory => factory.CreateUntitled(null))
+                .Returns(newUntitled);
+            _tabFactory.Setup(factory => factory.Create()).Returns(restoredLater);
+            _fileService.Setup(service => service.ReadFileWithEncodingAsync(laterPath))
+                .Returns(() =>
+                {
+                    laterLoadStarted.SetResult();
+                    return laterLoadCompletion.Task;
+                });
+
+            var restoreTask = _sut.RestoreSessionAsync();
+            await laterLoadStarted.Task;
+            _sut.NewFileCommand.Execute(null);
+            newUntitled.Content = "new content";
+            laterLoadCompletion.SetResult(
+                new FileReadResult("later", System.Text.Encoding.UTF8, false));
+            await restoreTask;
+
+            var untitledTabs = _sut.Tabs
+                .Where(tab => string.IsNullOrEmpty(tab.FilePath))
+                .ToList();
+            Assert.Equal(2, untitledTabs.Count);
+            Assert.Equal(
+                new[] { "Untitled-1", "Untitled-2" },
+                untitledTabs.Select(tab => tab.FileName).Order().ToArray());
+            Assert.Contains(untitledTabs, tab => tab.Content == "new content");
+            Assert.Contains(untitledTabs, tab => tab.Content == "restored content");
+            Assert.Equal("restored-identity", restoredUntitled.AutoSaveIdentity);
+            Assert.Same(restoredUntitled, _sut.SelectedTab);
+        }
+        finally
+        {
+            foreach (var tab in _sut.Tabs)
+                tab.Dispose();
+            File.Delete(laterPath);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreSession_ProvenUntitledIdentityDuringLaterLoad_KeepsSingleOwner()
+    {
+        var laterPath = Path.GetTempFileName();
+        try
+        {
+            var stagedUntitled = CreateMockTab();
+            stagedUntitled.SetContentBaseline("staged content", isModified: true);
+            var restoredLater = CreateMockTab();
+            var liveUntitled = CreateMockTab("Untitled-1");
+            liveUntitled.RestoreAutoSaveIdentity("shared-identity");
+            liveUntitled.SetContentBaseline("live content", isModified: true);
+            var laterLoadStarted = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var laterLoadCompletion = new TaskCompletionSource<FileReadResult>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            _settingsService.Setup(service => service.OpenFiles).Returns(
+                new List<SessionFile>
+                {
+                    new()
+                    {
+                        FilePath = "Untitled-1",
+                        TabIdentity = "shared-identity",
+                        IsUntitled = true,
+                        Content = "staged content"
+                    },
+                    new() { FilePath = laterPath }
+                });
+            _settingsService.Setup(service => service.ActiveTabIndex).Returns(0);
+            _fileSystemService.Setup(service => service.FileExists(laterPath)).Returns(true);
+            _tabFactory.Setup(factory => factory.CreateUntitled("staged content"))
+                .Returns(stagedUntitled);
+            _tabFactory.Setup(factory => factory.Create()).Returns(restoredLater);
+            _fileService.Setup(service => service.ReadFileWithEncodingAsync(laterPath))
+                .Returns(() =>
+                {
+                    laterLoadStarted.SetResult();
+                    return laterLoadCompletion.Task;
+                });
+
+            var restoreTask = _sut.RestoreSessionAsync();
+            await laterLoadStarted.Task;
+            _sut.Tabs.Add(liveUntitled);
+            laterLoadCompletion.SetResult(
+                new FileReadResult("later", System.Text.Encoding.UTF8, false));
+            await restoreTask;
+
+            Assert.Single(_sut.Tabs.Where(tab => string.IsNullOrEmpty(tab.FilePath)));
+            Assert.Contains(liveUntitled, _sut.Tabs);
+            Assert.DoesNotContain(stagedUntitled, _sut.Tabs);
+            Assert.Empty(stagedUntitled.Content);
+            Assert.Equal("live content", liveUntitled.Content);
+            Assert.Same(liveUntitled, _sut.SelectedTab);
+        }
+        finally
+        {
+            foreach (var tab in _sut.Tabs)
+                tab.Dispose();
+            File.Delete(laterPath);
+        }
+    }
+
     // --- Toggle commands ---
 
     [Fact]

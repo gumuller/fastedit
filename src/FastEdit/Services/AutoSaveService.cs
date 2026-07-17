@@ -167,6 +167,7 @@ public sealed class AutoSaveService : IAutoSaveService
                 manifest.Add(new AutoSaveManifestEntry
                 {
                     Id = entry.Id,
+                    TabIdentity = entry.TabIdentity,
                     FileName = entry.FileName,
                     FilePath = entry.FilePath,
                     ContentFile = contentFile,
@@ -322,7 +323,8 @@ public sealed class AutoSaveService : IAutoSaveService
                         _fileSystem.ReadAllText(contentPath),
                         item.IsUntitled,
                         item.CursorOffset,
-                        item.ScrollOffset);
+                        item.ScrollOffset,
+                        item.TabIdentity);
                     _lastRecoveryOrigins[recoveryEntryId] =
                         new RecoveryOrigin(manifestName, item.Id);
                 }
@@ -1102,6 +1104,7 @@ public sealed class AutoSaveService : IAutoSaveService
     private sealed class AutoSaveManifestEntry
     {
         public string Id { get; set; } = "";
+        public string? TabIdentity { get; set; }
         public string FileName { get; set; } = "";
         public string? FilePath { get; set; }
         public string ContentFile { get; set; } = "";

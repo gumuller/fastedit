@@ -32,6 +32,7 @@ public sealed class DocumentSessionCoordinator
             session.Files.Add(new SessionFileEntry
             {
                 FilePath = string.IsNullOrEmpty(tab.FilePath) ? tab.FileName : tab.FilePath,
+                TabIdentity = tab.AutoSaveIdentity,
                 IsUntitled = string.IsNullOrEmpty(tab.FilePath),
                 Content = string.IsNullOrEmpty(tab.FilePath) ? tab.Content : null,
                 CursorOffset = tab.CursorOffset,
@@ -79,6 +80,8 @@ public sealed class DocumentSessionCoordinator
                     await tab.LoadFileAsync(entry.FilePath);
                 }
 
+                if (!string.IsNullOrEmpty(entry.TabIdentity))
+                    tab.RestoreAutoSaveIdentity(entry.TabIdentity);
                 tab.CursorOffset = entry.CursorOffset;
                 tab.ScrollOffset = entry.ScrollOffset;
             }
@@ -175,7 +178,8 @@ public sealed class DocumentSessionCoordinator
                     restoredCandidates.Select(candidate => candidate.Tab),
                     sessionFile);
                 if (tab != null)
-                    restoredCandidates.Add(new RestoredTabCandidate(tab, index));
+                    restoredCandidates.Add(
+                        new RestoredTabCandidate(tab, index, sessionFile.TabIdentity));
             }
             catch (Exception ex)
             {
@@ -204,7 +208,7 @@ public sealed class DocumentSessionCoordinator
         for (var index = 0; index < candidates.Count; index++)
         {
             var candidate = candidates[index];
-            var duplicate = FindOpenDuplicate(liveTabs, candidate.Tab);
+            var duplicate = FindOpenDuplicate(liveTabs, candidate);
             if (duplicate != null)
             {
                 candidate.Tab.Dispose();
@@ -212,6 +216,13 @@ public sealed class DocumentSessionCoordinator
                 if (candidate.SessionIndex == restoredSession.ActiveTabIndex)
                     selectedTab = duplicate;
                 continue;
+            }
+
+            if (string.IsNullOrEmpty(candidate.Tab.FilePath))
+            {
+                candidate.Tab.FileName = UntitledTabNameAllocator.Allocate(
+                    liveTabs,
+                    candidate.Tab.FileName);
             }
 
             try
@@ -265,6 +276,7 @@ public sealed class DocumentSessionCoordinator
             var sessionFile = new SessionFile
             {
                 FilePath = string.IsNullOrEmpty(tab.FilePath) ? tab.FileName : tab.FilePath,
+                TabIdentity = tab.AutoSaveIdentity,
                 IsUntitled = string.IsNullOrEmpty(tab.FilePath),
                 IsBinaryMode = tab.Mode == FileOpenMode.Binary,
                 CursorOffset = tab.CursorOffset,
@@ -304,7 +316,8 @@ public sealed class DocumentSessionCoordinator
                 tab.Content ?? string.Empty,
                 string.IsNullOrEmpty(tab.FilePath),
                 tab.CursorOffset,
-                tab.ScrollOffset));
+                tab.ScrollOffset,
+                tab.AutoSaveIdentity));
         }
 
         return entries;
@@ -313,6 +326,8 @@ public sealed class DocumentSessionCoordinator
     public EditorTabViewModel CreateRecoveryTab(AutoSaveEntry entry)
     {
         var tab = _tabFactory.CreateUntitled(entry.Content);
+        if (!string.IsNullOrEmpty(entry.TabIdentity))
+            tab.RestoreAutoSaveIdentity(entry.TabIdentity);
         tab.FileName = entry.FileName;
         if (!entry.IsUntitled && !string.IsNullOrEmpty(entry.FilePath))
             tab.FilePath = entry.FilePath;
@@ -365,13 +380,6 @@ public sealed class DocumentSessionCoordinator
             if (sessionFile.IsBinaryMode)
                 return null;
 
-            var fileName = Path.GetFileName(sessionFile.FilePath);
-            if (existingTabs.Concat(restoredTabs).Any(
-                tab => string.IsNullOrEmpty(tab.FilePath) && tab.FileName == fileName))
-            {
-                return null;
-            }
-
             var content = sessionFile.Content ?? string.Empty;
             if (!string.IsNullOrEmpty(sessionFile.TempFilePath) &&
                 _fileSystemService.FileExists(sessionFile.TempFilePath))
@@ -380,7 +388,9 @@ public sealed class DocumentSessionCoordinator
             }
 
             var untitledTab = _tabFactory.CreateUntitled(content);
-            untitledTab.FileName = fileName;
+            if (!string.IsNullOrEmpty(sessionFile.TabIdentity))
+                untitledTab.RestoreAutoSaveIdentity(sessionFile.TabIdentity);
+            untitledTab.FileName = Path.GetFileName(sessionFile.FilePath);
             return untitledTab;
         }
 
@@ -396,6 +406,8 @@ public sealed class DocumentSessionCoordinator
         try
         {
             await tab.LoadFileAsync(sessionFile.FilePath);
+            if (!string.IsNullOrEmpty(sessionFile.TabIdentity))
+                tab.RestoreAutoSaveIdentity(sessionFile.TabIdentity);
             return tab;
         }
         catch
@@ -407,18 +419,25 @@ public sealed class DocumentSessionCoordinator
 
     private static EditorTabViewModel? FindOpenDuplicate(
         IReadOnlyList<EditorTabViewModel> liveTabs,
-        EditorTabViewModel candidate)
+        RestoredTabCandidate candidate)
     {
-        if (string.IsNullOrEmpty(candidate.FilePath))
+        if (!string.IsNullOrEmpty(candidate.TabIdentity))
         {
-            return liveTabs.FirstOrDefault(tab =>
-                string.IsNullOrEmpty(tab.FilePath) &&
-                tab.FileName == candidate.FileName);
+            var identityDuplicate = liveTabs.FirstOrDefault(tab =>
+                string.Equals(
+                    tab.AutoSaveIdentity,
+                    candidate.TabIdentity,
+                    StringComparison.Ordinal));
+            if (identityDuplicate != null)
+                return identityDuplicate;
         }
+
+        if (string.IsNullOrEmpty(candidate.Tab.FilePath))
+            return null;
 
         return liveTabs.FirstOrDefault(tab =>
             !string.IsNullOrEmpty(tab.FilePath) &&
-            HasSameOpenIdentity(tab.FilePath, candidate.FilePath));
+            HasSameOpenIdentity(tab.FilePath, candidate.Tab.FilePath));
     }
 
     private void PersistUntitledContent(
@@ -572,7 +591,8 @@ public sealed class RestoredDocumentSession : IDisposable
 
 public sealed record RestoredTabCandidate(
     EditorTabViewModel Tab,
-    int SessionIndex);
+    int SessionIndex,
+    string? TabIdentity = null);
 
 public sealed record RestoredSessionAdoptionResult(
     IReadOnlyList<EditorTabViewModel> AdoptedTabs,

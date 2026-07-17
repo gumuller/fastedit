@@ -24,6 +24,7 @@ public class SessionData
 public class SessionFileEntry
 {
     public string FilePath { get; set; } = "";
+    public string? TabIdentity { get; set; }
     public bool IsUntitled { get; set; }
     public string? Content { get; set; }
     public int CursorOffset { get; set; }

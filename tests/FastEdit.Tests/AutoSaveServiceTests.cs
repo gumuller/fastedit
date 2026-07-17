@@ -387,7 +387,7 @@ public class AutoSaveServiceTests
     public void GetRecoveryEntries_ValidManifest_ReturnsEntries()
     {
         var manifestPath = Path.Combine(_autoSaveDir, "manifest.json");
-        var manifest = """[{"Id":"id1","FileName":"test.txt","FilePath":"C:\\test.txt","ContentFile":"id1.txt","IsUntitled":false,"CursorOffset":5,"ScrollOffset":10.0}]""";
+        var manifest = """[{"Id":"id1","TabIdentity":"stable-tab","FileName":"test.txt","FilePath":"C:\\test.txt","ContentFile":"id1.txt","IsUntitled":false,"CursorOffset":5,"ScrollOffset":10.0}]""";
         _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
         _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
             .Returns(new[] { manifestPath });
@@ -401,6 +401,7 @@ public class AutoSaveServiceTests
         result.Entries.Should().ContainSingle();
         result.Entries[0].Content.Should().Be("recovered content");
         result.Entries[0].CursorOffset.Should().Be(5);
+        result.Entries[0].TabIdentity.Should().Be("stable-tab");
     }
 
     [Fact]

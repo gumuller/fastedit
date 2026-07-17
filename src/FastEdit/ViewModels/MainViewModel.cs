@@ -795,7 +795,7 @@ public partial class MainViewModel : ObservableObject
     private void NewFile()
     {
         var tab = _tabFactory.CreateUntitled();
-        tab.FileName = $"Untitled-{Tabs.Count + 1}";
+        tab.FileName = UntitledTabNameAllocator.Allocate(Tabs);
 
         Tabs.Add(tab);
         SelectedTab = tab;

@@ -41,6 +41,7 @@ public class DocumentSessionCoordinatorTests
         Assert.True(session.Files[1].IsUntitled);
         Assert.Equal(12, session.Files[1].CursorOffset);
         Assert.Equal(4.5, session.Files[1].ScrollOffset);
+        Assert.Equal(untitled.AutoSaveIdentity, session.Files[1].TabIdentity);
     }
 
     [Fact]
@@ -61,10 +62,15 @@ public class DocumentSessionCoordinatorTests
                 ActiveTabIndex = 1,
                 Files =
                 {
-                    new SessionFileEntry { FilePath = filePath },
+                    new SessionFileEntry
+                    {
+                        FilePath = filePath,
+                        TabIdentity = "saved-session-identity"
+                    },
                     new SessionFileEntry
                     {
                         FilePath = "Untitled-2",
+                        TabIdentity = "named-session-identity",
                         IsUntitled = true,
                         Content = "draft",
                         CursorOffset = 8
@@ -77,7 +83,9 @@ public class DocumentSessionCoordinatorTests
             Assert.Equal(new[] { saved, untitled }, staged.Tabs);
             Assert.Equal(1, staged.ActiveTabIndex);
             Assert.Equal("saved", saved.Content);
+            Assert.Equal("saved-session-identity", saved.AutoSaveIdentity);
             Assert.Equal("Untitled-2", untitled.FileName);
+            Assert.Equal("named-session-identity", untitled.AutoSaveIdentity);
             Assert.Equal(8, untitled.CursorOffset);
             Assert.Same(staged.Tabs, staged.AdoptTabs());
         }
@@ -107,7 +115,8 @@ public class DocumentSessionCoordinatorTests
         _settingsService.VerifySet(service => service.OpenFiles =
             It.Is<List<SessionFile>>(files =>
                 files.Count == 1 &&
-                files[0].FilePath == selected.FilePath));
+                files[0].FilePath == selected.FilePath &&
+                files[0].TabIdentity == selected.AutoSaveIdentity));
         _settingsService.VerifySet(service => service.ActiveTabIndex = 0);
         _fileSystemService.Verify(
             service => service.WriteAllTextAtomic(It.IsAny<string>(), "discard"),
@@ -164,6 +173,7 @@ public class DocumentSessionCoordinatorTests
         Assert.Equal(
             before.ToDictionary(entry => entry.Content, entry => entry.Id),
             after.ToDictionary(entry => entry.Content, entry => entry.Id));
+        Assert.Equal(first.AutoSaveIdentity, before[0].TabIdentity);
     }
 
     [Fact]
@@ -177,7 +187,13 @@ public class DocumentSessionCoordinatorTests
         var result = _sut.RecoverTabs(
             new[]
             {
-                new AutoSaveEntry("one-id", "one.txt", null, "one", true),
+                new AutoSaveEntry(
+                    "one-id",
+                    "one.txt",
+                    null,
+                    "one",
+                    true,
+                    TabIdentity: "stable-one"),
                 new AutoSaveEntry("two-id", "two.txt", null, "two", true)
             });
 
@@ -185,6 +201,7 @@ public class DocumentSessionCoordinatorTests
         Assert.Equal(new[] { "one-id" }, result.RecoveredEntryIds);
         Assert.Same(recovered, Assert.Single(result.RecoveredTabs!));
         Assert.True(recovered.IsModified);
+        Assert.Equal("stable-one", recovered.AutoSaveIdentity);
     }
 
     [Fact]
@@ -225,6 +242,91 @@ public class DocumentSessionCoordinatorTests
             liveTabs.Add);
 
         Assert.Same(candidate, adoption.SelectedTab);
+    }
+
+    [Fact]
+    public void AdoptRestoredTabs_DistinctUntitledCollisionsAllocateDeterministicNames()
+    {
+        var live = CreateTab("Untitled-1");
+        live.RestoreAutoSaveIdentity("live");
+        var first = CreateTab("Untitled-1");
+        first.RestoreAutoSaveIdentity("first");
+        first.SetContentBaseline("first content", isModified: true);
+        var second = CreateTab("Untitled-1");
+        second.RestoreAutoSaveIdentity("second");
+        second.SetContentBaseline("second content", isModified: true);
+        var liveTabs = new List<EditorTabViewModel> { live };
+        using var restoredSession = new RestoredDocumentSession(
+            new[]
+            {
+                new RestoredTabCandidate(first, 0, "first"),
+                new RestoredTabCandidate(second, 1, "second")
+            },
+            activeTabIndex: 1);
+
+        var adoption = _sut.AdoptRestoredTabs(
+            restoredSession,
+            liveTabs,
+            liveTabs.Add);
+
+        Assert.Equal("Untitled-2", first.FileName);
+        Assert.Equal("Untitled-3", second.FileName);
+        Assert.Equal("first content", first.Content);
+        Assert.Equal("second content", second.Content);
+        Assert.Empty(adoption.DiscardedDuplicateTabs);
+        Assert.Same(second, adoption.SelectedTab);
+    }
+
+    [Fact]
+    public void AdoptRestoredTabs_StableIdentityDedupesAcrossNamedState()
+    {
+        var liveNamed = CreateTab("saved.txt", @"C:\saved.txt");
+        liveNamed.RestoreAutoSaveIdentity("shared");
+        liveNamed.SetContentBaseline("live content", isModified: true);
+        var stagedUntitled = CreateTab("Untitled-1");
+        stagedUntitled.RestoreAutoSaveIdentity("shared");
+        stagedUntitled.SetContentBaseline("staged content", isModified: true);
+        var liveTabs = new List<EditorTabViewModel> { liveNamed };
+        using var restoredSession = new RestoredDocumentSession(
+            new[] { new RestoredTabCandidate(stagedUntitled, 0, "shared") },
+            activeTabIndex: 0);
+
+        var adoption = _sut.AdoptRestoredTabs(
+            restoredSession,
+            liveTabs,
+            liveTabs.Add);
+
+        Assert.Same(liveNamed, Assert.Single(liveTabs));
+        Assert.Same(stagedUntitled, Assert.Single(adoption.DiscardedDuplicateTabs));
+        Assert.Empty(stagedUntitled.Content);
+        Assert.Equal("live content", liveNamed.Content);
+        Assert.Same(liveNamed, adoption.SelectedTab);
+    }
+
+    [Fact]
+    public void AdoptRestoredTabs_LegacyUntitledSameNameIsRetainedWithoutProof()
+    {
+        var live = CreateTab("Untitled-1");
+        live.SetContentBaseline("live content", isModified: true);
+        var legacyCandidate = CreateTab("Untitled-1");
+        legacyCandidate.SetContentBaseline("legacy content", isModified: true);
+        var liveTabs = new List<EditorTabViewModel> { live };
+        using var restoredSession = new RestoredDocumentSession(
+            new[] { new RestoredTabCandidate(legacyCandidate, 0) },
+            activeTabIndex: 0);
+
+        var adoption = _sut.AdoptRestoredTabs(
+            restoredSession,
+            liveTabs,
+            liveTabs.Add);
+
+        Assert.Equal(2, liveTabs.Count);
+        Assert.Equal("Untitled-1", live.FileName);
+        Assert.Equal("Untitled-2", legacyCandidate.FileName);
+        Assert.Equal("live content", live.Content);
+        Assert.Equal("legacy content", legacyCandidate.Content);
+        Assert.Empty(adoption.DiscardedDuplicateTabs);
+        Assert.Same(legacyCandidate, adoption.SelectedTab);
     }
 
     private EditorTabViewModel CreateTab(

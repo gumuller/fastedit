@@ -109,7 +109,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
 
     public Encoding FileEncoding => _fileEncoding;
     public bool HasBom => _hasBom;
-    public string AutoSaveIdentity { get; } = Guid.NewGuid().ToString("N");
+    public string AutoSaveIdentity { get; private set; } = Guid.NewGuid().ToString("N");
     public long UserMutationVersion { get; private set; }
     public long ChangeVersion => UserMutationVersion;
 
@@ -118,6 +118,12 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         _fileService = fileService;
         _fileSystemService = fileSystemService;
         _dialogService = dialogService;
+    }
+
+    internal void RestoreAutoSaveIdentity(string identity)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(identity);
+        AutoSaveIdentity = identity;
     }
 
     public async Task LoadFileAsync(string filePath, IProgress<double>? indexProgress = null)
