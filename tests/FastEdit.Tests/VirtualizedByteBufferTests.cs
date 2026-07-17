@@ -216,57 +216,26 @@ public class VirtualizedByteBufferTests : IDisposable
     }
 
     [Fact]
-    public async Task Save_Waits_For_Active_Search_Before_Requesting_Exclusive_Access()
+    public async Task Save_Cancels_Active_Search_Before_Exclusive_Write()
     {
-        var path = CreateTempFile(new byte[256 * 1024]);
+        var path = Path.GetTempFileName();
+        using (var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None))
+            stream.SetLength(128L * 1024 * 1024);
+        _tempFiles.Add(path);
+
         using var buffer = new VirtualizedByteBuffer(path);
-        using var progress = new BlockingProgress();
-        using var saveStarted = new ManualResetEventSlim();
-        buffer.SetByte(0, 0xFF);
-
-        var searchTask = buffer.SearchAsync(
-            new byte[] { 0x7F },
+        var search = buffer.SearchAsync(
+            new byte[] { 0xFF },
             VirtualizedByteBuffer.DefaultSearchResultLimit,
-            progress,
+            progress: null,
             CancellationToken.None);
-        Assert.True(progress.Started.Wait(TimeSpan.FromSeconds(5)));
 
-        var saveTask = Task.Run(() =>
-        {
-            saveStarted.Set();
-            buffer.Save();
-        });
-        Assert.True(saveStarted.Wait(TimeSpan.FromSeconds(5)));
+        buffer.SetByte(0, 0x7F);
+        buffer.Save();
 
-        try
-        {
-            var completedTask = await Task.WhenAny(saveTask, Task.Delay(100));
-            Assert.NotSame(saveTask, completedTask);
-        }
-        finally
-        {
-            progress.Release.Set();
-        }
-
-        await Task.WhenAll(searchTask, saveTask).WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.Equal(0xFF, File.ReadAllBytes(path)[0]);
-    }
-
-    private sealed class BlockingProgress : IProgress<double>, IDisposable
-    {
-        public ManualResetEventSlim Started { get; } = new();
-        public ManualResetEventSlim Release { get; } = new();
-
-        public void Report(double value)
-        {
-            Started.Set();
-            Release.Wait();
-        }
-
-        public void Dispose()
-        {
-            Started.Dispose();
-            Release.Dispose();
-        }
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => search);
+        using var readStream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        Assert.Equal(0x7F, readStream.ReadByte());
+        Assert.False(buffer.HasModifications);
     }
 }
