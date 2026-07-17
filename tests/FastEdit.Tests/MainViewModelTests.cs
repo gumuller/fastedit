@@ -687,6 +687,70 @@ public class MainViewModelTests
     }
 
     [Fact]
+    public void SaveSession_DirtyUntitledTab_SnapshotsSilentlyForStartupRestore()
+    {
+        var tab = CreateMockTab("Untitled-1", isModified: true);
+        tab.Content = "restore me";
+        _tabFactory.Setup(f => f.CreateUntitled(null)).Returns(tab);
+        _sut.NewFileCommand.Execute(null);
+
+        _sut.SaveSession();
+
+        _dialogService.Verify(
+            service => service.ShowMessage(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<DialogButtons>(),
+                It.IsAny<DialogIcon>()),
+            Times.Never);
+        _settingsService.VerifySet(service =>
+            service.OpenFiles = It.Is<List<SessionFile>>(files =>
+                files.Count == 1 &&
+                files[0].IsUntitled &&
+                files[0].FilePath == "Untitled-1"));
+        _fileSystemService.Verify(
+            service => service.WriteAllTextAtomic(
+                It.IsAny<string>(),
+                "restore me"),
+            Times.Once);
+    }
+
+    [Fact]
+    public void SaveSession_DirtyNamedTab_SnapshotsWithoutOverwritingNamedFile()
+    {
+        var tab = CreateMockTab("notes.txt", @"C:\notes.txt", isModified: true);
+        tab.Content = "unsaved buffer";
+        _tabFactory.Setup(f => f.CreateUntitled(null)).Returns(tab);
+        _sut.NewFileCommand.Execute(null);
+
+        _sut.SaveSession();
+
+        _dialogService.Verify(
+            service => service.ShowMessage(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<DialogButtons>(),
+                It.IsAny<DialogIcon>()),
+            Times.Never);
+        _settingsService.VerifySet(service =>
+            service.OpenFiles = It.Is<List<SessionFile>>(files =>
+                files.Count == 1 &&
+                !files[0].IsUntitled &&
+                files[0].FilePath == @"C:\notes.txt" &&
+                !string.IsNullOrEmpty(files[0].TempFilePath)));
+        _fileSystemService.Verify(
+            service => service.WriteAllTextAtomic(
+                It.IsAny<string>(),
+                "unsaved buffer"),
+            Times.Once);
+        _fileService.Verify(
+            service => service.WriteAllTextAsync(
+                It.IsAny<string>(),
+                It.IsAny<string>()),
+            Times.Never);
+    }
+
+    [Fact]
     public void SaveSession_SettingsFailure_DoesNotCleanPreviousSessionFiles()
     {
         var tab = CreateMockTab("Untitled-1");
@@ -1077,6 +1141,73 @@ public class MainViewModelTests
         {
             File.Delete(tempFile);
         }
+    }
+
+    [Fact]
+    public async Task RestoreSession_RestoresDirtyNamedSnapshotOverDiskContent()
+    {
+        var filePath = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(filePath, "disk content");
+            var sessionFiles = new List<SessionFile>
+            {
+                new()
+                {
+                    FilePath = filePath,
+                    IsUntitled = false,
+                    Content = "unsaved buffer"
+                }
+            };
+            _settingsService.Setup(service => service.OpenFiles).Returns(sessionFiles);
+            _settingsService.Setup(service => service.ActiveTabIndex).Returns(0);
+            _fileSystemService.Setup(service => service.FileExists(filePath)).Returns(true);
+            var tab = CreateMockTab("notes.txt");
+            _tabFactory.Setup(factory => factory.CreateUntitled("unsaved buffer"))
+                .Returns(tab);
+
+            await _sut.RestoreSessionAsync();
+
+            Assert.Same(tab, Assert.Single(_sut.Tabs));
+            Assert.Equal(filePath, tab.FilePath);
+            Assert.Equal("unsaved buffer", tab.Content);
+            Assert.True(tab.IsModified);
+            Assert.Equal(FileOpenMode.Text, tab.Mode);
+            _fileService.Verify(
+                service => service.ReadFileWithEncodingAsync(filePath),
+                Times.Never);
+        }
+        finally
+        {
+            File.Delete(filePath);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreSession_RestoresDirtyNamedSnapshotWhenFileIsMissing()
+    {
+        const string filePath = @"C:\missing-notes.txt";
+        var sessionFiles = new List<SessionFile>
+        {
+            new()
+            {
+                FilePath = filePath,
+                IsUntitled = false,
+                Content = "unsaved buffer"
+            }
+        };
+        _settingsService.Setup(service => service.OpenFiles).Returns(sessionFiles);
+        _fileSystemService.Setup(service => service.FileExists(filePath)).Returns(false);
+        var tab = CreateMockTab("missing-notes.txt");
+        _tabFactory.Setup(factory => factory.CreateUntitled("unsaved buffer"))
+            .Returns(tab);
+
+        await _sut.RestoreSessionAsync();
+
+        Assert.Same(tab, Assert.Single(_sut.Tabs));
+        Assert.Equal(filePath, tab.FilePath);
+        Assert.Equal("unsaved buffer", tab.Content);
+        Assert.True(tab.IsModified);
     }
 
     [Fact]

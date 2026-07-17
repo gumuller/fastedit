@@ -18,9 +18,6 @@ public sealed class MainWindowLifecycleCoordinator
     {
         ArgumentNullException.ThrowIfNull(autoSaveService);
         ArgumentNullException.ThrowIfNull(operations);
-        ArgumentNullException.ThrowIfNull(operations.HasUnsavedChanges);
-        ArgumentNullException.ThrowIfNull(operations.PrepareForExitAsync);
-        ArgumentNullException.ThrowIfNull(operations.CancelExitPreparation);
         ArgumentNullException.ThrowIfNull(operations.RestoreSessionAsync);
         ArgumentNullException.ThrowIfNull(operations.OpenStartupFileAsync);
         ArgumentNullException.ThrowIfNull(operations.GetWorkingDirectory);
@@ -159,20 +156,12 @@ public sealed class MainWindowLifecycleCoordinator
                 startupTask = _startupTask;
             if (startupTask != null)
                 await startupTask;
-
-            if (_operations.HasUnsavedChanges() &&
-                !await _operations.PrepareForExitAsync())
-            {
-                Volatile.Write(ref _closeState, 0);
-                return new MainWindowCloseResult(MainWindowCloseOutcome.Cancelled);
-            }
         }
         catch (Exception ex)
         {
-            _operations.CancelExitPreparation();
             Volatile.Write(ref _closeState, 0);
             return new MainWindowCloseResult(
-                MainWindowCloseOutcome.PreparationFailed,
+                MainWindowCloseOutcome.StartupFailed,
                 ex);
         }
 
@@ -183,7 +172,6 @@ public sealed class MainWindowLifecycleCoordinator
         }
         catch (Exception ex)
         {
-            _operations.CancelExitPreparation();
             Volatile.Write(ref _closeState, 0);
             return new MainWindowCloseResult(
                 MainWindowCloseOutcome.PersistenceFailed,
@@ -273,9 +261,6 @@ public sealed class MainWindowLifecycleCoordinator
 }
 
 public sealed record MainWindowLifecycleOperations(
-    Func<bool> HasUnsavedChanges,
-    Func<Task<bool>> PrepareForExitAsync,
-    Action CancelExitPreparation,
     Func<Task> RestoreSessionAsync,
     Func<string, Task> OpenStartupFileAsync,
     Func<string?> GetWorkingDirectory,
@@ -309,8 +294,7 @@ public sealed record MainWindowStartupResult(
 public enum MainWindowCloseOutcome
 {
     InProgress,
-    Cancelled,
-    PreparationFailed,
+    StartupFailed,
     PersistenceFailed,
     ReadyToClose
 }

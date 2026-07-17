@@ -978,13 +978,13 @@ public partial class MainViewModel : ObservableObject
         if (Tabs.Any(t => string.IsNullOrEmpty(t.FilePath) && t.FileName == fileName))
             return;
 
-        var content = await GetUntitledSessionContentAsync(sessionFile);
+        var content = await GetSessionContentAsync(sessionFile);
         var tab = _tabFactory.CreateUntitled(content);
         tab.FileName = fileName;
         Tabs.Add(tab);
     }
 
-    private async Task<string> GetUntitledSessionContentAsync(SessionFile sessionFile)
+    private async Task<string> GetSessionContentAsync(SessionFile sessionFile)
     {
         if (!string.IsNullOrEmpty(sessionFile.TempFilePath) && _fileSystemService.FileExists(sessionFile.TempFilePath))
             return await _fileSystemService.ReadAllTextAsync(sessionFile.TempFilePath);
@@ -994,11 +994,34 @@ public partial class MainViewModel : ObservableObject
 
     private async Task RestoreExistingSessionFileAsync(SessionFile sessionFile)
     {
-        if (!_fileSystemService.FileExists(sessionFile.FilePath) || IsFileAlreadyOpen(sessionFile.FilePath))
+        if (IsFileAlreadyOpen(sessionFile.FilePath))
             return;
 
-        var tab = _tabFactory.Create();
-        await tab.LoadFileAsync(sessionFile.FilePath);
+        var hasSnapshot = sessionFile.Content != null ||
+            (!string.IsNullOrEmpty(sessionFile.TempFilePath) &&
+             _fileSystemService.FileExists(sessionFile.TempFilePath));
+        var snapshotContent = hasSnapshot && !sessionFile.IsBinaryMode
+            ? await GetSessionContentAsync(sessionFile)
+            : null;
+        EditorTabViewModel tab;
+        if (hasSnapshot && !sessionFile.IsBinaryMode)
+        {
+            tab = _tabFactory.CreateUntitled(snapshotContent);
+            tab.FileName = Path.GetFileName(sessionFile.FilePath);
+            tab.FilePath = sessionFile.FilePath;
+            tab.Content = snapshotContent ?? string.Empty;
+            tab.IsModified = true;
+        }
+        else if (_fileSystemService.FileExists(sessionFile.FilePath))
+        {
+            tab = _tabFactory.Create();
+            await tab.LoadFileAsync(sessionFile.FilePath);
+        }
+        else
+        {
+            return;
+        }
+
         Tabs.Add(tab);
     }
 
@@ -1077,7 +1100,8 @@ public partial class MainViewModel : ObservableObject
                 ScrollOffset = tab.ScrollOffset
             };
 
-            if (sessionFile.IsUntitled && tab.Mode == FileOpenMode.Text)
+            if (tab.Mode == FileOpenMode.Text &&
+                (sessionFile.IsUntitled || tab.IsModified))
             {
                 var tempPath = Path.Combine(tempDir, $"{Guid.NewGuid():N}_{tab.FileName}.tmp");
                 try

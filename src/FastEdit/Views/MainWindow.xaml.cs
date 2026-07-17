@@ -155,9 +155,6 @@ public partial class MainWindow : FluentWindow
         _lifecycleCoordinator = new MainWindowLifecycleCoordinator(
             _autoSaveService,
             new MainWindowLifecycleOperations(
-                _viewModel.HasUnsavedChanges,
-                _viewModel.PrepareForExitAsync,
-                _viewModel.CancelExitPreparation,
                 _viewModel.RestoreSessionAsync,
                 path => _viewModel.OpenFileCommand.ExecuteAsync(path),
                 () => _viewModel.FileTree.RootPath,
@@ -263,12 +260,11 @@ public partial class MainWindow : FluentWindow
         switch (result.Outcome)
         {
             case MainWindowCloseOutcome.InProgress:
-            case MainWindowCloseOutcome.Cancelled:
                 return;
-            case MainWindowCloseOutcome.PreparationFailed:
+            case MainWindowCloseOutcome.StartupFailed:
                 IsEnabled = true;
-                Trace.TraceError("Failed to prepare the session for shutdown: {0}", result.Error);
-                _viewModel.StatusText = "Unable to prepare the current session for exit; FastEdit remains open.";
+                Trace.TraceError("Startup did not complete before shutdown: {0}", result.Error);
+                _viewModel.StatusText = "Startup did not complete; FastEdit remains open.";
                 return;
             case MainWindowCloseOutcome.PersistenceFailed:
                 IsEnabled = true;

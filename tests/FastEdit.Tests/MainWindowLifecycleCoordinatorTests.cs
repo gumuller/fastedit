@@ -172,41 +172,40 @@ public class MainWindowLifecycleCoordinatorTests
     }
 
     [Fact]
-    public async Task CloseAsync_CancelledPreparationDoesNotPersistOrShutdown()
+    public async Task CloseAsync_SilentlyPersistsShutdownSnapshotWithoutUnsavedPreparation()
     {
-        var persisted = false;
-        var shutdown = false;
+        var operations = new List<string>();
         var coordinator = CreateCoordinator(
             Mock.Of<IAutoSaveService>(),
-            hasUnsavedChanges: () => true,
-            prepareForExitAsync: () => Task.FromResult(false),
             shutdownTerminalAsync: _ =>
             {
-                shutdown = true;
+                operations.Add("shutdown-terminal");
                 return Task.CompletedTask;
             });
 
         var result = await coordinator.CloseAsync(
-            () => { },
-            () => persisted = true,
+            () => operations.Add("disable-window"),
+            () => operations.Add("persist-all-open-tabs"),
             TimeSpan.FromSeconds(1));
 
-        Assert.Equal(MainWindowCloseOutcome.Cancelled, result.Outcome);
-        Assert.False(persisted);
-        Assert.False(shutdown);
-        Assert.False(coordinator.IsCloseComplete);
+        Assert.Equal(MainWindowCloseOutcome.ReadyToClose, result.Outcome);
+        Assert.Equal(
+            new[]
+            {
+                "disable-window",
+                "persist-all-open-tabs",
+                "shutdown-terminal"
+            },
+            operations);
+        Assert.True(coordinator.IsCloseComplete);
     }
 
     [Fact]
-    public async Task CloseAsync_PersistenceFailureCancelsPreparationAndKeepsWindowOpen()
+    public async Task CloseAsync_PersistenceFailureKeepsWindowOpen()
     {
-        var preparationCancelled = false;
         var shutdown = false;
         var coordinator = CreateCoordinator(
             Mock.Of<IAutoSaveService>(),
-            hasUnsavedChanges: () => true,
-            prepareForExitAsync: () => Task.FromResult(true),
-            cancelExitPreparation: () => preparationCancelled = true,
             shutdownTerminalAsync: _ =>
             {
                 shutdown = true;
@@ -220,7 +219,6 @@ public class MainWindowLifecycleCoordinatorTests
 
         Assert.Equal(MainWindowCloseOutcome.PersistenceFailed, result.Outcome);
         Assert.IsType<InvalidOperationException>(result.Error);
-        Assert.True(preparationCancelled);
         Assert.False(shutdown);
         Assert.False(coordinator.IsCloseComplete);
     }
@@ -254,31 +252,30 @@ public class MainWindowLifecycleCoordinatorTests
     [Fact]
     public async Task CloseAsync_ReentrantAttemptReturnsInProgress()
     {
-        var preparationStarted =
+        var shutdownStarted =
             new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var preparationRelease =
-            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var shutdownRelease =
+            new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var persistenceCount = 0;
         var coordinator = CreateCoordinator(
             Mock.Of<IAutoSaveService>(),
-            hasUnsavedChanges: () => true,
-            prepareForExitAsync: () =>
+            shutdownTerminalAsync: async _ =>
             {
-                preparationStarted.TrySetResult();
-                return preparationRelease.Task;
+                shutdownStarted.TrySetResult();
+                await shutdownRelease.Task;
             });
 
         var firstClose = coordinator.CloseAsync(
             () => { },
             () => persistenceCount++,
             TimeSpan.FromSeconds(1));
-        await preparationStarted.Task;
+        await shutdownStarted.Task;
 
         var reentrantClose = await coordinator.CloseAsync(
             () => throw new InvalidOperationException("must not run"),
             () => throw new InvalidOperationException("must not run"),
             TimeSpan.FromSeconds(1));
-        preparationRelease.TrySetResult(true);
+        shutdownRelease.TrySetResult();
         var completedClose = await firstClose;
 
         Assert.Equal(MainWindowCloseOutcome.InProgress, reentrantClose.Outcome);
@@ -503,9 +500,6 @@ public class MainWindowLifecycleCoordinatorTests
 
     private static MainWindowLifecycleCoordinator CreateCoordinator(
         IAutoSaveService autoSaveService,
-        Func<bool>? hasUnsavedChanges = null,
-        Func<Task<bool>>? prepareForExitAsync = null,
-        Action? cancelExitPreparation = null,
         Func<Task>? restoreSessionAsync = null,
         Func<string, Task>? openStartupFileAsync = null,
         Func<string?>? getWorkingDirectory = null,
@@ -517,9 +511,6 @@ public class MainWindowLifecycleCoordinatorTests
         return new MainWindowLifecycleCoordinator(
             autoSaveService,
             new MainWindowLifecycleOperations(
-                hasUnsavedChanges ?? (() => false),
-                prepareForExitAsync ?? (() => Task.FromResult(true)),
-                cancelExitPreparation ?? (() => { }),
                 restoreSessionAsync ?? (() => Task.CompletedTask),
                 openStartupFileAsync ?? (_ => Task.CompletedTask),
                 getWorkingDirectory ?? (() => null),
