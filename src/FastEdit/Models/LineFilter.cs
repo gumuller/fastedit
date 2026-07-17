@@ -12,10 +12,7 @@ public partial class LineFilter : ObservableObject
     [ObservableProperty] private bool _isExcluding;
     [ObservableProperty] private string _backgroundColor = "#4488FF";
 
-    private Regex? _compiledRegex;
-    private string? _lastCompiledPattern;
-    private bool _lastIsRegex;
-    private bool _lastIsCaseSensitive;
+    private RegexCache _regexCache = new();
 
     public bool Matches(string lineText)
     {
@@ -25,8 +22,7 @@ public partial class LineFilter : ObservableObject
         {
             if (IsRegex)
             {
-                EnsureRegexCompiled();
-                return _compiledRegex?.IsMatch(lineText) ?? false;
+                return _regexCache.GetOrCompile(Pattern, IsCaseSensitive)?.IsMatch(lineText) ?? false;
             }
 
             var comparison = IsCaseSensitive
@@ -40,27 +36,59 @@ public partial class LineFilter : ObservableObject
         }
     }
 
-    private void EnsureRegexCompiled()
+    internal LineFilter CreateSnapshot()
     {
-        if (_compiledRegex != null &&
-            _lastCompiledPattern == Pattern &&
-            _lastIsRegex == IsRegex &&
-            _lastIsCaseSensitive == IsCaseSensitive)
-            return;
+        var regexCache = _regexCache;
 
-        var options = RegexOptions.Compiled;
-        if (!IsCaseSensitive) options |= RegexOptions.IgnoreCase;
+        return new LineFilter
+        {
+            Pattern = Pattern,
+            IsRegex = IsRegex,
+            IsCaseSensitive = IsCaseSensitive,
+            IsEnabled = IsEnabled,
+            IsExcluding = IsExcluding,
+            BackgroundColor = BackgroundColor,
+            _regexCache = regexCache
+        };
+    }
 
-        try
+    private sealed class RegexCache
+    {
+        private readonly object _sync = new();
+        private string? _pattern;
+        private bool _isCaseSensitive;
+        private bool _initialized;
+        private Regex? _compiledRegex;
+
+        public Regex? GetOrCompile(string pattern, bool isCaseSensitive)
         {
-            _compiledRegex = new Regex(Pattern, options, TimeSpan.FromMilliseconds(200));
-            _lastCompiledPattern = Pattern;
-            _lastIsRegex = IsRegex;
-            _lastIsCaseSensitive = IsCaseSensitive;
-        }
-        catch
-        {
-            _compiledRegex = null;
+            lock (_sync)
+            {
+                if (_initialized &&
+                    _pattern == pattern &&
+                    _isCaseSensitive == isCaseSensitive)
+                {
+                    return _compiledRegex;
+                }
+
+                var options = RegexOptions.Compiled;
+                if (!isCaseSensitive)
+                    options |= RegexOptions.IgnoreCase;
+
+                try
+                {
+                    _compiledRegex = new Regex(pattern, options, TimeSpan.FromMilliseconds(200));
+                }
+                catch
+                {
+                    _compiledRegex = null;
+                }
+
+                _pattern = pattern;
+                _isCaseSensitive = isCaseSensitive;
+                _initialized = true;
+                return _compiledRegex;
+            }
         }
     }
 }
