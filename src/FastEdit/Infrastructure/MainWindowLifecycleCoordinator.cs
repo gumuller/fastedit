@@ -60,11 +60,40 @@ public sealed class MainWindowLifecycleCoordinator
                     }));
             }
 
-            _startupTask = StartCoreAsync(
+            var startupCompletion =
+                new TaskCompletionSource<MainWindowStartupResult>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+            _startupTask = startupCompletion.Task;
+            _ = RunStartupAsync(
+                startupCompletion,
                 startupFiles,
                 hasAnotherRunningInstance,
                 requestRecovery);
             return _startupTask;
+        }
+    }
+
+    private async Task RunStartupAsync(
+        TaskCompletionSource<MainWindowStartupResult> startupCompletion,
+        IReadOnlyList<string> startupFiles,
+        bool hasAnotherRunningInstance,
+        Func<bool> requestRecovery)
+    {
+        try
+        {
+            var result = await StartCoreAsync(
+                startupFiles,
+                hasAnotherRunningInstance,
+                requestRecovery);
+            startupCompletion.TrySetResult(result);
+        }
+        catch (OperationCanceledException ex)
+        {
+            startupCompletion.TrySetCanceled(ex.CancellationToken);
+        }
+        catch (Exception ex)
+        {
+            startupCompletion.TrySetException(ex);
         }
     }
 

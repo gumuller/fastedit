@@ -131,6 +131,40 @@ public class MainWindowLifecycleCoordinatorTests
     }
 
     [Fact]
+    public async Task StartAsync_RepeatedCallReturnsPublishedTaskUntilStartupCompletes()
+    {
+        var startupStarted =
+            new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var startupRelease =
+            new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var coordinator = CreateCoordinator(
+            Mock.Of<IAutoSaveService>(),
+            restoreSessionAsync: async () =>
+            {
+                startupStarted.TrySetResult();
+                await startupRelease.Task;
+            });
+
+        var firstStart = coordinator.StartAsync(
+            Array.Empty<string>(),
+            hasAnotherRunningInstance: false,
+            requestRecovery: () => false);
+        await startupStarted.Task;
+        var repeatedStart = coordinator.StartAsync(
+            new[] { "ignored.txt" },
+            hasAnotherRunningInstance: true,
+            requestRecovery: () => throw new InvalidOperationException("must not run"));
+
+        Assert.Same(firstStart, repeatedStart);
+        Assert.False(repeatedStart.IsCompleted);
+
+        startupRelease.TrySetResult();
+        var result = await repeatedStart;
+
+        Assert.Equal(MainWindowStartupOutcome.Success, result.Outcome);
+    }
+
+    [Fact]
     public async Task CloseAsync_CancelledPreparationDoesNotPersistOrShutdown()
     {
         var persisted = false;
@@ -281,6 +315,63 @@ public class MainWindowLifecycleCoordinatorTests
 
         Assert.Equal(MainWindowCloseOutcome.ReadyToClose, closeResult.Outcome);
         Assert.Equal(new[] { "startup-complete", "persist" }, operations);
+    }
+
+    [Fact]
+    public async Task CloseAsync_RequestedDuringRecoveryWaitsForStartupBeforePersisting()
+    {
+        var autoSave = new Mock<IAutoSaveService>();
+        var operations = new List<string>();
+        Task<MainWindowCloseResult>? closeTask = null;
+        autoSave.Setup(service => service.HasRecoveryFiles()).Returns(true);
+        autoSave.Setup(service => service.GetRecoveryEntries())
+            .Returns(new RecoveryEntriesResult(true, Array.Empty<AutoSaveEntry>()));
+        autoSave.Setup(service => service.CompleteRecovery(
+                It.IsAny<IEnumerable<AutoSaveEntry>>(),
+                It.IsAny<IEnumerable<string>>(),
+                true))
+            .Returns(true);
+        MainWindowLifecycleCoordinator? coordinator = null;
+        coordinator = CreateCoordinator(
+            autoSave.Object,
+            restoreSessionAsync: () =>
+            {
+                operations.Add("startup-complete");
+                return Task.CompletedTask;
+            },
+            recoverTabs: entries =>
+            {
+                operations.Add("recover-tabs");
+                return new TabRecoveryResult(true, Array.Empty<string>());
+            });
+
+        var startupTask = coordinator.StartAsync(
+            Array.Empty<string>(),
+            hasAnotherRunningInstance: false,
+            requestRecovery: () =>
+            {
+                closeTask = coordinator.CloseAsync(
+                    () => operations.Add("begin-persistence"),
+                    () => operations.Add("persist"),
+                    TimeSpan.FromSeconds(1));
+                Assert.False(closeTask.IsCompleted);
+                Assert.Empty(operations);
+                return true;
+            });
+        var startupResult = await startupTask;
+        var closeResult = await closeTask!;
+
+        Assert.Equal(MainWindowStartupOutcome.Success, startupResult.Outcome);
+        Assert.Equal(MainWindowCloseOutcome.ReadyToClose, closeResult.Outcome);
+        Assert.Equal(
+            new[]
+            {
+                "recover-tabs",
+                "startup-complete",
+                "begin-persistence",
+                "persist"
+            },
+            operations);
     }
 
     private static MainWindowLifecycleCoordinator CreateCoordinator(
