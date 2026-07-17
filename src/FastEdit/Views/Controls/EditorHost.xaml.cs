@@ -55,6 +55,12 @@ public partial class EditorHost : UserControl
     private MainViewModel? _mainViewModel;
     private Dictionary<int, Models.LineFilterResult> _filterCache = new();
     private bool _isFilterFoldingActive;
+    private readonly DebouncedActionCoordinator _filterRefreshCoordinator =
+        new(TimeSpan.FromMilliseconds(150));
+    private readonly ExternalChangeTracker _externalChangeTracker = new();
+    private CancellationTokenSource? _externalReloadCts;
+    private int _externalChangeActive;
+    private bool _isRuntimeAttached;
 
     private static readonly IReadOnlyDictionary<MacroAction, Action<EditorHost, MacroStep, ITextToolsService?>> MacroStepHandlers =
         new Dictionary<MacroAction, Action<EditorHost, MacroStep, ITextToolsService?>>
@@ -74,6 +80,7 @@ public partial class EditorHost : UserControl
         InitializeComponent();
         DataContextChanged += OnDataContextChanged;
         Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
     }
 
     public static readonly DependencyProperty LineFilterServiceProperty =
@@ -183,9 +190,12 @@ public partial class EditorHost : UserControl
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         ConfigureServices();
+        if (_isRuntimeAttached)
+            return;
+        _isRuntimeAttached = true;
 
         // Install search panel with explicit style to bypass WPF UI's implicit TextBox style
-        _searchPanel = SearchPanel.Install(TextEditor);
+        _searchPanel ??= SearchPanel.Install(TextEditor);
         _searchPanel.Style = (Style)FindResource("FastEditSearchPanelStyle");
 
         // Wire up replace buttons after template is applied
@@ -197,89 +207,166 @@ public partial class EditorHost : UserControl
         ApplyEditorSettings();
 
         // Install bracket highlight renderer
-        _bracketRenderer = new BracketHighlightRenderer(TextEditor);
-        TextEditor.TextArea.TextView.BackgroundRenderers.Add(_bracketRenderer);
+        _bracketRenderer ??= new BracketHighlightRenderer(TextEditor);
+        if (!TextEditor.TextArea.TextView.BackgroundRenderers.Contains(_bracketRenderer))
+            TextEditor.TextArea.TextView.BackgroundRenderers.Add(_bracketRenderer);
+        TextEditor.TextArea.Caret.PositionChanged -= OnCaretPositionChangedForBrackets;
         TextEditor.TextArea.Caret.PositionChanged += OnCaretPositionChangedForBrackets;
 
         // Install breadcrumb debounce timer
-        _breadcrumbTimer = new System.Windows.Threading.DispatcherTimer
+        _breadcrumbTimer ??= new System.Windows.Threading.DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(100)
         };
-        _breadcrumbTimer.Tick += (s, args) =>
-        {
-            _breadcrumbTimer.Stop();
-            UpdateBreadcrumbs();
-        };
+        _breadcrumbTimer.Tick -= BreadcrumbTimer_Tick;
+        _breadcrumbTimer.Tick += BreadcrumbTimer_Tick;
 
         // Install indent guide renderer
-        _indentGuideRenderer = new IndentGuideRenderer(TextEditor.TextArea.TextView);
-        TextEditor.TextArea.TextView.BackgroundRenderers.Add(_indentGuideRenderer);
+        _indentGuideRenderer ??= new IndentGuideRenderer(TextEditor.TextArea.TextView);
+        if (!TextEditor.TextArea.TextView.BackgroundRenderers.Contains(_indentGuideRenderer))
+            TextEditor.TextArea.TextView.BackgroundRenderers.Add(_indentGuideRenderer);
 
         // Install occurrence highlight renderer
-        _occurrenceRenderer = new OccurrenceHighlightRenderer(TextEditor.TextArea.TextView);
-        TextEditor.TextArea.TextView.BackgroundRenderers.Add(_occurrenceRenderer);
+        _occurrenceRenderer ??= new OccurrenceHighlightRenderer(TextEditor.TextArea.TextView);
+        if (!TextEditor.TextArea.TextView.BackgroundRenderers.Contains(_occurrenceRenderer))
+            TextEditor.TextArea.TextView.BackgroundRenderers.Add(_occurrenceRenderer);
+        TextEditor.TextArea.SelectionChanged -= OnSelectionChangedForOccurrences;
         TextEditor.TextArea.SelectionChanged += OnSelectionChangedForOccurrences;
 
         // Install filter renderers
-        _filterRenderer = new FilterBackgroundRenderer(TextEditor.TextArea.TextView);
-        TextEditor.TextArea.TextView.BackgroundRenderers.Add(_filterRenderer);
-        _filterDimTransformer = new FilterDimTransformer();
-        TextEditor.TextArea.TextView.LineTransformers.Add(_filterDimTransformer);
+        _filterRenderer ??= new FilterBackgroundRenderer(TextEditor.TextArea.TextView);
+        if (!TextEditor.TextArea.TextView.BackgroundRenderers.Contains(_filterRenderer))
+            TextEditor.TextArea.TextView.BackgroundRenderers.Add(_filterRenderer);
+        _filterDimTransformer ??= new FilterDimTransformer();
+        if (!TextEditor.TextArea.TextView.LineTransformers.Contains(_filterDimTransformer))
+            TextEditor.TextArea.TextView.LineTransformers.Add(_filterDimTransformer);
+        _lineFilterService!.FiltersChanged -= OnLineFiltersChanged;
         _lineFilterService!.FiltersChanged += OnLineFiltersChanged;
 
         // Folding update timer
-        _foldingTimer = new System.Windows.Threading.DispatcherTimer
+        _foldingTimer ??= new System.Windows.Threading.DispatcherTimer
         {
             Interval = TimeSpan.FromSeconds(2)
         };
-        _foldingTimer.Tick += (s, args) => UpdateFoldings();
+        _foldingTimer.Tick -= FoldingTimer_Tick;
+        _foldingTimer.Tick += FoldingTimer_Tick;
         _foldingTimer.Start();
 
         // File watcher for auto-reload
+        _fileWatcher.FileChanged -= OnFileWatcherChanged;
         _fileWatcher.FileChanged += OnFileWatcherChanged;
 
         // Install custom caret style adorner
-        _caretAdorner = new CaretStyleAdorner(TextEditor.TextArea);
-        var adornerLayer = System.Windows.Documents.AdornerLayer.GetAdornerLayer(TextEditor.TextArea);
-        adornerLayer?.Add(_caretAdorner);
+        if (_caretAdorner == null)
+        {
+            _caretAdorner = new CaretStyleAdorner(TextEditor.TextArea);
+            var adornerLayer = System.Windows.Documents.AdornerLayer.GetAdornerLayer(TextEditor.TextArea);
+            adornerLayer?.Add(_caretAdorner);
+        }
         ApplyCaretStyle();
 
         // Subscribe to theme changes
         if (_themeService != null)
         {
+            _themeService.ThemeChanged -= OnThemeChanged;
             _themeService.ThemeChanged += OnThemeChanged;
         }
 
         // Subscribe to ViewModel events for editor actions
         if (_mainViewModel != null)
-        {
-            _mainViewModel.FindRequested += OnFindRequested;
-            _mainViewModel.ReplaceRequested += OnReplaceRequested;
-            _mainViewModel.GoToLineRequested += OnGoToLineRequested;
-            _mainViewModel.DuplicateLineRequested += OnDuplicateLineRequested;
-            _mainViewModel.MoveLineRequested += OnMoveLineRequested;
-            _mainViewModel.FormatDocumentRequested += OnFormatDocumentRequested;
-            _mainViewModel.MinifyDocumentRequested += OnMinifyDocumentRequested;
-            _mainViewModel.ToggleBookmarkRequested += OnToggleBookmark;
-            _mainViewModel.NextBookmarkRequested += OnNextBookmark;
-            _mainViewModel.PrevBookmarkRequested += OnPrevBookmark;
-            _mainViewModel.ShowCompletionRequested += OnShowCompletion;
-            _mainViewModel.ToggleSplitViewRequested += OnToggleSplitView;
-            _mainViewModel.TextToolRequested += OnTextToolRequested;
-            _mainViewModel.PrintRequested += OnPrintRequested;
-            _mainViewModel.SelectNextOccurrenceRequested += OnSelectNextOccurrence;
-            _mainViewModel.SelectAllOccurrencesRequested += OnSelectAllOccurrences;
-            _mainViewModel.MacroStartRecordingRequested += OnMacroStartRecording;
-            _mainViewModel.MacroStopRecordingRequested += OnMacroStopRecording;
-            _mainViewModel.MacroPlaybackRequested += OnMacroPlayback;
-            _mainViewModel.PropertyChanged += OnMainVmPropertyChanged;
-        }
+            SubscribeToMainViewModel(_mainViewModel);
 
         if (_currentVm != null)
         {
             UpdateEditor(_currentVm);
         }
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        if (!_isRuntimeAttached)
+            return;
+        _isRuntimeAttached = false;
+
+        _filterRefreshCoordinator.Cancel();
+        CancelExternalReload();
+        _fileWatcher.StopWatching();
+        _fileWatcher.FileChanged -= OnFileWatcherChanged;
+        if (_lineFilterService != null)
+            _lineFilterService.FiltersChanged -= OnLineFiltersChanged;
+        if (_themeService != null)
+            _themeService.ThemeChanged -= OnThemeChanged;
+        if (_mainViewModel != null)
+            UnsubscribeFromMainViewModel(_mainViewModel);
+
+        TextEditor.TextArea.Caret.PositionChanged -= OnCaretPositionChangedForBrackets;
+        TextEditor.TextArea.SelectionChanged -= OnSelectionChangedForOccurrences;
+        TextEditor.TextChanged -= TextEditor_TextChanged;
+        TextEditor.TextArea.Caret.PositionChanged -= Caret_PositionChanged;
+
+        _breadcrumbTimer?.Stop();
+        if (_breadcrumbTimer != null)
+            _breadcrumbTimer.Tick -= BreadcrumbTimer_Tick;
+        _foldingTimer?.Stop();
+        if (_foldingTimer != null)
+            _foldingTimer.Tick -= FoldingTimer_Tick;
+    }
+
+    private void BreadcrumbTimer_Tick(object? sender, EventArgs e)
+    {
+        _breadcrumbTimer?.Stop();
+        UpdateBreadcrumbs();
+    }
+
+    private void FoldingTimer_Tick(object? sender, EventArgs e) => UpdateFoldings();
+
+    private void SubscribeToMainViewModel(MainViewModel viewModel)
+    {
+        UnsubscribeFromMainViewModel(viewModel);
+        viewModel.FindRequested += OnFindRequested;
+        viewModel.ReplaceRequested += OnReplaceRequested;
+        viewModel.GoToLineRequested += OnGoToLineRequested;
+        viewModel.DuplicateLineRequested += OnDuplicateLineRequested;
+        viewModel.MoveLineRequested += OnMoveLineRequested;
+        viewModel.FormatDocumentRequested += OnFormatDocumentRequested;
+        viewModel.MinifyDocumentRequested += OnMinifyDocumentRequested;
+        viewModel.ToggleBookmarkRequested += OnToggleBookmark;
+        viewModel.NextBookmarkRequested += OnNextBookmark;
+        viewModel.PrevBookmarkRequested += OnPrevBookmark;
+        viewModel.ShowCompletionRequested += OnShowCompletion;
+        viewModel.ToggleSplitViewRequested += OnToggleSplitView;
+        viewModel.TextToolRequested += OnTextToolRequested;
+        viewModel.PrintRequested += OnPrintRequested;
+        viewModel.SelectNextOccurrenceRequested += OnSelectNextOccurrence;
+        viewModel.SelectAllOccurrencesRequested += OnSelectAllOccurrences;
+        viewModel.MacroStartRecordingRequested += OnMacroStartRecording;
+        viewModel.MacroStopRecordingRequested += OnMacroStopRecording;
+        viewModel.MacroPlaybackRequested += OnMacroPlayback;
+        viewModel.PropertyChanged += OnMainVmPropertyChanged;
+    }
+
+    private void UnsubscribeFromMainViewModel(MainViewModel viewModel)
+    {
+        viewModel.FindRequested -= OnFindRequested;
+        viewModel.ReplaceRequested -= OnReplaceRequested;
+        viewModel.GoToLineRequested -= OnGoToLineRequested;
+        viewModel.DuplicateLineRequested -= OnDuplicateLineRequested;
+        viewModel.MoveLineRequested -= OnMoveLineRequested;
+        viewModel.FormatDocumentRequested -= OnFormatDocumentRequested;
+        viewModel.MinifyDocumentRequested -= OnMinifyDocumentRequested;
+        viewModel.ToggleBookmarkRequested -= OnToggleBookmark;
+        viewModel.NextBookmarkRequested -= OnNextBookmark;
+        viewModel.PrevBookmarkRequested -= OnPrevBookmark;
+        viewModel.ShowCompletionRequested -= OnShowCompletion;
+        viewModel.ToggleSplitViewRequested -= OnToggleSplitView;
+        viewModel.TextToolRequested -= OnTextToolRequested;
+        viewModel.PrintRequested -= OnPrintRequested;
+        viewModel.SelectNextOccurrenceRequested -= OnSelectNextOccurrence;
+        viewModel.SelectAllOccurrencesRequested -= OnSelectAllOccurrences;
+        viewModel.MacroStartRecordingRequested -= OnMacroStartRecording;
+        viewModel.MacroStopRecordingRequested -= OnMacroStopRecording;
+        viewModel.MacroPlaybackRequested -= OnMacroPlayback;
+        viewModel.PropertyChanged -= OnMainVmPropertyChanged;
     }
 
     private void ConfigureServices()
@@ -391,10 +478,16 @@ public partial class EditorHost : UserControl
         _replaceToggle = _searchPanel.Template.FindName("PART_toggleReplace", _searchPanel) as System.Windows.Controls.Primitives.ToggleButton;
 
         if (_searchPanel.Template.FindName("PART_replaceButton", _searchPanel) is System.Windows.Controls.Button replaceBtn)
+        {
+            replaceBtn.Click -= ReplaceButton_Click;
             replaceBtn.Click += ReplaceButton_Click;
+        }
 
         if (_searchPanel.Template.FindName("PART_replaceAllButton", _searchPanel) is System.Windows.Controls.Button replaceAllBtn)
+        {
+            replaceAllBtn.Click -= ReplaceAllButton_Click;
             replaceAllBtn.Click += ReplaceAllButton_Click;
+        }
     }
 
     private void ReplaceButton_Click(object sender, RoutedEventArgs e)
@@ -824,12 +917,22 @@ public partial class EditorHost : UserControl
     }
 
     // --- Line Filters ---
-    private void OnLineFiltersChanged()
+    private async void OnLineFiltersChanged()
     {
-        Dispatcher.Invoke(() =>
+        await RefreshLineFiltersAsync();
+    }
+
+    private Task RefreshLineFiltersAsync()
+    {
+        return _filterRefreshCoordinator.RunAsync(async cancellationToken =>
         {
-            RecomputeFilterCache();
-            ApplyFilterFolding();
+            cancellationToken.ThrowIfCancellationRequested();
+            await Dispatcher.InvokeAsync(() =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                RecomputeFilterCache();
+                ApplyFilterFolding();
+            });
         });
     }
 
@@ -1034,40 +1137,164 @@ public partial class EditorHost : UserControl
         }
         else
         {
+            CancelExternalReload();
             _fileWatcher.StopWatching();
         }
     }
 
     private async void OnFileWatcherChanged(object? sender, string filePath)
     {
-        // Small delay to let the writing process finish
-        await Task.Delay(200);
+        _externalChangeTracker.Record(filePath);
+        if (Interlocked.CompareExchange(ref _externalChangeActive, 1, 0) != 0)
+            return;
 
-        await Dispatcher.InvokeAsync(async () =>
+        var reloadCts = new CancellationTokenSource();
+        var cancellationToken = reloadCts.Token;
+        var previous = Interlocked.Exchange(ref _externalReloadCts, reloadCts);
+        previous?.Cancel();
+        previous?.Dispose();
+        var promptDeclined = false;
+        ExternalReloadDecision? approvedDecision = null;
+
+        try
         {
-            if (_currentVm == null || _currentVm.FilePath != filePath) return;
+            do
+            {
+                await Task.Delay(200, cancellationToken);
 
-            try
-            {
-                var content = await _fileSystemService!.ReadAllTextAsync(filePath);
-                TextEditor.Text = content;
-                // Scroll to bottom (tail mode)
-                TextEditor.ScrollToEnd();
+                var change = _externalChangeTracker.Capture(filePath);
+                filePath = change.FilePath;
+                var decision = approvedDecision is { } approval &&
+                               string.Equals(
+                                   approval.ViewModel?.FilePath,
+                                   filePath,
+                                   StringComparison.OrdinalIgnoreCase)
+                    ? approval
+                    : await Dispatcher.InvokeAsync(() =>
+                        GetExternalReloadDecision(filePath));
 
-                SetStatus($"Auto-reloaded: {_fileSystemService.GetFileName(filePath)}");
+                if (decision.WasPrompted && decision.ShouldReload)
+                    approvedDecision = decision;
+
+                if (decision.ShouldReload)
+                {
+                    var content = await _fileSystemService!.ReadAllTextAsync(filePath);
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    var contentApplied = false;
+                    var generationCurrent = await Dispatcher.InvokeAsync(() =>
+                        _externalChangeTracker.TryApply(change.Generation, () =>
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var vm = _currentVm;
+                        if (vm == null ||
+                            !IsTextMode(vm) ||
+                            !ReferenceEquals(vm, decision.ViewModel) ||
+                            !string.Equals(vm.FilePath, filePath, StringComparison.OrdinalIgnoreCase))
+                            return;
+
+                        if (!string.Equals(vm.Content, decision.ContentSnapshot, StringComparison.Ordinal))
+                        {
+                            SetStatus($"External update not loaded because the buffer changed: {vm.FileName}");
+                            return;
+                        }
+
+                        vm.ReplaceContentFromDisk(content);
+                        contentApplied = true;
+                        TextEditor.ScrollToEnd();
+                        SetStatus($"Auto-reloaded: {_fileSystemService.GetFileName(filePath)}");
+                    }));
+
+                    if (!generationCurrent)
+                        continue;
+                    if (!contentApplied)
+                        break;
+
+                    approvedDecision = null;
+                }
+
+                if (decision.WasPrompted && !decision.ShouldReload)
+                {
+                    promptDeclined = true;
+                    _externalChangeTracker.TakePendingPath();
+                    break;
+                }
+
+                var pendingPath = _externalChangeTracker.TakePendingPath();
+                if (pendingPath == null)
+                    break;
+                filePath = pendingPath;
             }
-            catch (IOException ex)
-            {
-                Trace.TraceWarning($"Auto-reload skipped for '{filePath}': {ex.Message}");
-                SetStatus($"Auto-reload skipped; file is unavailable: {_fileSystemService!.GetFileName(filePath)}");
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                Trace.TraceWarning($"Auto-reload skipped for '{filePath}': {ex.Message}");
-                SetStatus($"Auto-reload skipped; access denied: {_fileSystemService!.GetFileName(filePath)}");
-            }
-        });
+            while (true);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (IOException ex)
+        {
+            Trace.TraceWarning($"Auto-reload skipped for '{filePath}': {ex.Message}");
+            await Dispatcher.InvokeAsync(() =>
+                SetStatus($"Auto-reload skipped; file is unavailable: {_fileSystemService!.GetFileName(filePath)}"));
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            Trace.TraceWarning($"Auto-reload skipped for '{filePath}': {ex.Message}");
+            await Dispatcher.InvokeAsync(() =>
+                SetStatus($"Auto-reload skipped; access denied: {_fileSystemService!.GetFileName(filePath)}"));
+        }
+        finally
+        {
+            Interlocked.CompareExchange(ref _externalReloadCts, null, reloadCts);
+            reloadCts.Dispose();
+            Volatile.Write(ref _externalChangeActive, 0);
+            var pendingPath = _externalChangeTracker.TakePendingPath();
+            if (!promptDeclined && pendingPath != null && CanAutoReloadPath(pendingPath))
+                OnFileWatcherChanged(this, pendingPath);
+        }
     }
+
+    private ExternalReloadDecision GetExternalReloadDecision(string filePath)
+    {
+        var vm = _currentVm;
+        if (vm == null ||
+            !IsTextMode(vm) ||
+            !string.Equals(vm.FilePath, filePath, StringComparison.OrdinalIgnoreCase))
+            return new ExternalReloadDecision(false, false, null, null);
+
+        if (!vm.IsModified)
+            return new ExternalReloadDecision(true, false, vm, vm.Content);
+
+        var result = _dialogService!.ShowMessage(
+            $"{vm.FileName} changed on disk. Reload it and discard your unsaved changes?",
+            "File Changed",
+            DialogButtons.YesNo,
+            DialogIcon.Warning);
+        if (result == Services.Interfaces.DialogResult.Yes)
+            return new ExternalReloadDecision(true, true, vm, vm.Content);
+
+        SetStatus($"Kept unsaved changes; external update not loaded: {vm.FileName}");
+        return new ExternalReloadDecision(false, true, vm, vm.Content);
+    }
+
+    private void CancelExternalReload()
+    {
+        _externalChangeTracker.Invalidate();
+        var reloadCts = Interlocked.Exchange(ref _externalReloadCts, null);
+        reloadCts?.Cancel();
+        reloadCts?.Dispose();
+    }
+
+    private bool CanAutoReloadPath(string filePath) =>
+        _isRuntimeAttached &&
+        _mainViewModel?.IsAutoReloadEnabled == true &&
+        IsTextMode(_currentVm) &&
+        string.Equals(_currentVm.FilePath, filePath, StringComparison.OrdinalIgnoreCase);
+
+    private readonly record struct ExternalReloadDecision(
+        bool ShouldReload,
+        bool WasPrompted,
+        EditorTabViewModel? ViewModel,
+        string? ContentSnapshot);
 
     private bool IsActiveEditorHost()
     {
@@ -1203,6 +1430,7 @@ public partial class EditorHost : UserControl
 
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
+        CancelExternalReload();
         if (e.OldValue is EditorTabViewModel oldVm)
         {
             oldVm.PropertyChanged -= OnViewModelPropertyChanged;
@@ -1311,6 +1539,7 @@ public partial class EditorHost : UserControl
     {
         UninstallFolding();
         DocumentMap.DetachEditor();
+        CancelExternalReload();
         _fileWatcher.StopWatching();
     }
 
@@ -1384,10 +1613,13 @@ public partial class EditorHost : UserControl
         if (_mainViewModel?.IsAutoReloadEnabled == true && !string.IsNullOrEmpty(vm.FilePath))
             _fileWatcher.StartWatching(vm.FilePath);
         else
+        {
+            CancelExternalReload();
             _fileWatcher.StopWatching();
+        }
     }
 
-    private void TextEditor_TextChanged(object? sender, EventArgs e)
+    private async void TextEditor_TextChanged(object? sender, EventArgs e)
     {
         var vm = _currentVm;
         if (IsTextMode(vm))
@@ -1395,12 +1627,8 @@ public partial class EditorHost : UserControl
             vm.Content = TextEditor.Text;
 
             // Refresh filter cache if filters are active
-            if (_lineFilterService?.HasActiveFilters == true)
-            {
-                RecomputeFilterCache();
-                if (_isFilterFoldingActive)
-                    ApplyFilterFolding();
-            }
+            if (_isRuntimeAttached && _lineFilterService?.HasActiveFilters == true)
+                await RefreshLineFiltersAsync();
         }
     }
 

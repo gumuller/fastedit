@@ -5,6 +5,7 @@ using System.IO.MemoryMappedFiles;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using FastEdit.Core.Search;
 
 namespace FastEdit.Core.LargeFile;
 
@@ -305,15 +306,33 @@ public sealed class LargeFileDocument : IDisposable
         IProgress<double>? onProgress,
         CancellationToken ct)
     {
-        return await Task.Run(() => FindMatchingLinesSync(predicate, maxResults, onProgress, ct), ct)
+        var result = await FindMatchingLinesBoundedAsync(predicate, maxResults, onProgress, ct)
+            .ConfigureAwait(false);
+        return result.Results.ToList();
+    }
+
+    public async Task<BoundedSearchResult<long>> FindMatchingLinesBoundedAsync(
+        Func<string, bool> predicate,
+        int maxResults,
+        IProgress<double>? onProgress,
+        CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(predicate);
+        if (maxResults <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxResults));
+
+        return await Task.Run(
+                () => FindMatchingLinesSync(predicate, maxResults, onProgress, ct),
+                ct)
             .ConfigureAwait(false);
     }
 
-    private List<long> FindMatchingLinesSync(Func<string, bool> predicate, int maxResults,
+    private BoundedSearchResult<long> FindMatchingLinesSync(Func<string, bool> predicate, int maxResults,
         IProgress<double>? onProgress, CancellationToken ct)
     {
         var results = new List<long>();
-        if (!HasBuiltIndex || FileSize == 0 || _accessor == null) return results;
+        if (!HasBuiltIndex || FileSize == 0 || _accessor == null)
+            return new BoundedSearchResult<long>(results, false);
 
         var layout = EncodingLayout.From(Encoding);
 
@@ -341,7 +360,7 @@ public sealed class LargeFileDocument : IDisposable
                     int byteLen = i - lineStart;
                     var line = DecodeBufferedLine(buf, lineStart, byteLen, carry, layout);
                     if (AddMatchingLine(results, currentLine, line, predicate, maxResults))
-                        return results;
+                        return new BoundedSearchResult<long>(results, true);
 
                     currentLine++;
                     lineStart = i + layout.Stride;
@@ -370,11 +389,12 @@ public sealed class LargeFileDocument : IDisposable
         if (carry.Count > 0)
         {
             var line = DecodeLine(carry.ToArray(), 0, carry.Count, layout);
-            AddMatchingLine(results, currentLine, line, predicate, maxResults);
+            if (AddMatchingLine(results, currentLine, line, predicate, maxResults))
+                return new BoundedSearchResult<long>(results, true);
         }
 
         onProgress?.Report(1.0);
-        return results;
+        return new BoundedSearchResult<long>(results, false);
     }
 
     private string DecodeBufferedLine(byte[] buf, int offset, int length, List<byte> carry, EncodingLayout layout)
@@ -398,8 +418,11 @@ public sealed class LargeFileDocument : IDisposable
         if (!predicate(line))
             return false;
 
+        if (results.Count >= maxResults)
+            return true;
+
         results.Add(lineNumber);
-        return results.Count >= maxResults;
+        return false;
     }
 
     private string DecodeLine(byte[] buf, int offset, int length, EncodingLayout layout)

@@ -44,6 +44,7 @@ public partial class LargeFileViewer : UserControl
     // Filter support
     private IReadOnlyList<LineFilter>? _filters;
     private CancellationTokenSource? _filterScanCts;
+    private bool _filterResultsTruncated;
 
     public LargeFileViewer()
     {
@@ -173,8 +174,8 @@ public partial class LargeFileViewer : UserControl
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
         UnsubscribeFromFilterService();
-        _filterScanCts?.Cancel();
-        _searchCts?.Cancel();
+        CancelFilterScan();
+        CancelSearch();
     }
 
     private static void OnFilterServicePropertyChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
@@ -234,8 +235,7 @@ public partial class LargeFileViewer : UserControl
         }
         else
         {
-            if (_viewport.IsFiltered) ClearShowOnly();
-            Render();
+            ClearShowOnly();
         }
     }
 
@@ -249,11 +249,12 @@ public partial class LargeFileViewer : UserControl
         if (ReferenceEquals(_doc, document))
             return;
 
-        _searchCts?.Cancel();
-        _filterScanCts?.Cancel();
+        CancelSearch();
+        CancelFilterScan();
         _doc = document;
         _searchMatches = null;
         _currentMatchIndex = -1;
+        _filterResultsTruncated = false;
         _viewport.Configure(_doc?.TotalLines ?? 0, _viewport.VisibleLineCount);
         _viewport.SetTopLine(1);
         _viewport.ClearShowOnly();
@@ -299,7 +300,11 @@ public partial class LargeFileViewer : UserControl
     private void UpdateFooter()
     {
         if (_doc == null) { FooterText.Text = ""; return; }
-        string mode = _viewport.IsFiltered ? $"Filtered: {_viewport.FilteredLineCount:N0} / " : "";
+        string mode = _viewport.IsFiltered
+            ? _filterResultsTruncated
+                ? $"Filtered: {_viewport.FilteredLineCount:N0} matches (truncated at {LargeFileFilterPolicy.MaxShowOnlyLineResults:N0}) / "
+                : $"Filtered: {_viewport.FilteredLineCount:N0} / "
+            : "";
         FooterText.Text = $"{mode}{_doc.TotalLines:N0} lines • {ByteSizeFormatter.Format(_doc.FileSize)} • {_doc.EncodingDisplayName} • Read-only (large file viewer)";
     }
 
@@ -368,6 +373,7 @@ public partial class LargeFileViewer : UserControl
         }
         else if (e.Key != Key.LeftShift && e.Key != Key.RightShift)
         {
+            CancelSearch();
             _searchMatches = null; // invalidate on text change
             _currentMatchIndex = -1;
             FindStatusText.Text = "";
@@ -377,21 +383,35 @@ public partial class LargeFileViewer : UserControl
     private async Task RunSearchAsync()
     {
         if (_doc == null || string.IsNullOrEmpty(FindBox.Text)) return;
-        _searchCts?.Cancel();
-        _searchCts = new CancellationTokenSource();
+        CancelSearch();
+        var searchCts = new CancellationTokenSource();
+        _searchCts = searchCts;
         FindStatusText.Text = "Searching…";
         try
         {
-            _searchMatches = await _doc.SearchAsync(
+            var matches = await _doc.SearchAsync(
                 FindBox.Text,
                 CaseSensitiveBox.IsChecked == true,
                 maxResults: 100_000,
                 onProgress: null,
-                ct: _searchCts.Token);
+                ct: searchCts.Token);
+            if (!ReferenceEquals(_searchCts, searchCts))
+                return;
+
+            _searchMatches = matches;
             _currentMatchIndex = -1;
             FindStatusText.Text = $"{_searchMatches.Count:N0} matches";
         }
-        catch (OperationCanceledException) { FindStatusText.Text = ""; }
+        catch (OperationCanceledException) when (searchCts.IsCancellationRequested)
+        {
+            if (ReferenceEquals(_searchCts, searchCts))
+                FindStatusText.Text = "";
+        }
+        finally
+        {
+            if (ReferenceEquals(Interlocked.CompareExchange(ref _searchCts, null, searchCts), searchCts))
+                searchCts.Dispose();
+        }
     }
 
     private async void FindNext_Click(object sender, RoutedEventArgs e)
@@ -454,7 +474,7 @@ public partial class LargeFileViewer : UserControl
         var activeFilters = LargeFileFilterPolicy.GetActiveFilters(filters);
         if (activeFilters.Count == 0) { ClearShowOnly(); return; }
 
-        _filterScanCts?.Cancel();
+        CancelFilterScan();
         var scanCts = new CancellationTokenSource();
         _filterScanCts = scanCts;
         var ct = scanCts.Token;
@@ -463,38 +483,66 @@ public partial class LargeFileViewer : UserControl
         FooterText.Text = "Scanning for filter matches… 0%";
         var footerProgress = new Progress<double>(p =>
         {
+            if (!ReferenceEquals(_filterScanCts, scanCts))
+                return;
+
             FooterText.Text = $"Scanning for filter matches… {p * 100:0}%";
             progress?.Report(p);
         });
 
         try
         {
-            var result = await _doc.FindMatchingLinesAsync(
+            var result = await _doc.FindMatchingLinesBoundedAsync(
                 predicate: line => LargeFileFilterPolicy.ShouldShowLine(line, activeFilters),
-                maxResults: int.MaxValue,
+                maxResults: LargeFileFilterPolicy.MaxShowOnlyLineResults,
                 onProgress: footerProgress,
                 ct: ct);
 
             if (!ReferenceEquals(_filterScanCts, scanCts))
                 return;
 
-            _viewport.ShowOnly(result);
+            _filterResultsTruncated = result.IsTruncated;
+            _viewport.ShowOnly(result.Results);
             UpdateScrollBar();
             UpdateFooter();
             Render();
         }
         catch (OperationCanceledException)
         {
-            UpdateFooter();
+            if (ReferenceEquals(_filterScanCts, scanCts))
+                UpdateFooter();
+        }
+        finally
+        {
+            if (ReferenceEquals(
+                    Interlocked.CompareExchange(ref _filterScanCts, null, scanCts),
+                    scanCts))
+                scanCts.Dispose();
         }
     }
 
     public void ClearShowOnly()
     {
+        CancelFilterScan();
+        _filterResultsTruncated = false;
         _viewport.ClearShowOnly();
         UpdateScrollBar();
         UpdateFooter();
         Render();
+    }
+
+    private void CancelSearch()
+    {
+        var searchCts = Interlocked.Exchange(ref _searchCts, null);
+        searchCts?.Cancel();
+        searchCts?.Dispose();
+    }
+
+    private void CancelFilterScan()
+    {
+        var filterScanCts = Interlocked.Exchange(ref _filterScanCts, null);
+        filterScanCts?.Cancel();
+        filterScanCts?.Dispose();
     }
 
     private (Brush bg, Brush fg)? GetFilterBrushesFor(string line)

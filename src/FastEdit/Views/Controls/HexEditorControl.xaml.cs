@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -17,8 +18,10 @@ public partial class HexEditorControl : UserControl
     private const double HexFontSize = 14;
 
     private EditorTabViewModel? _viewModel;
+    private VirtualizedByteBuffer? _subscribedByteBuffer;
     private long _scrollPosition;
     private int _visibleRows;
+    private CancellationTokenSource? _searchCts;
 
     // Selection and editing
     private long _selectedOffset = -1;
@@ -53,8 +56,20 @@ public partial class HexEditorControl : UserControl
         DataContextChanged += OnDataContextChanged;
         SizeChanged += OnSizeChanged;
 
-        // Subscribe to theme changes
-        Loaded += (s, e) => RefreshBrushes();
+        Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        SubscribeToByteBuffer(_viewModel?.ByteBuffer);
+        RefreshBrushes();
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        CancelSearch();
+        SubscribeToByteBuffer(null);
     }
 
     private void RefreshBrushes()
@@ -74,7 +89,10 @@ public partial class HexEditorControl : UserControl
 
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
+        CancelSearch();
+        ClearSearchResults();
         _viewModel = e.NewValue as EditorTabViewModel;
+        SubscribeToByteBuffer(IsLoaded ? _viewModel?.ByteBuffer : null);
         UpdateScrollBar();
         RefreshBrushes();
         RenderHex();
@@ -349,6 +367,7 @@ public partial class HexEditorControl : UserControl
     private List<long> _searchResults = new();
     private int _searchResultIndex = -1;
     private int _searchPatternLength = 0;
+    private bool _searchResultsTruncated;
 
     private bool IsInSearchResult(long offset)
     {
@@ -392,18 +411,22 @@ public partial class HexEditorControl : UserControl
 
     public void HideSearch()
     {
+        CancelSearch();
         HexSearchBar.Visibility = Visibility.Collapsed;
         HexSearchBox.TextChanged -= HexSearchBox_TextChanged;
-        _searchResults.Clear();
-        _searchResultIndex = -1;
-        _searchPatternLength = 0;
+        ClearSearchResults();
         HexSearchStatus.Text = "";
         RenderHex();
     }
 
     private void HexSearchBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
     {
+        CancelSearch();
+        ClearSearchResults();
+        _lastSearchQuery = "";
+        HexSearchStatus.Text = "";
         UpdateSearchModeIndicator();
+        RenderHex();
     }
 
     private void UpdateSearchModeIndicator()
@@ -415,14 +438,14 @@ public partial class HexEditorControl : UserControl
             SearchModeText.Text = "HEX";
     }
 
-    private void HexSearchBox_KeyDown(object sender, KeyEventArgs e)
+    private async void HexSearchBox_KeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key == Key.Enter)
         {
             if (Keyboard.Modifiers == ModifierKeys.Shift)
-                SearchPrevious();
+                await SearchPreviousAsync();
             else
-                SearchNext();
+                await SearchNextAsync();
             e.Handled = true;
         }
         else if (e.Key == Key.Escape)
@@ -432,8 +455,8 @@ public partial class HexEditorControl : UserControl
         }
     }
 
-    private void HexSearchNext_Click(object sender, RoutedEventArgs e) => SearchNext();
-    private void HexSearchPrev_Click(object sender, RoutedEventArgs e) => SearchPrevious();
+    private async void HexSearchNext_Click(object sender, RoutedEventArgs e) => await SearchNextAsync();
+    private async void HexSearchPrev_Click(object sender, RoutedEventArgs e) => await SearchPreviousAsync();
     private void HexSearchClose_Click(object sender, RoutedEventArgs e) => HideSearch();
 
     private byte[]? ParseSearchQuery(string query)
@@ -441,53 +464,73 @@ public partial class HexEditorControl : UserControl
         return HexSearchQueryParser.Parse(query);
     }
 
-    private void PerformSearch()
+    private async Task<bool> PerformSearchAsync()
     {
-        _searchResults.Clear();
-        _searchResultIndex = -1;
-        _searchPatternLength = 0;
+        CancelSearch();
+        ClearSearchResults();
 
-        var pattern = ParseSearchQuery(HexSearchBox.Text);
+        var query = HexSearchBox.Text;
+        var pattern = ParseSearchQuery(query);
         if (pattern == null || pattern.Length == 0 || _viewModel?.ByteBuffer == null)
         {
             HexSearchStatus.Text = "No results";
-            return;
+            return false;
         }
 
+        var searchCts = new CancellationTokenSource();
+        _searchCts = searchCts;
+        _lastSearchQuery = query;
         _searchPatternLength = pattern.Length;
-
         var buffer = _viewModel.ByteBuffer;
-        var length = buffer.Length;
-
-        for (long i = 0; i <= length - pattern.Length; i++)
+        HexSearchStatus.Text = "Searching…";
+        try
         {
-            bool match = true;
-            for (int j = 0; j < pattern.Length; j++)
-            {
-                if (buffer.GetByte(i + j) != pattern[j])
-                {
-                    match = false;
-                    break;
-                }
-            }
-            if (match)
-            {
-                _searchResults.Add(i);
-                if (_searchResults.Count > 10000) break; // limit
-            }
-        }
+            var result = await buffer.SearchAsync(
+                pattern,
+                VirtualizedByteBuffer.DefaultSearchResultLimit,
+                progress: null,
+                searchCts.Token);
+            if (!ReferenceEquals(_searchCts, searchCts) ||
+                !string.Equals(HexSearchBox.Text, query, StringComparison.Ordinal))
+                return false;
 
-        HexSearchStatus.Text = _searchResults.Count > 0
-            ? $"{_searchResults.Count} match(es)"
-            : "No results";
+            _searchResults = result.Results.ToList();
+            _searchResultsTruncated = result.IsTruncated;
+            HexSearchStatus.Text = _searchResults.Count > 0
+                ? _searchResultsTruncated
+                    ? $"{_searchResults.Count:N0} matches (result limit reached)"
+                    : $"{_searchResults.Count:N0} match(es)"
+                : "No results";
+            RenderHex();
+            return _searchResults.Count > 0;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+        catch (ObjectDisposedException)
+        {
+            HexSearchStatus.Text = "Search unavailable";
+            return false;
+        }
+        catch (IOException)
+        {
+            HexSearchStatus.Text = "Search unavailable";
+            return false;
+        }
+        finally
+        {
+            if (ReferenceEquals(Interlocked.CompareExchange(ref _searchCts, null, searchCts), searchCts))
+                searchCts.Dispose();
+        }
     }
 
-    private void SearchNext()
+    private async Task SearchNextAsync()
     {
         if (_searchResults.Count == 0 || HexSearchBox.Text != _lastSearchQuery)
         {
-            _lastSearchQuery = HexSearchBox.Text;
-            PerformSearch();
+            if (!await PerformSearchAsync())
+                return;
         }
 
         if (_searchResults.Count == 0) return;
@@ -496,12 +539,12 @@ public partial class HexEditorControl : UserControl
         NavigateToResult();
     }
 
-    private void SearchPrevious()
+    private async Task SearchPreviousAsync()
     {
         if (_searchResults.Count == 0 || HexSearchBox.Text != _lastSearchQuery)
         {
-            _lastSearchQuery = HexSearchBox.Text;
-            PerformSearch();
+            if (!await PerformSearchAsync())
+                return;
         }
 
         if (_searchResults.Count == 0) return;
@@ -519,7 +562,46 @@ public partial class HexEditorControl : UserControl
 
         _selectedOffset = _searchResults[_searchResultIndex];
         EnsureOffsetVisible(_selectedOffset);
-        HexSearchStatus.Text = $"{_searchResultIndex + 1} of {_searchResults.Count}";
+        HexSearchStatus.Text = _searchResultsTruncated
+            ? $"{_searchResultIndex + 1} of {_searchResults.Count:N0} (truncated)"
+            : $"{_searchResultIndex + 1} of {_searchResults.Count:N0}";
+        RenderHex();
+    }
+
+    private void ClearSearchResults()
+    {
+        _searchResults.Clear();
+        _searchResultIndex = -1;
+        _searchPatternLength = 0;
+        _searchResultsTruncated = false;
+    }
+
+    private void CancelSearch()
+    {
+        var searchCts = Interlocked.Exchange(ref _searchCts, null);
+        searchCts?.Cancel();
+        searchCts?.Dispose();
+    }
+
+    private void SubscribeToByteBuffer(VirtualizedByteBuffer? byteBuffer)
+    {
+        if (ReferenceEquals(_subscribedByteBuffer, byteBuffer))
+            return;
+
+        if (_subscribedByteBuffer != null)
+            _subscribedByteBuffer.ModificationsChanged -= OnByteBufferModificationsChanged;
+
+        _subscribedByteBuffer = byteBuffer;
+        if (_subscribedByteBuffer != null)
+            _subscribedByteBuffer.ModificationsChanged += OnByteBufferModificationsChanged;
+    }
+
+    private void OnByteBufferModificationsChanged(object? sender, EventArgs e)
+    {
+        CancelSearch();
+        ClearSearchResults();
+        _lastSearchQuery = "";
+        HexSearchStatus.Text = "";
         RenderHex();
     }
 }

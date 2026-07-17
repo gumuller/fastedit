@@ -174,6 +174,36 @@ public class EditorTabViewModelTests
         }
     }
 
+    [Fact]
+    public async Task Save_Binary_Raises_ModificationsChanged_On_Calling_Thread()
+    {
+        var path = Path.GetTempFileName();
+        EditorTabViewModel? sut = null;
+        try
+        {
+            await File.WriteAllBytesAsync(path, new byte[] { 0x00, 0x01, 0x02 });
+            sut = CreateSut();
+            await sut.LoadFileAsync(path);
+            Assert.Equal(FileOpenMode.Binary, sut.Mode);
+            var byteBuffer = Assert.IsType<FastEdit.Core.HexEngine.VirtualizedByteBuffer>(sut.ByteBuffer);
+            byteBuffer.SetByte(0, 0xFF);
+
+            var callingThread = Environment.CurrentManagedThreadId;
+            var notificationThread = -1;
+            byteBuffer.ModificationsChanged += (_, _) =>
+                notificationThread = Environment.CurrentManagedThreadId;
+
+            await sut.SaveCommand.ExecuteAsync(null);
+
+            Assert.Equal(callingThread, notificationThread);
+        }
+        finally
+        {
+            sut?.Dispose();
+            File.Delete(path);
+        }
+    }
+
     // --- SaveAs ---
 
     [Fact]
@@ -316,6 +346,20 @@ public class EditorTabViewModelTests
         sut.SetContentBaseline("loaded", isModified: false);
 
         Assert.Equal("loaded", sut.Content);
+        Assert.False(sut.IsModified);
+    }
+
+    [Fact]
+    public void ReplaceContentFromDisk_Establishes_Clean_External_Baseline()
+    {
+        var sut = CreateSut();
+        sut.FilePath = @"C:\test.txt";
+        sut.Content = "local edit";
+        Assert.True(sut.IsModified);
+
+        sut.ReplaceContentFromDisk("external content");
+
+        Assert.Equal("external content", sut.Content);
         Assert.False(sut.IsModified);
     }
 

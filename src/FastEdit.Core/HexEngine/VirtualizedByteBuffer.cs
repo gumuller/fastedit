@@ -1,4 +1,5 @@
 using System.IO.MemoryMappedFiles;
+using FastEdit.Core.Search;
 
 namespace FastEdit.Core.HexEngine;
 
@@ -11,13 +12,31 @@ public class VirtualizedByteBuffer : IDisposable
     private bool _useMemoryMapping;
     private readonly LruCache<long, byte[]> _pageCache;
     private readonly Dictionary<long, byte> _modifications = new();
+    private readonly object _modificationsLock = new();
+    private readonly object _streamLock = new();
+    private readonly object _searchLifecycleLock = new();
+    private readonly HashSet<ActiveSearch> _activeSearches = new();
+    private bool _saveInProgress;
     private bool _disposed;
 
     private const int PageSize = 64 * 1024;
     private const int MaxCachedPages = 16;
+    private const int SearchChunkSize = 64 * 1024;
+
+    /// <summary>
+    /// Default ceiling for exhaustive hex-search offsets (80 KB of raw offset storage).
+    /// </summary>
+    public const int DefaultSearchResultLimit = 10_000;
 
     public long Length => _fileLength;
-    public bool HasModifications => _modifications.Count > 0;
+    public bool HasModifications
+    {
+        get
+        {
+            lock (_modificationsLock)
+                return _modifications.Count > 0;
+        }
+    }
     public event EventHandler? ModificationsChanged;
 
     public VirtualizedByteBuffer(string filePath)
@@ -53,7 +72,8 @@ public class VirtualizedByteBuffer : IDisposable
         if (offset < 0 || offset >= _fileLength)
             return;
 
-        _modifications[offset] = value;
+        lock (_modificationsLock)
+            _modifications[offset] = value;
 
         // Update cached page if present
         long pageNumber = offset / PageSize;
@@ -71,8 +91,11 @@ public class VirtualizedByteBuffer : IDisposable
 
     public byte GetByte(long offset)
     {
-        if (_modifications.TryGetValue(offset, out var modifiedByte))
-            return modifiedByte;
+        lock (_modificationsLock)
+        {
+            if (_modifications.TryGetValue(offset, out var modifiedByte))
+                return modifiedByte;
+        }
 
         var bytes = GetBytes(offset, 1);
         return bytes.Length > 0 ? bytes[0] : (byte)0;
@@ -80,62 +103,79 @@ public class VirtualizedByteBuffer : IDisposable
 
     public bool IsModified(long offset)
     {
-        return _modifications.ContainsKey(offset);
+        lock (_modificationsLock)
+            return _modifications.ContainsKey(offset);
     }
 
     public void Save()
     {
-        if (_modifications.Count == 0)
-            return;
+        KeyValuePair<long, byte>[] modifications;
+        lock (_modificationsLock)
+        {
+            if (_modifications.Count == 0)
+                return;
 
-        // Write modifications to a temporary approach: close current handles,
-        // write changes, then reopen. Use local variables to ensure failure safety.
-        _memoryMappedFile?.Dispose();
-        _fileStream.Close();
+            modifications = _modifications.OrderBy(m => m.Key).ToArray();
+        }
 
+        var activeSearches = BeginSave();
         try
         {
-            using (var writeStream = new FileStream(_filePath, FileMode.Open, FileAccess.Write, FileShare.None))
+            Task.WaitAll(activeSearches.Select(search => search.Completion.Task).ToArray());
+
+            // Close current handles before taking the exclusive write handle.
+            _memoryMappedFile?.Dispose();
+            _fileStream.Close();
+
+            try
             {
-                foreach (var (offset, value) in _modifications.OrderBy(m => m.Key))
+                using (var writeStream = new FileStream(_filePath, FileMode.Open, FileAccess.Write, FileShare.None))
                 {
-                    writeStream.Position = offset;
-                    writeStream.WriteByte(value);
+                    foreach (var (offset, value) in modifications)
+                    {
+                        writeStream.Position = offset;
+                        writeStream.WriteByte(value);
+                    }
+                }
+
+                lock (_modificationsLock)
+                    _modifications.Clear();
+                _pageCache.Clear();
+            }
+            finally
+            {
+                // Always reopen the file stream and memory map so the instance remains usable
+                var newStream = new FileStream(
+                    _filePath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    bufferSize: PageSize,
+                    FileOptions.RandomAccess | FileOptions.Asynchronous);
+
+                _fileStream = newStream;
+                _fileLength = _fileStream.Length;
+
+                _useMemoryMapping = _fileLength > 1024 * 1024;
+                if (_useMemoryMapping)
+                {
+                    _memoryMappedFile = MemoryMappedFile.CreateFromFile(
+                        _fileStream,
+                        mapName: null,
+                        capacity: 0,
+                        MemoryMappedFileAccess.Read,
+                        HandleInheritability.None,
+                        leaveOpen: true);
+                }
+                else
+                {
+                    _memoryMappedFile = null;
                 }
             }
-
-            _modifications.Clear();
-            _pageCache.Clear();
         }
         finally
         {
-            // Always reopen the file stream and memory map so the instance remains usable
-            var newStream = new FileStream(
-                _filePath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                bufferSize: PageSize,
-                FileOptions.RandomAccess | FileOptions.Asynchronous);
-
-            _fileStream = newStream;
-            _fileLength = _fileStream.Length;
-
-            _useMemoryMapping = _fileLength > 1024 * 1024;
-            if (_useMemoryMapping)
-            {
-                _memoryMappedFile = MemoryMappedFile.CreateFromFile(
-                    _fileStream,
-                    mapName: null,
-                    capacity: 0,
-                    MemoryMappedFileAccess.Read,
-                    HandleInheritability.None,
-                    leaveOpen: true);
-            }
-            else
-            {
-                _memoryMappedFile = null;
-            }
+            EndSave();
         }
 
         ModificationsChanged?.Invoke(this, EventArgs.Empty);
@@ -143,9 +183,193 @@ public class VirtualizedByteBuffer : IDisposable
 
     public void DiscardModifications()
     {
-        _modifications.Clear();
+        lock (_modificationsLock)
+            _modifications.Clear();
         _pageCache.Clear();
         ModificationsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    public async Task<BoundedSearchResult<long>> SearchAsync(
+        ReadOnlyMemory<byte> pattern,
+        int maxResults,
+        IProgress<double>? progress,
+        CancellationToken cancellationToken)
+    {
+        if (pattern.IsEmpty)
+            return new BoundedSearchResult<long>(Array.Empty<long>(), false);
+        if (maxResults <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxResults));
+
+        var activeSearch = BeginSearch(cancellationToken);
+        var patternBytes = pattern.ToArray();
+        try
+        {
+            return await Task.Run(
+                    () => Search(patternBytes, maxResults, progress, activeSearch.Cancellation.Token),
+                    activeSearch.Cancellation.Token)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            EndSearch(activeSearch);
+        }
+    }
+
+    private ActiveSearch BeginSearch(CancellationToken cancellationToken)
+    {
+        var activeSearch = new ActiveSearch(
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken));
+        var registered = false;
+
+        try
+        {
+            lock (_searchLifecycleLock)
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                if (_saveInProgress)
+                    activeSearch.Cancellation.Cancel();
+                else
+                {
+                    _activeSearches.Add(activeSearch);
+                    registered = true;
+                }
+            }
+
+            activeSearch.Cancellation.Token.ThrowIfCancellationRequested();
+            return activeSearch;
+        }
+        catch
+        {
+            if (registered)
+                EndSearch(activeSearch);
+            else
+                activeSearch.Cancellation.Dispose();
+            throw;
+        }
+    }
+
+    private void EndSearch(ActiveSearch activeSearch)
+    {
+        lock (_searchLifecycleLock)
+            _activeSearches.Remove(activeSearch);
+
+        activeSearch.Completion.TrySetResult();
+        activeSearch.Cancellation.Dispose();
+    }
+
+    private ActiveSearch[] BeginSave()
+    {
+        lock (_searchLifecycleLock)
+        {
+            _saveInProgress = true;
+            var activeSearches = _activeSearches.ToArray();
+            foreach (var activeSearch in activeSearches)
+                activeSearch.Cancellation.Cancel();
+            return activeSearches;
+        }
+    }
+
+    private void EndSave()
+    {
+        lock (_searchLifecycleLock)
+            _saveInProgress = false;
+    }
+
+    private BoundedSearchResult<long> Search(
+        byte[] pattern,
+        int maxResults,
+        IProgress<double>? progress,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (pattern.LongLength > _fileLength)
+            return new BoundedSearchResult<long>(Array.Empty<long>(), false);
+
+        KeyValuePair<long, byte>[] modifications;
+        lock (_modificationsLock)
+            modifications = _modifications.OrderBy(pair => pair.Key).ToArray();
+
+        var results = new List<long>(Math.Min(maxResults, DefaultSearchResultLimit));
+        var overlap = pattern.Length - 1;
+        var buffer = new byte[checked(SearchChunkSize + overlap)];
+        long position = 0;
+        using var searchStream = new FileStream(
+            _filePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            bufferSize: SearchChunkSize,
+            FileOptions.RandomAccess | FileOptions.Asynchronous);
+
+        while (position <= _fileLength - pattern.Length)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var bytesToRead = (int)Math.Min(buffer.Length, _fileLength - position);
+            ReadSearchChunk(searchStream, position, buffer, bytesToRead);
+            ApplyModifications(buffer, bytesToRead, position, modifications);
+
+            var finalChunk = position + bytesToRead >= _fileLength;
+            var candidates = finalChunk
+                ? bytesToRead - pattern.Length + 1
+                : Math.Min(SearchChunkSize, bytesToRead - pattern.Length + 1);
+
+            for (var offset = 0; offset < candidates; offset++)
+            {
+                if ((offset & 0xFFF) == 0)
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                if (!buffer.AsSpan(offset, pattern.Length).SequenceEqual(pattern))
+                    continue;
+
+                if (results.Count >= maxResults)
+                    return new BoundedSearchResult<long>(results, true);
+
+                results.Add(position + offset);
+            }
+
+            position += candidates;
+            progress?.Report(Math.Min(1.0, (double)position / _fileLength));
+        }
+
+        progress?.Report(1.0);
+        return new BoundedSearchResult<long>(results, false);
+    }
+
+    private void ReadSearchChunk(
+        FileStream searchStream,
+        long position,
+        byte[] buffer,
+        int bytesToRead)
+    {
+        var totalRead = 0;
+        while (totalRead < bytesToRead)
+        {
+            var read = RandomAccess.Read(
+                searchStream.SafeFileHandle,
+                buffer.AsSpan(totalRead, bytesToRead - totalRead),
+                position + totalRead);
+            if (read == 0)
+                break;
+            totalRead += read;
+        }
+    }
+
+    private static void ApplyModifications(
+        byte[] buffer,
+        int bytesRead,
+        long position,
+        IReadOnlyList<KeyValuePair<long, byte>> modifications)
+    {
+        var end = position + bytesRead;
+        foreach (var modification in modifications)
+        {
+            if (modification.Key < position)
+                continue;
+            if (modification.Key >= end)
+                break;
+
+            buffer[(int)(modification.Key - position)] = modification.Value;
+        }
     }
 
     public ReadOnlySpan<byte> GetBytes(long offset, int count)
@@ -211,8 +435,11 @@ public class VirtualizedByteBuffer : IDisposable
         }
         else
         {
-            _fileStream.Position = pageOffset;
-            _ = _fileStream.Read(buffer, 0, bytesToRead);
+            lock (_streamLock)
+            {
+                _fileStream.Position = pageOffset;
+                _ = _fileStream.Read(buffer, 0, bytesToRead);
+            }
         }
 
         return buffer;
@@ -243,5 +470,12 @@ public class VirtualizedByteBuffer : IDisposable
         _pageCache.Clear();
 
         GC.SuppressFinalize(this);
+    }
+
+    private sealed class ActiveSearch(CancellationTokenSource cancellation)
+    {
+        public CancellationTokenSource Cancellation { get; } = cancellation;
+        public TaskCompletionSource Completion { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 }

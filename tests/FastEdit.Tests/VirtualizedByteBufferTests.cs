@@ -163,4 +163,79 @@ public class VirtualizedByteBufferTests : IDisposable
         Assert.Equal(data[100_000], buffer.GetByte(100_000));
         Assert.Equal(data[255_000], buffer.GetByte(255_000));
     }
+
+    [Fact]
+    public async Task SearchAsync_Finds_Match_Across_Page_Boundary()
+    {
+        var data = new byte[128 * 1024];
+        var pattern = new byte[] { 0xDE, 0xAD, 0xBE, 0xEF };
+        pattern.CopyTo(data, (64 * 1024) - 2);
+        var path = CreateTempFile(data);
+
+        using var buffer = new VirtualizedByteBuffer(path);
+        var result = await buffer.SearchAsync(
+            pattern,
+            VirtualizedByteBuffer.DefaultSearchResultLimit,
+            progress: null,
+            CancellationToken.None);
+
+        Assert.Equal(new long[] { (64 * 1024) - 2 }, result.Results);
+        Assert.False(result.IsTruncated);
+    }
+
+    [Fact]
+    public async Task SearchAsync_Enforces_Exact_Result_Limit()
+    {
+        var path = CreateTempFile(Enumerable.Repeat((byte)0xAA, 100).ToArray());
+        using var buffer = new VirtualizedByteBuffer(path);
+
+        var result = await buffer.SearchAsync(
+            new byte[] { 0xAA },
+            maxResults: 10,
+            progress: null,
+            CancellationToken.None);
+
+        Assert.Equal(10, result.Results.Count);
+        Assert.True(result.IsTruncated);
+    }
+
+    [Fact]
+    public async Task SearchAsync_Observes_Cancellation()
+    {
+        var path = CreateTempFile(new byte[128 * 1024]);
+        using var buffer = new VirtualizedByteBuffer(path);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => buffer.SearchAsync(
+                new byte[] { 0x00 },
+                VirtualizedByteBuffer.DefaultSearchResultLimit,
+                progress: null,
+                cts.Token));
+    }
+
+    [Fact]
+    public async Task Save_Cancels_Active_Search_Before_Exclusive_Write()
+    {
+        var path = Path.GetTempFileName();
+        using (var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None))
+            stream.SetLength(128L * 1024 * 1024);
+        _tempFiles.Add(path);
+
+        using var buffer = new VirtualizedByteBuffer(path);
+        var search = buffer.SearchAsync(
+            new byte[] { 0xFF },
+            VirtualizedByteBuffer.DefaultSearchResultLimit,
+            progress: null,
+            CancellationToken.None);
+
+        buffer.SetByte(0, 0x7F);
+        buffer.Save();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => search);
+        using var readStream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        Assert.Equal(0x7F, readStream.ReadByte());
+        Assert.False(buffer.HasModifications);
+    }
 }

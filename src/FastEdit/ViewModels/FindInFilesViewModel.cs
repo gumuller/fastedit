@@ -8,10 +8,19 @@ using FastEdit.Services.Interfaces;
 
 namespace FastEdit.ViewModels;
 
-public partial class FindInFilesViewModel : ObservableObject
+public partial class FindInFilesViewModel : ObservableObject, IDisposable
 {
+    /// <summary>
+    /// Maximum results retained in the UI collection for one search.
+    /// </summary>
+    public const int ResultLimit = 5_000;
+    private const int UiBatchSize = 50;
+
     private readonly IFileSystemService _fileSystemService;
     private readonly IDispatcherService _dispatcherService;
+    private CancellationTokenSource? _searchCts;
+    private int _searchVersion;
+    private bool _disposed;
 
     public FindInFilesViewModel(IFileSystemService fileSystemService, IDispatcherService dispatcherService)
     {
@@ -44,27 +53,53 @@ public partial class FindInFilesViewModel : ObservableObject
 
     public string? FolderPath { get; set; }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = true)]
     private async Task SearchAsync()
     {
         if (!CanSearch())
             return;
 
         var request = CreateSearchRequest();
+        var version = Interlocked.Increment(ref _searchVersion);
+        var searchCts = new CancellationTokenSource();
+        var token = searchCts.Token;
+        var previous = Interlocked.Exchange(ref _searchCts, searchCts);
+        previous?.Cancel();
         BeginSearch();
 
         try
         {
-            var summary = await Task.Run(() => RunSearch(request));
-            StatusText = $"Found {summary.MatchCount} match(es) in {summary.FileCount} file(s)";
+            var summary = await Task.Run(
+                () => RunSearch(request, version, searchCts, token),
+                token);
+
+            if (!IsCurrentSearch(version, searchCts))
+                return;
+
+            StatusText = summary.LimitReached
+                ? $"Found {summary.MatchCount:N0} match(es) in {summary.FileCount:N0} file(s) (result limit reached)"
+                : $"Found {summary.MatchCount:N0} match(es) in {summary.FileCount:N0} file(s)";
+        }
+        catch (OperationCanceledException) when (searchCts.IsCancellationRequested)
+        {
+            if (IsCurrentSearch(version, searchCts))
+                StatusText = "Search cancelled";
         }
         catch (Exception ex)
         {
-            StatusText = $"Error: {ex.Message}";
+            if (IsCurrentSearch(version, searchCts))
+                StatusText = $"Error: {ex.Message}";
         }
         finally
         {
-            IsSearching = false;
+            if (ReferenceEquals(
+                    Interlocked.CompareExchange(ref _searchCts, null, searchCts),
+                    searchCts))
+            {
+                IsSearching = false;
+            }
+
+            searchCts.Dispose();
         }
     }
 
@@ -87,21 +122,45 @@ public partial class FindInFilesViewModel : ObservableObject
         StatusText = "Searching...";
     }
 
-    private SearchSummary RunSearch(SearchRequest request)
+    private SearchSummary RunSearch(
+        SearchRequest request,
+        int version,
+        CancellationTokenSource searchCts,
+        CancellationToken token)
     {
         var matcher = CreateLineMatcher(request);
-        var files = EnumerateCandidateFiles(request).ToList();
+        var seenFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var batch = new List<SearchResult>(UiBatchSize);
         var matchCount = 0;
+        var fileCount = 0;
 
-        foreach (var file in files)
+        foreach (var file in EnumerateCandidateFiles(request))
         {
-            if (matchCount > 5000) break; // safety limit
-            if (ShouldSkipFile(file)) continue;
+            token.ThrowIfCancellationRequested();
+            if (!seenFiles.Add(file))
+                continue;
 
-            matchCount += AddFileMatches(file, request, matcher);
+            fileCount++;
+            if (ShouldSkipFile(file))
+                continue;
+
+            if (AddFileMatches(
+                    file,
+                    request,
+                    matcher,
+                    version,
+                    searchCts,
+                    token,
+                    batch,
+                    ref matchCount))
+            {
+                FlushBatch(batch, version, searchCts);
+                return new SearchSummary(matchCount, fileCount, true);
+            }
         }
 
-        return new SearchSummary(matchCount, files.Count);
+        FlushBatch(batch, version, searchCts);
+        return new SearchSummary(matchCount, fileCount, false);
     }
 
     private Func<string, bool> CreateLineMatcher(SearchRequest request)
@@ -119,29 +178,80 @@ public partial class FindInFilesViewModel : ObservableObject
 
     private IEnumerable<string> EnumerateCandidateFiles(SearchRequest request) =>
         SplitFileFilters(request.FileFilter)
-            .SelectMany(filter => EnumerateFilesSafely(request.FolderPath, filter))
-            .Distinct();
+            .SelectMany(filter => EnumerateFilesSafely(request.FolderPath, filter));
 
     private static IEnumerable<string> SplitFileFilters(string fileFilter)
     {
         var filters = fileFilter.Split(';', '|', ',')
             .Select(f => f.Trim())
             .Where(f => !string.IsNullOrEmpty(f))
-            .ToList();
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
-        return filters.Count == 0 ? ["*.*"] : filters;
+        return filters.Length == 0 ? ["*.*"] : filters;
     }
 
     private IEnumerable<string> EnumerateFilesSafely(string folderPath, string filter)
     {
+        IEnumerable<string> files;
         try
         {
-            return _fileSystemService.EnumerateFiles(folderPath, filter, recursive: true).ToList();
+            files = _fileSystemService.EnumerateFiles(folderPath, filter, recursive: true);
         }
         catch (Exception ex) when (IsSkippableFileAccessException(ex))
         {
             return [];
         }
+
+        return EnumerateSafely(files);
+    }
+
+    private static IEnumerable<string> EnumerateSafely(IEnumerable<string> files)
+    {
+        if (!TryGetEnumerator(files, out var enumerator))
+            yield break;
+
+        using (enumerator)
+        {
+            while (TryMoveNext(enumerator, out var file))
+                yield return file;
+        }
+    }
+
+    private static bool TryGetEnumerator(
+        IEnumerable<string> files,
+        out IEnumerator<string> enumerator)
+    {
+        try
+        {
+            enumerator = files.GetEnumerator();
+            return true;
+        }
+        catch (Exception ex) when (IsSkippableFileAccessException(ex))
+        {
+            enumerator = null!;
+            return false;
+        }
+    }
+
+    private static bool TryMoveNext(
+        IEnumerator<string> enumerator,
+        out string file)
+    {
+        try
+        {
+            if (enumerator.MoveNext())
+            {
+                file = enumerator.Current;
+                return true;
+            }
+        }
+        catch (Exception ex) when (IsSkippableFileAccessException(ex))
+        {
+        }
+
+        file = string.Empty;
+        return false;
     }
 
     private bool ShouldSkipFile(string file)
@@ -159,48 +269,77 @@ public partial class FindInFilesViewModel : ObservableObject
         }
     }
 
-    private int AddFileMatches(string file, SearchRequest request, Func<string, bool> matcher)
+    private bool AddFileMatches(
+        string file,
+        SearchRequest request,
+        Func<string, bool> matcher,
+        int version,
+        CancellationTokenSource searchCts,
+        CancellationToken token,
+        List<SearchResult> batch,
+        ref int matchCount)
     {
         try
         {
-            var lines = _fileSystemService.ReadLines(file).ToList();
-            var matches = CreateSearchResults(file, request, lines, matcher);
+            var lineNumber = 0;
+            foreach (var line in _fileSystemService.ReadLines(file))
+            {
+                token.ThrowIfCancellationRequested();
+                lineNumber++;
+                if (!matcher(line))
+                    continue;
 
-            foreach (var result in matches)
-                _dispatcherService.Invoke(() => Results.Add(result));
+                batch.Add(CreateSearchResult(file, request, line, lineNumber));
+                matchCount++;
+                if (batch.Count >= UiBatchSize)
+                    FlushBatch(batch, version, searchCts);
 
-            return matches.Count;
+                if (matchCount >= ResultLimit)
+                    return true;
+            }
+
+            return false;
         }
         catch (Exception ex) when (IsSkippableFileAccessException(ex))
         {
-            return 0;
+            return false;
         }
     }
 
-    private static List<SearchResult> CreateSearchResults(
+    private static SearchResult CreateSearchResult(
         string file,
         SearchRequest request,
-        IReadOnlyList<string> lines,
-        Func<string, bool> matcher)
+        string line,
+        int lineNumber)
     {
-        var matches = new List<SearchResult>();
-
-        for (var i = 0; i < lines.Count; i++)
+        return new SearchResult
         {
-            if (!matcher(lines[i]))
-                continue;
+            FilePath = file,
+            RelativePath = Path.GetRelativePath(request.FolderPath, file),
+            LineNumber = lineNumber,
+            LineText = line.TrimStart(),
+            FileName = Path.GetFileName(file)
+        };
+    }
 
-            matches.Add(new SearchResult
-            {
-                FilePath = file,
-                RelativePath = Path.GetRelativePath(request.FolderPath, file),
-                LineNumber = i + 1,
-                LineText = lines[i].TrimStart(),
-                FileName = Path.GetFileName(file)
-            });
-        }
+    private void FlushBatch(
+        List<SearchResult> batch,
+        int version,
+        CancellationTokenSource searchCts)
+    {
+        if (batch.Count == 0)
+            return;
 
-        return matches;
+        var pending = batch.ToArray();
+        batch.Clear();
+        _dispatcherService.Invoke(() =>
+        {
+            if (!IsCurrentSearch(version, searchCts))
+                return;
+
+            foreach (var result in pending)
+                Results.Add(result);
+        });
     }
 
     private static bool IsSkippableFileAccessException(Exception ex) =>
@@ -216,8 +355,29 @@ public partial class FindInFilesViewModel : ObservableObject
     [RelayCommand]
     private void ClearResults()
     {
+        CancelAndInvalidateSearch();
         Results.Clear();
         StatusText = "Ready";
+        IsSearching = false;
+    }
+
+    [RelayCommand]
+    private void CancelSearch()
+    {
+        Volatile.Read(ref _searchCts)?.Cancel();
+    }
+
+    private bool IsCurrentSearch(
+        int version,
+        CancellationTokenSource searchCts) =>
+        version == Volatile.Read(ref _searchVersion) &&
+        ReferenceEquals(Volatile.Read(ref _searchCts), searchCts);
+
+    private void CancelAndInvalidateSearch()
+    {
+        Interlocked.Increment(ref _searchVersion);
+        var searchCts = Interlocked.Exchange(ref _searchCts, null);
+        searchCts?.Cancel();
     }
 
     private static bool IsBinary(byte[] buffer, int length)
@@ -238,7 +398,20 @@ public partial class FindInFilesViewModel : ObservableObject
         bool UseRegex,
         string FileFilter);
 
-    private readonly record struct SearchSummary(int MatchCount, int FileCount);
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+
+        _disposed = true;
+        CancelAndInvalidateSearch();
+        GC.SuppressFinalize(this);
+    }
+
+    private readonly record struct SearchSummary(
+        int MatchCount,
+        int FileCount,
+        bool LimitReached);
 }
 
 public class SearchResult

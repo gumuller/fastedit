@@ -286,6 +286,23 @@ public class LargeFileDocumentTests : IDisposable
     }
 
     [Fact]
+    public async Task FindMatchingLinesBounded_Reports_Truncation_Without_Exceeding_Limit()
+    {
+        var path = CreateTextFile("match\nmatch\nmatch", new UTF8Encoding(false), false);
+        using var doc = new LargeFileDocument(path);
+        await doc.BuildIndexAsync(null, CancellationToken.None);
+
+        var result = await doc.FindMatchingLinesBoundedAsync(
+            _ => true,
+            maxResults: 2,
+            onProgress: null,
+            ct: CancellationToken.None);
+
+        Assert.Equal(new long[] { 1, 2 }, result.Results);
+        Assert.True(result.IsTruncated);
+    }
+
+    [Fact]
     public async Task Empty_File_Has_Zero_Lines()
     {
         var path = CreateTempFile(Array.Empty<byte>());
