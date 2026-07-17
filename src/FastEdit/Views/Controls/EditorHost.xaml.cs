@@ -57,9 +57,9 @@ public partial class EditorHost : UserControl
     private bool _isFilterFoldingActive;
     private readonly DebouncedActionCoordinator _filterRefreshCoordinator =
         new(TimeSpan.FromMilliseconds(150));
+    private readonly ExternalChangeTracker _externalChangeTracker = new();
     private CancellationTokenSource? _externalReloadCts;
     private int _externalChangeActive;
-    private string? _externalChangePendingPath;
     private bool _isRuntimeAttached;
 
     private static readonly IReadOnlyDictionary<MacroAction, Action<EditorHost, MacroStep, ITextToolsService?>> MacroStepHandlers =
@@ -1144,19 +1144,17 @@ public partial class EditorHost : UserControl
 
     private async void OnFileWatcherChanged(object? sender, string filePath)
     {
+        _externalChangeTracker.Record(filePath);
         if (Interlocked.CompareExchange(ref _externalChangeActive, 1, 0) != 0)
-        {
-            Interlocked.Exchange(ref _externalChangePendingPath, filePath);
             return;
-        }
 
         var reloadCts = new CancellationTokenSource();
         var cancellationToken = reloadCts.Token;
         var previous = Interlocked.Exchange(ref _externalReloadCts, reloadCts);
         previous?.Cancel();
         previous?.Dispose();
-        var promptHandled = false;
-        Interlocked.Exchange(ref _externalChangePendingPath, null);
+        var promptDeclined = false;
+        ExternalReloadDecision? approvedDecision = null;
 
         try
         {
@@ -1164,14 +1162,28 @@ public partial class EditorHost : UserControl
             {
                 await Task.Delay(200, cancellationToken);
 
-                var decision = await Dispatcher.InvokeAsync(() =>
-                    GetExternalReloadDecision(filePath));
+                var change = _externalChangeTracker.Capture(filePath);
+                filePath = change.FilePath;
+                var decision = approvedDecision is { } approval &&
+                               string.Equals(
+                                   approval.ViewModel?.FilePath,
+                                   filePath,
+                                   StringComparison.OrdinalIgnoreCase)
+                    ? approval
+                    : await Dispatcher.InvokeAsync(() =>
+                        GetExternalReloadDecision(filePath));
+
+                if (decision.WasPrompted && decision.ShouldReload)
+                    approvedDecision = decision;
+
                 if (decision.ShouldReload)
                 {
                     var content = await _fileSystemService!.ReadAllTextAsync(filePath);
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    await Dispatcher.InvokeAsync(() =>
+                    var contentApplied = false;
+                    var generationCurrent = await Dispatcher.InvokeAsync(() =>
+                        _externalChangeTracker.TryApply(change.Generation, () =>
                     {
                         cancellationToken.ThrowIfCancellationRequested();
                         var vm = _currentVm;
@@ -1188,19 +1200,27 @@ public partial class EditorHost : UserControl
                         }
 
                         vm.ReplaceContentFromDisk(content);
+                        contentApplied = true;
                         TextEditor.ScrollToEnd();
                         SetStatus($"Auto-reloaded: {_fileSystemService.GetFileName(filePath)}");
-                    });
+                    }));
+
+                    if (!generationCurrent)
+                        continue;
+                    if (!contentApplied)
+                        break;
+
+                    approvedDecision = null;
                 }
 
-                if (decision.WasPrompted)
+                if (decision.WasPrompted && !decision.ShouldReload)
                 {
-                    promptHandled = true;
-                    Interlocked.Exchange(ref _externalChangePendingPath, null);
+                    promptDeclined = true;
+                    _externalChangeTracker.TakePendingPath();
                     break;
                 }
 
-                var pendingPath = Interlocked.Exchange(ref _externalChangePendingPath, null);
+                var pendingPath = _externalChangeTracker.TakePendingPath();
                 if (pendingPath == null)
                     break;
                 filePath = pendingPath;
@@ -1227,8 +1247,8 @@ public partial class EditorHost : UserControl
             Interlocked.CompareExchange(ref _externalReloadCts, null, reloadCts);
             reloadCts.Dispose();
             Volatile.Write(ref _externalChangeActive, 0);
-            var pendingPath = Interlocked.Exchange(ref _externalChangePendingPath, null);
-            if (!promptHandled && pendingPath != null && CanAutoReloadPath(pendingPath))
+            var pendingPath = _externalChangeTracker.TakePendingPath();
+            if (!promptDeclined && pendingPath != null && CanAutoReloadPath(pendingPath))
                 OnFileWatcherChanged(this, pendingPath);
         }
     }
@@ -1258,7 +1278,7 @@ public partial class EditorHost : UserControl
 
     private void CancelExternalReload()
     {
-        Interlocked.Exchange(ref _externalChangePendingPath, null);
+        _externalChangeTracker.Invalidate();
         var reloadCts = Interlocked.Exchange(ref _externalReloadCts, null);
         reloadCts?.Cancel();
         reloadCts?.Dispose();

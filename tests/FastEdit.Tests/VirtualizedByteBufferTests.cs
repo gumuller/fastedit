@@ -214,4 +214,28 @@ public class VirtualizedByteBufferTests : IDisposable
                 progress: null,
                 cts.Token));
     }
+
+    [Fact]
+    public async Task Save_Cancels_Active_Search_Before_Exclusive_Write()
+    {
+        var path = Path.GetTempFileName();
+        using (var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None))
+            stream.SetLength(128L * 1024 * 1024);
+        _tempFiles.Add(path);
+
+        using var buffer = new VirtualizedByteBuffer(path);
+        var search = buffer.SearchAsync(
+            new byte[] { 0xFF },
+            VirtualizedByteBuffer.DefaultSearchResultLimit,
+            progress: null,
+            CancellationToken.None);
+
+        buffer.SetByte(0, 0x7F);
+        buffer.Save();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => search);
+        using var readStream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        Assert.Equal(0x7F, readStream.ReadByte());
+        Assert.False(buffer.HasModifications);
+    }
 }

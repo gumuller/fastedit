@@ -504,7 +504,7 @@ public partial class HexEditorControl : UserControl
             RenderHex();
             return _searchResults.Count > 0;
         }
-        catch (OperationCanceledException) when (searchCts.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
             return false;
         }
