@@ -185,7 +185,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         {
             if (_byteBuffer != null)
             {
-                _byteBuffer.Save();
+                await Task.Run(_byteBuffer.Save);
                 IsModified = false;
                 return true;
             }
@@ -233,7 +233,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         {
             if (_byteBuffer != null)
             {
-                _byteBuffer.Save(); // saves to original path
+                await Task.Run(_byteBuffer.Save); // saves to original path
                 // For Save As in binary mode, copy file to new location
                 if (savePath != FilePath)
                     _fileSystemService.CopyFile(FilePath, savePath, overwrite: true);

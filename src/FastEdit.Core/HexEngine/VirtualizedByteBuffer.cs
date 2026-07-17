@@ -14,6 +14,7 @@ public class VirtualizedByteBuffer : IDisposable
     private readonly Dictionary<long, byte> _modifications = new();
     private readonly object _modificationsLock = new();
     private readonly object _streamLock = new();
+    private readonly object _searchSaveLock = new();
     private bool _disposed;
 
     private const int PageSize = 64 * 1024;
@@ -106,6 +107,12 @@ public class VirtualizedByteBuffer : IDisposable
 
     public void Save()
     {
+        lock (_searchSaveLock)
+            SaveCore();
+    }
+
+    private void SaveCore()
+    {
         KeyValuePair<long, byte>[] modifications;
         lock (_modificationsLock)
         {
@@ -197,6 +204,16 @@ public class VirtualizedByteBuffer : IDisposable
     }
 
     private BoundedSearchResult<long> Search(
+        byte[] pattern,
+        int maxResults,
+        IProgress<double>? progress,
+        CancellationToken cancellationToken)
+    {
+        lock (_searchSaveLock)
+            return SearchCore(pattern, maxResults, progress, cancellationToken);
+    }
+
+    private BoundedSearchResult<long> SearchCore(
         byte[] pattern,
         int maxResults,
         IProgress<double>? progress,

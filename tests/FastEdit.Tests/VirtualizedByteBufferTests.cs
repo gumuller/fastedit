@@ -214,4 +214,59 @@ public class VirtualizedByteBufferTests : IDisposable
                 progress: null,
                 cts.Token));
     }
+
+    [Fact]
+    public async Task Save_Waits_For_Active_Search_Before_Requesting_Exclusive_Access()
+    {
+        var path = CreateTempFile(new byte[256 * 1024]);
+        using var buffer = new VirtualizedByteBuffer(path);
+        using var progress = new BlockingProgress();
+        using var saveStarted = new ManualResetEventSlim();
+        buffer.SetByte(0, 0xFF);
+
+        var searchTask = buffer.SearchAsync(
+            new byte[] { 0x7F },
+            VirtualizedByteBuffer.DefaultSearchResultLimit,
+            progress,
+            CancellationToken.None);
+        Assert.True(progress.Started.Wait(TimeSpan.FromSeconds(5)));
+
+        var saveTask = Task.Run(() =>
+        {
+            saveStarted.Set();
+            buffer.Save();
+        });
+        Assert.True(saveStarted.Wait(TimeSpan.FromSeconds(5)));
+
+        try
+        {
+            var completedTask = await Task.WhenAny(saveTask, Task.Delay(100));
+            Assert.NotSame(saveTask, completedTask);
+        }
+        finally
+        {
+            progress.Release.Set();
+        }
+
+        await Task.WhenAll(searchTask, saveTask).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(0xFF, File.ReadAllBytes(path)[0]);
+    }
+
+    private sealed class BlockingProgress : IProgress<double>, IDisposable
+    {
+        public ManualResetEventSlim Started { get; } = new();
+        public ManualResetEventSlim Release { get; } = new();
+
+        public void Report(double value)
+        {
+            Started.Set();
+            Release.Wait();
+        }
+
+        public void Dispose()
+        {
+            Started.Dispose();
+            Release.Dispose();
+        }
+    }
 }
