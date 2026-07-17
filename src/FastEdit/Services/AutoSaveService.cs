@@ -22,9 +22,10 @@ public sealed class AutoSaveService : IAutoSaveService
     private Func<IEnumerable<AutoSaveEntry>>? _entryProvider;
     private int _intervalSeconds;
     private volatile bool _stopped = true;
+    private readonly string _activeGenerationId;
     private readonly string _activeContentPrefix;
     private readonly string _activeManifestPath;
-    private readonly string _activeGenerationId;
+    private readonly string _activeCleanupIntentPath;
     private Dictionary<string, RecoveryOrigin> _lastRecoveryOrigins = new(StringComparer.Ordinal);
     private HashSet<string> _lastRecoveryManifestPaths = new(StringComparer.OrdinalIgnoreCase);
     private HashSet<string> _lastRecoveryContentPaths = new(StringComparer.OrdinalIgnoreCase);
@@ -62,8 +63,12 @@ public sealed class AutoSaveService : IAutoSaveService
         _resolvedEntriesPath = Path.Combine(_autoSaveDir, "resolved.json");
         _activeGenerationId = Guid.NewGuid().ToString("N");
         _activeContentPrefix = $"{_activeGenerationId}-";
-        _activeManifestPath = Path.Combine(_autoSaveDir, $"manifest-{_activeGenerationId}.json");
-        _activeGenerationMarkerPath = Path.Combine(_autoSaveDir, $"active-{_activeGenerationId}.lock");
+        _activeManifestPath = Path.Combine(
+            _autoSaveDir,
+            $"manifest-{_activeGenerationId}.json");
+        _activeGenerationMarkerPath = Path.Combine(
+            _autoSaveDir,
+            $"active-{_activeGenerationId}.lock");
         _activeCleanupIntentPath = GetCleanupIntentPath(_activeGenerationId);
         _settings.AutoSaveIntervalChanged += OnAutoSaveIntervalChanged;
     }
@@ -75,7 +80,9 @@ public sealed class AutoSaveService : IAutoSaveService
             StopTimer();
             IntervalSeconds = _settings.AutoSaveIntervalSeconds;
             _fileSystem.CreateDirectory(_autoSaveDir);
-            RunStartupMaintenance();
+            CleanupRetiredGenerations();
+            var intendedCleanupGenerations = CleanupIntendedManifestlessGenerations();
+            PreserveAbandonedManifestlessGenerations(intendedCleanupGenerations);
             var wasCleanShutdown = _fileSystem.FileExists(_shutdownMarkerPath);
             if (wasCleanShutdown)
                 _fileSystem.DeleteFile(_shutdownMarkerPath);
@@ -522,9 +529,27 @@ public sealed class AutoSaveService : IAutoSaveService
                     _activeManifestPath,
                     contentPaths,
                     _activeGenerationMarkerPath,
-                    _activeCleanupIntentPath,
                     out var cleanupComplete);
                 return retired && cleanupComplete;
+            }
+
+            var manifestlessContentPaths = _fileSystem.GetFiles(
+                _autoSaveDir,
+                $"{_activeContentPrefix}*.txt");
+            if (manifestlessContentPaths.Length > 0)
+            {
+                if (!TryWriteCleanupIntent(
+                    _activeCleanupIntentPath,
+                    _activeGenerationId,
+                    manifestlessContentPaths))
+                {
+                    return false;
+                }
+
+                return CleanupIntendedGeneration(
+                    _activeCleanupIntentPath,
+                    manifestlessContentPaths,
+                    _activeGenerationMarkerPath);
             }
 
             if (_fileSystem.FileExists(_activeGenerationMarkerPath))
@@ -748,62 +773,189 @@ public sealed class AutoSaveService : IAutoSaveService
         return true;
     }
 
-    private void RunStartupMaintenance()
+    private HashSet<string> CleanupIntendedManifestlessGenerations()
     {
-        CleanupRetiredGenerations();
-        ProcessCleanupIntents();
-        ExposeAbandonedManifestlessGenerations();
-    }
-
-    private void ProcessCleanupIntents()
-    {
-        foreach (var cleanupIntentPath in _fileSystem.GetFiles(_autoSaveDir, "cleanup-*.json"))
+        var intendedGenerations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var intentPath in _fileSystem.GetFiles(
+            _autoSaveDir,
+            ".cleanup-*.json"))
         {
-            var generationId = GetGenerationId(
-                cleanupIntentPath,
-                "cleanup-");
-            if (generationId == null)
-                continue;
-
-            var manifestPath = Path.Combine(_autoSaveDir, $"manifest-{generationId}.json");
-            if (IsActiveGeneration(manifestPath))
-                continue;
-
-            if (!TryReadCleanupIntent(cleanupIntentPath, out var contentPaths))
-                continue;
-
-            contentPaths.UnionWith(_fileSystem.GetFiles(
-                _autoSaveDir,
-                $"{generationId}-*.txt"));
-            if (!_fileSystem.FileExists(manifestPath) &&
-                !TryWriteSyntheticManifest(manifestPath, contentPaths))
+            if (!TryReadCleanupIntent(
+                intentPath,
+                out var generationId,
+                out var contentPaths))
             {
                 continue;
             }
 
-            RetireGeneration(
-                manifestPath,
+            intendedGenerations.Add(generationId);
+            CleanupIntendedGeneration(
+                intentPath,
                 contentPaths,
-                GetGenerationMarkerPath(manifestPath),
-                cleanupIntentPath,
-                out _);
+                Path.Combine(_autoSaveDir, $"active-{generationId}.lock"));
+        }
+        return intendedGenerations;
+    }
+
+    private bool CleanupIntendedGeneration(
+        string intentPath,
+        IReadOnlyCollection<string> contentPaths,
+        string markerPath)
+    {
+        var cleanupComplete = true;
+        foreach (var contentPath in contentPaths.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            try
+            {
+                if (_fileSystem.FileExists(contentPath))
+                    _fileSystem.DeleteFile(contentPath);
+            }
+            catch (Exception ex)
+            {
+                cleanupComplete = false;
+                Trace.TraceWarning(
+                    "Failed to clean intended auto-save content '{0}': {1}",
+                    contentPath,
+                    ex);
+            }
+        }
+
+        if (!cleanupComplete)
+            return false;
+
+        try
+        {
+            if (_fileSystem.FileExists(markerPath))
+                _fileSystem.DeleteFile(markerPath);
+        }
+        catch (Exception ex)
+        {
+            Trace.TraceWarning(
+                "Failed to clean intended auto-save marker '{0}': {1}",
+                markerPath,
+                ex);
+            return false;
+        }
+
+        try
+        {
+            _fileSystem.DeleteFile(intentPath);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Trace.TraceWarning(
+                "Failed to remove completed auto-save cleanup intent '{0}': {1}",
+                intentPath,
+                ex);
+            return false;
         }
     }
 
-    private void ExposeAbandonedManifestlessGenerations()
+    private bool TryWriteCleanupIntent(
+        string intentPath,
+        string generationId,
+        IReadOnlyCollection<string> contentPaths)
     {
+        try
+        {
+            var contentFiles = contentPaths
+                .Select(Path.GetFileName)
+                .OfType<string>()
+                .Where(fileName =>
+                    fileName.StartsWith(
+                        $"{generationId}-",
+                        StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (contentFiles.Length != contentPaths.Count)
+                throw new InvalidDataException("Cleanup content does not match its auto-save generation.");
+
+            var json = JsonSerializer.Serialize(
+                new CleanupIntent(generationId, contentFiles),
+                new JsonSerializerOptions { WriteIndented = true });
+            _fileSystem.WriteAllTextAtomic(intentPath, json);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Trace.TraceWarning(
+                "Failed to persist auto-save cleanup intent '{0}': {1}",
+                intentPath,
+                ex);
+            return false;
+        }
+    }
+
+    private bool TryReadCleanupIntent(
+        string intentPath,
+        out string generationId,
+        out string[] contentPaths)
+    {
+        generationId = "";
+        contentPaths = Array.Empty<string>();
+        try
+        {
+            var intent = JsonSerializer.Deserialize<CleanupIntent>(
+                _fileSystem.ReadAllText(intentPath));
+            if (intent == null ||
+                !Guid.TryParseExact(intent.GenerationId, "N", out _) ||
+                !string.Equals(
+                    intentPath,
+                    GetCleanupIntentPath(intent.GenerationId),
+                    StringComparison.OrdinalIgnoreCase) ||
+                intent.ContentFiles.Any(fileName =>
+                    string.IsNullOrEmpty(fileName) ||
+                    Path.GetFileName(fileName) != fileName ||
+                    !fileName.StartsWith(
+                        $"{intent.GenerationId}-",
+                        StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new InvalidDataException("The auto-save cleanup intent is invalid.");
+            }
+
+            generationId = intent.GenerationId;
+            contentPaths = intent.ContentFiles
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Select(fileName => Path.Combine(_autoSaveDir, fileName))
+                .ToArray();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Trace.TraceWarning(
+                "Failed to read auto-save cleanup intent '{0}': {1}",
+                intentPath,
+                ex);
+            return false;
+        }
+    }
+
+    private void PreserveAbandonedManifestlessGenerations(
+        IReadOnlySet<string> intendedCleanupGenerations)
+    {
+        var retiredManifestNames = _fileSystem
+            .GetFiles(_autoSaveDir, ".retired-*.json")
+            .Select(GetOriginalManifestName)
+            .OfType<string>()
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
         foreach (var markerPath in _fileSystem.GetFiles(_autoSaveDir, "active-*.lock"))
         {
             var generationId = GetGenerationId(markerPath, "active-");
             if (generationId == null)
                 continue;
 
-            var manifestPath = Path.Combine(_autoSaveDir, $"manifest-{generationId}.json");
-            var cleanupIntentPath = GetCleanupIntentPath(generationId);
-            if (_fileSystem.FileExists(manifestPath) || IsActiveGeneration(manifestPath))
+            var generationId = markerName[markerPrefix.Length..];
+            var manifestName = $"manifest-{generationId}.json";
+            var manifestPath = Path.Combine(_autoSaveDir, manifestName);
+            if (_fileSystem.FileExists(manifestPath) ||
+                intendedCleanupGenerations.Contains(generationId) ||
+                retiredManifestNames.Contains(manifestName) ||
+                IsActiveGeneration(manifestPath))
+            {
                 continue;
-            if (_fileSystem.FileExists(cleanupIntentPath))
-                continue;
+            }
 
             var contentPaths = _fileSystem.GetFiles(
                 _autoSaveDir,
@@ -824,74 +976,7 @@ public sealed class AutoSaveService : IAutoSaveService
                 continue;
             }
 
-            if (!TryWriteSyntheticManifest(manifestPath, contentPaths))
-                continue;
-
-            try
-            {
-                _fileSystem.DeleteFile(markerPath);
-            }
-            catch (Exception ex)
-            {
-                Trace.TraceWarning(
-                    "Failed to remove stale marker for recoverable manifest-less generation '{0}': {1}",
-                    markerPath,
-                    ex);
-            }
-        }
-    }
-
-    private bool TryWriteCleanupIntent(
-        string cleanupIntentPath,
-        IReadOnlyCollection<string> contentPaths)
-    {
-        try
-        {
-            var intent = new CleanupIntent
-            {
-                ContentFiles = contentPaths
-                    .Select(Path.GetFileName)
-                    .OfType<string>()
-                    .OrderBy(fileName => fileName, StringComparer.OrdinalIgnoreCase)
-                    .ToArray()
-            };
-            var json = JsonSerializer.Serialize(
-                intent,
-                new JsonSerializerOptions { WriteIndented = true });
-            _fileSystem.WriteAllTextAtomic(cleanupIntentPath, json);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            Trace.TraceWarning(
-                "Failed to write auto-save cleanup intent '{0}': {1}",
-                cleanupIntentPath,
-                ex);
-            return false;
-        }
-    }
-
-    private bool TryReadCleanupIntent(
-        string cleanupIntentPath,
-        out HashSet<string> contentPaths)
-    {
-        contentPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        try
-        {
-            var json = _fileSystem.ReadAllText(cleanupIntentPath);
-            var intent = JsonSerializer.Deserialize<CleanupIntent>(json)
-                ?? throw new InvalidDataException("The auto-save cleanup intent contains no data.");
-            foreach (var contentFile in intent.ContentFiles)
-                contentPaths.Add(Path.Combine(_autoSaveDir, contentFile));
-            return true;
-        }
-        catch (Exception ex)
-        {
-            Trace.TraceWarning(
-                "Failed to read auto-save cleanup intent '{0}': {1}",
-                cleanupIntentPath,
-                ex);
-            return false;
+            TryWriteSyntheticManifest(manifestPath, contentPaths);
         }
     }
 
@@ -917,12 +1002,15 @@ public sealed class AutoSaveService : IAutoSaveService
         catch (Exception ex)
         {
             Trace.TraceWarning(
-                "Failed to persist cleanup metadata for manifest-less generation '{0}': {1}",
+                "Failed to persist recovery metadata for manifest-less generation '{0}': {1}",
                 manifestPath,
                 ex);
             return false;
         }
     }
+
+    private string GetCleanupIntentPath(string generationId) =>
+        Path.Combine(_autoSaveDir, $".cleanup-{generationId}.json");
 
     private IReadOnlyList<string> GetManifestPaths()
     {
@@ -1094,4 +1182,5 @@ public sealed class AutoSaveService : IAutoSaveService
     }
 
     private sealed record RecoveryOrigin(string ManifestName, string EntryId);
+    private sealed record CleanupIntent(string GenerationId, string[] ContentFiles);
 }

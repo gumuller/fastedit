@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
 
@@ -24,9 +25,7 @@ public static class CrashRecoveryCoordinator
                     tabRecovery.RecoveredEntryIds,
                     recoveredAll))
                 {
-                    return new CrashRecoveryAttemptResult(
-                        false,
-                        "Recovered files could not be persisted and retired safely.");
+                    return ReplacementPersistenceFailure();
                 }
             }
 
@@ -41,11 +40,15 @@ public static class CrashRecoveryCoordinator
         }
         catch (Exception ex)
         {
-            return new CrashRecoveryAttemptResult(
-                false,
-                $"Crash recovery could not be completed: {ex.Message}");
+            Trace.TraceWarning("Crash recovery failed safely: {0}", ex);
+            return ReplacementPersistenceFailure();
         }
     }
+
+    private static CrashRecoveryAttemptResult ReplacementPersistenceFailure() =>
+        new(
+            false,
+            "Recovered files could not be persisted and retired safely.");
 }
 
 public record CrashRecoveryAttemptResult(
