@@ -79,9 +79,7 @@ public sealed class AutoSaveService : IAutoSaveService
             StopTimer();
             IntervalSeconds = _settings.AutoSaveIntervalSeconds;
             _fileSystem.CreateDirectory(_autoSaveDir);
-            CleanupRetiredGenerations();
-            var intendedCleanupGenerations = CleanupIntendedManifestlessGenerations();
-            PreserveAbandonedManifestlessGenerations(intendedCleanupGenerations);
+            RunStartupMaintenance();
             var wasCleanShutdown = _fileSystem.FileExists(_shutdownMarkerPath);
             if (wasCleanShutdown)
                 _fileSystem.DeleteFile(_shutdownMarkerPath);
@@ -235,6 +233,12 @@ public sealed class AutoSaveService : IAutoSaveService
     {
         if (!_fileSystem.DirectoryExists(_autoSaveDir))
             return false;
+
+        lock (_persistenceSync)
+        {
+            RunStartupMaintenance();
+        }
+
         if (_fileSystem.FileExists(_shutdownMarkerPath))
             return false;
 
@@ -728,6 +732,13 @@ public sealed class AutoSaveService : IAutoSaveService
                 Path.Combine(_autoSaveDir, $"active-{generationId}.lock"));
         }
         return intendedGenerations;
+    }
+
+    private void RunStartupMaintenance()
+    {
+        CleanupRetiredGenerations();
+        var intendedCleanupGenerations = CleanupIntendedManifestlessGenerations();
+        PreserveAbandonedManifestlessGenerations(intendedCleanupGenerations);
     }
 
     private bool CleanupIntendedGeneration(

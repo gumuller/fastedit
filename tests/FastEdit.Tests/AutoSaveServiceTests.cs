@@ -83,7 +83,7 @@ public class AutoSaveServiceTests
             {
                 if (path.EndsWith(".txt", StringComparison.Ordinal))
                     contentPath = path;
-                else if (path.EndsWith(".json", StringComparison.Ordinal))
+                else if (Path.GetFileName(path).StartsWith("manifest-", StringComparison.Ordinal))
                 {
                     manifestPath = path;
                     manifestJson = _;
@@ -123,7 +123,7 @@ public class AutoSaveServiceTests
         _fileSystem.Setup(f => f.WriteAllTextAtomic(It.IsAny<string>(), It.IsAny<string>()))
             .Callback<string, string>((path, _) =>
             {
-                if (path.EndsWith(".json", StringComparison.Ordinal))
+                if (Path.GetFileName(path).StartsWith("manifest-", StringComparison.Ordinal))
                     manifestPath = path;
             });
         _sut.SaveNow(new[]
@@ -154,7 +154,7 @@ public class AutoSaveServiceTests
             {
                 if (path.EndsWith(".txt", StringComparison.Ordinal))
                     contentPaths.Add(path);
-                else if (path.EndsWith(".json", StringComparison.Ordinal))
+                else if (Path.GetFileName(path).StartsWith("manifest-", StringComparison.Ordinal))
                 {
                     manifestPath = path;
                     manifestJson = content;
@@ -660,7 +660,6 @@ public class AutoSaveServiceTests
                 {
                     throw new IOException("manifest write failed");
                 }
-
                 existingFiles.Add(path);
                 fileContents[path] = content;
             });
