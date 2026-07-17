@@ -1,4 +1,6 @@
-﻿using System.IO;
+﻿using System.Diagnostics;
+using System.IO;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
@@ -6,23 +8,32 @@ using System.Windows.Input;
 using System.Windows.Media;
 using FastEdit.Infrastructure;
 using FastEdit.Services;
+using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
 
 namespace FastEdit.Views.Controls;
 
-public class TerminalTabInfo : IDisposable
+public sealed class TerminalTabInfo
 {
     public string Title { get; set; } = "";
-    public CommandRunnerService Service { get; }
+    public ICommandRunner Service { get; }
     public FlowDocument Document { get; }
     public Run? PromptRun { get; set; }
     public Run? InputRun { get; set; }
+    public Run? PendingOutputRun { get; set; }
     public string CurrentPrompt { get; set; } = "❯ ";
+    public Action<string>? OutputReceivedHandler { get; set; }
+    public Action<string>? WorkingDirectoryChangedHandler { get; set; }
+    public Action? CommandStartedHandler { get; set; }
+    public Action? CommandCompletedHandler { get; set; }
+    public object OutputDispatchLock { get; } = new();
+    public StringBuilder PendingUiOutput { get; } = new();
+    public bool IsOutputDispatchPending { get; set; }
 
-    public TerminalTabInfo(string title)
+    public TerminalTabInfo(string title, ICommandRunner service)
     {
         Title = title;
-        Service = new CommandRunnerService();
+        Service = service;
         Document = new FlowDocument
         {
             PagePadding = new Thickness(0),
@@ -36,34 +47,38 @@ public class TerminalTabInfo : IDisposable
         Document.Resources.Add(typeof(Paragraph), paraStyle);
     }
 
-    public void Dispose()
-    {
-        Service.Dispose();
-    }
 }
 
 public partial class CommandRunnerPanel : UserControl
 {
+    private static readonly ICommandRunnerFactory FallbackRunnerFactory = new CommandRunnerFactory();
     private readonly List<TerminalTabInfo> _tabs = new();
+    private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private TerminalTabInfo? _activeTab;
     private int _tabCounter;
+    private bool _shutdownRequested;
+    private string? _desiredWorkingDirectory;
     private const int MaxParagraphs = 5000;
+
+    public static readonly DependencyProperty RunnerFactoryProperty =
+        DependencyProperty.Register(
+            nameof(RunnerFactory),
+            typeof(ICommandRunnerFactory),
+            typeof(CommandRunnerPanel),
+            new PropertyMetadata(null));
+
+    public ICommandRunnerFactory? RunnerFactory
+    {
+        get => (ICommandRunnerFactory?)GetValue(RunnerFactoryProperty);
+        set => SetValue(RunnerFactoryProperty, value);
+    }
 
     public CommandRunnerPanel()
     {
         InitializeComponent();
 
-        AddNewTab();
-
-        Loaded += (s, e) =>
-        {
-            _activeTab?.Service.StartShell();
-        };
-        Unloaded += (s, e) =>
-        {
-            foreach (var tab in _tabs)
-                tab.Dispose();
-        };
+        Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
 
         DataObject.AddPastingHandler(TerminalBox, OnPaste);
 
@@ -71,38 +86,193 @@ public partial class CommandRunnerPanel : UserControl
             new ExecutedRoutedEventHandler(OnPreviewCommandExecuted), true);
     }
 
+    public async Task EnsureStartedAsync(CancellationToken cancellationToken = default)
+    {
+        if (_shutdownRequested)
+            return;
+
+        await _lifecycleGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (_shutdownRequested)
+                return;
+
+            if (_tabs.Count == 0)
+                AddNewTab();
+
+            if (_activeTab != null)
+            {
+                await _activeTab.Service.StartShellAsync(
+                    _desiredWorkingDirectory,
+                    cancellationToken);
+            }
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    public async Task ShutdownAsync(CancellationToken cancellationToken = default)
+    {
+        _shutdownRequested = true;
+        await _lifecycleGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (_tabs.Count == 0)
+                return;
+
+            var tabs = _tabs.ToArray();
+            foreach (var tab in tabs)
+                UnsubscribeFromRunner(tab);
+
+            var shutdownTask = Task.WhenAll(tabs.Select(tab => tab.Service.ShutdownAsync()));
+            try
+            {
+                await shutdownTask.WaitAsync(cancellationToken);
+            }
+            finally
+            {
+                _tabs.Clear();
+                _activeTab = null;
+                _promptRun = null;
+                _inputRun = null;
+                StopButton.IsEnabled = false;
+                TabStripPanel.Children.Clear();
+                TerminalBox.Document = new FlowDocument();
+            }
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    private async void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        _shutdownRequested = false;
+        try
+        {
+            await EnsureStartedAsync();
+        }
+        catch (ObjectDisposedException ex)
+        {
+            Trace.TraceWarning("Terminal runner was disposed while loading the panel: {0}", ex.Message);
+        }
+    }
+
+    private async void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        try
+        {
+            await ShutdownAsync(timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            Trace.TraceWarning("Terminal panel shutdown exceeded 5000 ms while unloading.");
+        }
+    }
+
+    private void SubscribeToRunner(TerminalTabInfo tab)
+    {
+        tab.OutputReceivedHandler = text => QueueOutputForUi(tab, text);
+        tab.CommandStartedHandler = () => DispatchToUi(() =>
+        {
+            if (_activeTab == tab)
+                StopButton.IsEnabled = true;
+        });
+        tab.CommandCompletedHandler = () => DispatchToUi(() =>
+        {
+            if (!_tabs.Contains(tab))
+                return;
+
+            if (_activeTab == tab)
+                StopButton.IsEnabled = false;
+            ShowPrompt(tab, focus: _activeTab == tab);
+        });
+        tab.WorkingDirectoryChangedHandler = cwd => DispatchToUi(() =>
+        {
+            UpdatePromptForTab(tab, cwd);
+            if (_activeTab == tab)
+                _desiredWorkingDirectory = cwd;
+        });
+
+        tab.Service.OutputReceived += tab.OutputReceivedHandler;
+        tab.Service.CommandStarted += tab.CommandStartedHandler;
+        tab.Service.CommandCompleted += tab.CommandCompletedHandler;
+        tab.Service.WorkingDirectoryChanged += tab.WorkingDirectoryChangedHandler;
+    }
+
+    private static void UnsubscribeFromRunner(TerminalTabInfo tab)
+    {
+        if (tab.OutputReceivedHandler != null)
+            tab.Service.OutputReceived -= tab.OutputReceivedHandler;
+        if (tab.CommandStartedHandler != null)
+            tab.Service.CommandStarted -= tab.CommandStartedHandler;
+        if (tab.CommandCompletedHandler != null)
+            tab.Service.CommandCompleted -= tab.CommandCompletedHandler;
+        if (tab.WorkingDirectoryChangedHandler != null)
+            tab.Service.WorkingDirectoryChanged -= tab.WorkingDirectoryChangedHandler;
+
+        tab.OutputReceivedHandler = null;
+        tab.CommandStartedHandler = null;
+        tab.CommandCompletedHandler = null;
+        tab.WorkingDirectoryChangedHandler = null;
+        lock (tab.OutputDispatchLock)
+        {
+            tab.PendingUiOutput.Clear();
+            tab.IsOutputDispatchPending = false;
+        }
+    }
+
+    private void QueueOutputForUi(TerminalTabInfo tab, string text)
+    {
+        if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+            return;
+
+        lock (tab.OutputDispatchLock)
+        {
+            tab.PendingUiOutput.Append(text);
+            if (tab.IsOutputDispatchPending)
+                return;
+
+            tab.IsOutputDispatchPending = true;
+        }
+
+        _ = Dispatcher.BeginInvoke(() => DrainOutputOnUi(tab));
+    }
+
+    private void DrainOutputOnUi(TerminalTabInfo tab)
+    {
+        string text;
+        lock (tab.OutputDispatchLock)
+        {
+            text = tab.PendingUiOutput.ToString();
+            tab.PendingUiOutput.Clear();
+            tab.IsOutputDispatchPending = false;
+        }
+
+        if (_tabs.Contains(tab))
+            AppendOutput(tab, text);
+    }
+
+    private void DispatchToUi(Action action)
+    {
+        if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+            return;
+
+        _ = Dispatcher.BeginInvoke(action);
+    }
+
     private TerminalTabInfo AddNewTab()
     {
         _tabCounter++;
-        var tab = new TerminalTabInfo($"Terminal {_tabCounter}");
+        var tab = new TerminalTabInfo(
+            $"Terminal {_tabCounter}",
+            (RunnerFactory ?? FallbackRunnerFactory).Create());
 
-        tab.Service.OutputReceived += text => Dispatcher.Invoke(() =>
-        {
-            if (_activeTab == tab)
-                AppendOutput(text);
-            else
-                AppendOutputToTab(tab, text);
-        });
-        tab.Service.CommandStarted += () => Dispatcher.Invoke(() =>
-        {
-            if (_activeTab == tab) StopButton.IsEnabled = true;
-        });
-        tab.Service.CommandCompleted += () => Dispatcher.Invoke(() =>
-        {
-            if (_activeTab == tab)
-            {
-                StopButton.IsEnabled = false;
-                ShowPrompt();
-            }
-            else
-            {
-                ShowPromptOnTab(tab);
-            }
-        });
-        tab.Service.WorkingDirectoryChanged += cwd => Dispatcher.Invoke(() =>
-        {
-            UpdatePromptForTab(tab, cwd);
-        });
+        SubscribeToRunner(tab);
 
         UpdatePromptForTab(tab, tab.Service.WorkingDirectory);
         _tabs.Add(tab);
@@ -111,21 +281,35 @@ public partial class CommandRunnerPanel : UserControl
         return tab;
     }
 
-    private void RemoveTab(TerminalTabInfo tab)
+    private async Task RemoveTabAsync(TerminalTabInfo tab)
     {
-        if (_tabs.Count <= 1) return;
-
-        var idx = _tabs.IndexOf(tab);
-        var wasActive = _activeTab == tab;
-        _tabs.Remove(tab);
-        tab.Dispose();
-
-        if (TerminalTabClosePolicy.TryGetNextActiveIndex(_tabs.Count + 1, idx, wasActive, out var newIdx))
+        await _lifecycleGate.WaitAsync();
+        try
         {
-            SwitchToTab(_tabs[newIdx]);
-        }
+            if (_shutdownRequested || _tabs.Count <= 1)
+                return;
 
-        RebuildTabStrip();
+            var idx = _tabs.IndexOf(tab);
+            var wasActive = _activeTab == tab;
+            _tabs.Remove(tab);
+            UnsubscribeFromRunner(tab);
+            await tab.Service.ShutdownAsync().ConfigureAwait(true);
+
+            if (TerminalTabClosePolicy.TryGetNextActiveIndex(
+                    _tabs.Count + 1,
+                    idx,
+                    wasActive,
+                    out var newIdx))
+            {
+                SwitchToTab(_tabs[newIdx]);
+            }
+
+            RebuildTabStrip();
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
     }
 
     private void SwitchToTab(TerminalTabInfo tab)
@@ -137,6 +321,8 @@ public partial class CommandRunnerPanel : UserControl
         }
 
         _activeTab = tab;
+        if (tab.Service.IsRunning)
+            _desiredWorkingDirectory = tab.Service.WorkingDirectory;
 
         TerminalBox.Document = tab.Document;
         _promptRun = tab.PromptRun;
@@ -221,14 +407,26 @@ public partial class CommandRunnerPanel : UserControl
             Focusable = false,
             ToolTip = "New Terminal"
         };
-        addBtn.Click += (s, e) =>
-        {
-            var newTab = AddNewTab();
-            newTab.Service.StartShell();
-            ShowPrompt();
-            FocusInput();
-        };
+        addBtn.Click += AddTab_Click;
         TabStripPanel.Children.Add(addBtn);
+    }
+
+    private async void AddTab_Click(object sender, RoutedEventArgs e)
+    {
+        await _lifecycleGate.WaitAsync();
+        try
+        {
+            if (_shutdownRequested)
+                return;
+
+            var newTab = AddNewTab();
+            await newTab.Service.StartShellAsync(_desiredWorkingDirectory);
+            FocusInput();
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
     }
 
     private void TabBorder_Click(object sender, MouseButtonEventArgs e)
@@ -240,22 +438,60 @@ public partial class CommandRunnerPanel : UserControl
         }
     }
 
-    private void TabClose_Click(object sender, RoutedEventArgs e)
+    private async void TabClose_Click(object sender, RoutedEventArgs e)
     {
         if (sender is Button btn && btn.Tag is TerminalTabInfo tab)
         {
-            RemoveTab(tab);
+            await RemoveTabAsync(tab);
         }
     }
 
     private Run? _promptRun;
     private Run? _inputRun;
 
-    public void SetWorkingDirectory(string? directory)
+    public async Task SetWorkingDirectoryAsync(
+        string? directory,
+        CancellationToken cancellationToken = default)
     {
-        if (_activeTab == null) return;
-        if (_activeTab.Service.SetWorkingDirectory(directory))
-            UpdatePromptForTab(_activeTab, _activeTab.Service.WorkingDirectory);
+        directory = NormalizeDirectory(directory);
+        if (directory == null)
+            return;
+
+        await _lifecycleGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (_shutdownRequested)
+                return;
+
+            if (_activeTab == null)
+            {
+                _desiredWorkingDirectory = directory;
+                return;
+            }
+
+            if (await _activeTab.Service.SetWorkingDirectoryAsync(directory, cancellationToken))
+            {
+                _desiredWorkingDirectory = _activeTab.Service.WorkingDirectory;
+                UpdatePromptForTab(_activeTab, _activeTab.Service.WorkingDirectory);
+            }
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    private static string? NormalizeDirectory(string? directory)
+    {
+        if (string.IsNullOrEmpty(directory))
+            return null;
+
+        if (File.Exists(directory))
+            directory = Path.GetDirectoryName(directory);
+
+        return !string.IsNullOrEmpty(directory) && Directory.Exists(directory)
+            ? directory
+            : null;
     }
 
     public void FocusInput()
@@ -263,11 +499,6 @@ public partial class CommandRunnerPanel : UserControl
         TerminalBox.Focus();
         if (_inputRun != null)
             TerminalBox.CaretPosition = _inputRun.ContentEnd;
-    }
-
-    public void EnsureStarted()
-    {
-        _activeTab?.Service.StartShell();
     }
 
     private Brush GetPromptBrush()
@@ -282,24 +513,11 @@ public partial class CommandRunnerPanel : UserControl
 
     private void ShowPrompt()
     {
-        if (_activeTab == null) return;
-        _promptRun = new Run(_activeTab.CurrentPrompt) { Foreground = GetPromptBrush() };
-        _inputRun = new Run("") { Foreground = GetForegroundBrush() };
-
-        var para = new Paragraph { Margin = new Thickness(0) };
-        para.Inlines.Add(_promptRun);
-        para.Inlines.Add(_inputRun);
-
-        TerminalBox.Document.Blocks.Add(para);
-        TerminalBox.CaretPosition = _inputRun.ContentEnd;
-        TerminalBox.Focus();
-        TerminalBox.ScrollToEnd();
-
-        _activeTab.PromptRun = _promptRun;
-        _activeTab.InputRun = _inputRun;
+        if (_activeTab != null)
+            ShowPrompt(_activeTab, focus: true);
     }
 
-    private void ShowPromptOnTab(TerminalTabInfo tab)
+    private void ShowPrompt(TerminalTabInfo tab, bool focus)
     {
         var promptRun = new Run(tab.CurrentPrompt) { Foreground = GetPromptBrush() };
         var inputRun = new Run("") { Foreground = GetForegroundBrush() };
@@ -311,6 +529,16 @@ public partial class CommandRunnerPanel : UserControl
         tab.Document.Blocks.Add(para);
         tab.PromptRun = promptRun;
         tab.InputRun = inputRun;
+        tab.PendingOutputRun = null;
+
+        if (!focus)
+            return;
+
+        _promptRun = promptRun;
+        _inputRun = inputRun;
+        TerminalBox.CaretPosition = inputRun.ContentEnd;
+        TerminalBox.Focus();
+        TerminalBox.ScrollToEnd();
     }
 
     private string GetInputText()
@@ -359,7 +587,7 @@ public partial class CommandRunnerPanel : UserControl
             TerminalBox.CaretPosition = _inputRun.ContentEnd;
     }
 
-    private void TerminalBox_PreviewKeyDown(object sender, KeyEventArgs e)
+    private async void TerminalBox_PreviewKeyDown(object sender, KeyEventArgs e)
     {
         var decision = TerminalKeyInputPolicy.Decide(
             e.Key,
@@ -380,13 +608,13 @@ public partial class CommandRunnerPanel : UserControl
         switch (decision.Action)
         {
             case TerminalKeyAction.StopProcess:
-                runner.StopCurrentProcess();
+                await runner.StopCurrentProcessAsync();
                 break;
             case TerminalKeyAction.MoveCaretToInputEnd:
                 MoveCaretToInputEnd();
                 break;
             case TerminalKeyAction.SubmitInput:
-                SubmitInput(runner);
+                await SubmitInputAsync(runner);
                 break;
             case TerminalKeyAction.PreviousHistory:
                 SetInputTextIfNotNull(runner.GetPreviousHistoryItem());
@@ -403,7 +631,7 @@ public partial class CommandRunnerPanel : UserControl
         e.Handled = decision.Handled;
     }
 
-    private void SubmitInput(CommandRunnerService runner)
+    private async Task SubmitInputAsync(ICommandRunner runner)
     {
         var input = GetInputText().Trim();
         if (string.IsNullOrEmpty(input))
@@ -413,7 +641,7 @@ public partial class CommandRunnerPanel : UserControl
         _promptRun = null;
         _activeTab!.InputRun = null;
         _activeTab.PromptRun = null;
-        runner.ExecuteCommand(input);
+        await runner.ExecuteCommandAsync(input);
     }
 
     private void SetInputTextIfNotNull(string? input)
@@ -469,44 +697,55 @@ public partial class CommandRunnerPanel : UserControl
         }
     }
 
-    private void AppendOutput(string text)
+    private void AppendOutput(TerminalTabInfo tab, string text)
     {
-        text = text.TrimEnd('\r', '\n', ' ');
-        if (string.IsNullOrEmpty(text)) return;
+        if (string.IsNullOrEmpty(text))
+            return;
 
-        var outputRun = new Run(text + "\n") { Foreground = GetForegroundBrush() };
-        var para = new Paragraph { Margin = new Thickness(0) };
-        para.Inlines.Add(outputRun);
+        var lines = text.Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n')
+            .Split('\n');
+        for (var index = 0; index < lines.Length; index++)
+        {
+            var hasNewLine = index < lines.Length - 1;
+            if (lines[index].Length > 0)
+            {
+                var outputRun = EnsureOutputRun(tab);
+                outputRun.Text += lines[index];
+            }
+            else if (hasNewLine && tab.PendingOutputRun == null)
+            {
+                EnsureOutputRun(tab);
+            }
 
-        var promptPara = _promptRun?.Parent as Paragraph;
-        if (promptPara != null)
-            TerminalBox.Document.Blocks.InsertBefore(promptPara, para);
-        else
-            TerminalBox.Document.Blocks.Add(para);
+            if (hasNewLine)
+                tab.PendingOutputRun = null;
+        }
 
-        while (TerminalBox.Document.Blocks.Count > MaxParagraphs)
-            TerminalBox.Document.Blocks.Remove(TerminalBox.Document.Blocks.FirstBlock);
-
-        TerminalBox.ScrollToEnd();
+        if (_activeTab == tab)
+            TerminalBox.ScrollToEnd();
     }
 
-    private void AppendOutputToTab(TerminalTabInfo tab, string text)
+    private Run EnsureOutputRun(TerminalTabInfo tab)
     {
-        text = text.TrimEnd('\r', '\n', ' ');
-        if (string.IsNullOrEmpty(text)) return;
+        if (tab.PendingOutputRun != null)
+            return tab.PendingOutputRun;
 
-        var outputRun = new Run(text + "\n") { Foreground = GetForegroundBrush() };
-        var para = new Paragraph { Margin = new Thickness(0) };
-        para.Inlines.Add(outputRun);
+        var outputRun = new Run { Foreground = GetForegroundBrush() };
+        var paragraph = new Paragraph { Margin = new Thickness(0) };
+        paragraph.Inlines.Add(outputRun);
 
-        var promptPara = tab.PromptRun?.Parent as Paragraph;
-        if (promptPara != null)
-            tab.Document.Blocks.InsertBefore(promptPara, para);
+        var promptParagraph = tab.PromptRun?.Parent as Paragraph;
+        if (promptParagraph != null)
+            tab.Document.Blocks.InsertBefore(promptParagraph, paragraph);
         else
-            tab.Document.Blocks.Add(para);
+            tab.Document.Blocks.Add(paragraph);
 
         while (tab.Document.Blocks.Count > MaxParagraphs)
             tab.Document.Blocks.Remove(tab.Document.Blocks.FirstBlock);
+
+        tab.PendingOutputRun = outputRun;
+        return outputRun;
     }
 
     private void UpdatePromptForTab(TerminalTabInfo tab, string cwd)
@@ -518,12 +757,15 @@ public partial class CommandRunnerPanel : UserControl
     private void Clear_Click(object sender, RoutedEventArgs e)
     {
         TerminalBox.Document.Blocks.Clear();
+        if (_activeTab != null)
+            _activeTab.PendingOutputRun = null;
         ShowPrompt();
     }
 
-    private void Stop_Click(object sender, RoutedEventArgs e)
+    private async void Stop_Click(object sender, RoutedEventArgs e)
     {
-        _activeTab?.Service.StopCurrentProcess();
+        if (_activeTab != null)
+            await _activeTab.Service.StopCurrentProcessAsync();
     }
 
     private void Close_Click(object sender, RoutedEventArgs e)

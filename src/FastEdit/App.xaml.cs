@@ -86,6 +86,7 @@ public partial class App : Application
 
                 // Factories
                 services.AddSingleton<IEditorTabFactory, EditorTabFactory>();
+                services.AddSingleton<ICommandRunnerFactory, CommandRunnerFactory>();
 
                 // ViewModels
                 services.AddSingleton<MainViewModel>();
