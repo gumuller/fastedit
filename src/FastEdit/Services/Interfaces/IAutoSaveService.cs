@@ -11,6 +11,10 @@ public interface IAutoSaveService
     bool HasRecoveryFiles();
     RecoveryEntriesResult GetRecoveryEntries();
     bool RecordRecoveredEntries(IEnumerable<string> entryIds);
+    bool CompleteRecovery(
+        IEnumerable<AutoSaveEntry> replacementEntries,
+        IEnumerable<string> recoveredEntryIds,
+        bool allEntriesRecovered);
     bool ClearRecoveryFiles();
     void SaveNow(IEnumerable<AutoSaveEntry> entries);
 }

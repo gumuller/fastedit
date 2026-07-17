@@ -12,41 +12,26 @@ public static class CrashRecoveryCoordinator
     {
         var recovery = autoSaveService.GetRecoveryEntries();
         var tabRecovery = recoverTabs(recovery.Entries);
+        var recoveredAll = recovery.Success && tabRecovery.Success;
 
-        if (tabRecovery.RecoveredEntryIds.Count > 0)
+        if (recoveredAll || tabRecovery.RecoveredEntryIds.Count > 0)
         {
-            try
-            {
-                autoSaveService.SaveNow(captureReplacementSnapshot());
-            }
-            catch (Exception ex)
-            {
-                return new CrashRecoveryAttemptResult(
-                    false,
-                    $"Recovered files could not be persisted: {ex.Message}");
-            }
-
-            if (!autoSaveService.RecordRecoveredEntries(tabRecovery.RecoveredEntryIds))
+            if (!autoSaveService.CompleteRecovery(
+                captureReplacementSnapshot(),
+                tabRecovery.RecoveredEntryIds,
+                recoveredAll))
             {
                 return new CrashRecoveryAttemptResult(
                     false,
-                    "Recovered files could not be marked complete.");
+                    "Recovered files could not be persisted and retired safely.");
             }
         }
 
-        var recoveredAll = recovery.Success && tabRecovery.Success;
         if (!recoveredAll)
         {
             return new CrashRecoveryAttemptResult(
                 false,
                 recovery.ErrorMessage ?? "One or more files could not be recovered.");
-        }
-
-        if (!autoSaveService.ClearRecoveryFiles())
-        {
-            return new CrashRecoveryAttemptResult(
-                false,
-                "Recovered content is open, but the source recovery files could not be cleared.");
         }
 
         return new CrashRecoveryAttemptResult(true);
