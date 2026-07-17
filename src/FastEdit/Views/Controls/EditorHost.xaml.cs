@@ -942,31 +942,51 @@ public partial class EditorHost : UserControl
 
     private Task RefreshLineFiltersAsync()
     {
-        var document = TextEditor.Document;
-        var lines = new string[document?.LineCount ?? 0];
-        if (document != null)
+        return _filterRefreshCoordinator.RefreshAsync(
+            CaptureLineFilterSnapshotAsync,
+            async (result, cancellationToken) =>
         {
-            for (var lineNumber = 1; lineNumber <= document.LineCount; lineNumber++)
-            {
-                var line = document.GetLineByNumber(lineNumber);
-                lines[lineNumber - 1] = document.GetText(line.Offset, line.Length);
-            }
-        }
-
-        var service = _lineFilterService!;
-        var request = new LineFilterRefreshRequest(
-            lines,
-            service.HasActiveFilters,
-            service.ShowOnlyFilteredLines,
-            service.EvaluateLine);
-        return _filterRefreshCoordinator.RefreshAsync(request, async (result, cancellationToken) =>
-        {
+            cancellationToken.ThrowIfCancellationRequested();
             await Dispatcher.InvokeAsync(() =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 ApplyFilterRefresh(result);
             });
         });
+    }
+
+    private Task<LineFilterRefreshRequest> CaptureLineFilterSnapshotAsync(
+        CancellationToken cancellationToken)
+    {
+        return Dispatcher.InvokeAsync(() =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var service = _lineFilterService!;
+            var filterSnapshot = new LineFilterService();
+            foreach (var filter in service.Filters)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                filterSnapshot.AddFilter(filter.CreateSnapshot());
+            }
+
+            var document = TextEditor.Document;
+            var lines = new string[document?.LineCount ?? 0];
+            if (document != null)
+            {
+                for (var lineNumber = 1; lineNumber <= document.LineCount; lineNumber++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var line = document.GetLineByNumber(lineNumber);
+                    lines[lineNumber - 1] = document.GetText(line.Offset, line.Length);
+                }
+            }
+
+            return new LineFilterRefreshRequest(
+                lines,
+                filterSnapshot.HasActiveFilters,
+                service.ShowOnlyFilteredLines,
+                filterSnapshot.EvaluateLine);
+        }).Task;
     }
 
     private void ApplyFilterRefresh(LineFilterRefreshResult refresh)

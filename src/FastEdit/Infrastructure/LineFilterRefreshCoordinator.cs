@@ -14,20 +14,30 @@ internal sealed class LineFilterRefreshCoordinator : IDisposable
         Func<LineFilterRefreshRequest, CancellationToken, Task<LineFilterRefreshResult>>? computeAsync = null)
     {
         _debouncer = new DebouncedActionCoordinator(delay);
-        _computeAsync = computeAsync ?? ComputeAsync;
+        _computeAsync = computeAsync ?? ((request, cancellationToken) =>
+            Task.Run(() => Compute(request, cancellationToken), cancellationToken));
     }
 
     public Task RefreshAsync(
-        LineFilterRefreshRequest request,
+        Func<CancellationToken, Task<LineFilterRefreshRequest>> snapshotProviderAsync,
         Func<LineFilterRefreshResult, CancellationToken, Task> applyAsync)
     {
-        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(snapshotProviderAsync);
         ArgumentNullException.ThrowIfNull(applyAsync);
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         var generation = Interlocked.Increment(ref _generation);
         return _debouncer.RunAsync(async cancellationToken =>
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (generation != Volatile.Read(ref _generation))
+                return;
+
+            var request = await snapshotProviderAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (generation != Volatile.Read(ref _generation))
+                return;
+
             var result = await _computeAsync(request, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             if (generation != Volatile.Read(ref _generation))
@@ -53,7 +63,7 @@ internal sealed class LineFilterRefreshCoordinator : IDisposable
         _debouncer.Dispose();
     }
 
-    private static Task<LineFilterRefreshResult> ComputeAsync(
+    private static LineFilterRefreshResult Compute(
         LineFilterRefreshRequest request,
         CancellationToken cancellationToken)
     {
@@ -69,10 +79,10 @@ internal sealed class LineFilterRefreshCoordinator : IDisposable
             }
         }
 
-        return Task.FromResult(new LineFilterRefreshResult(
+        return new LineFilterRefreshResult(
             results,
             request.HasActiveFilters,
-            request.ShowOnlyFilteredLines));
+            request.ShowOnlyFilteredLines);
     }
 }
 

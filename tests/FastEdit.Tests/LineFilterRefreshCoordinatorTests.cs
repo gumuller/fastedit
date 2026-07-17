@@ -6,20 +6,29 @@ namespace FastEdit.Tests;
 public class LineFilterRefreshCoordinatorTests
 {
     [Fact]
-    public async Task RefreshAsync_DebouncesToLatestRequest()
+    public async Task RefreshAsync_RapidRequestsInvokeOnlyLatestSnapshotProvider()
     {
         using var coordinator = new LineFilterRefreshCoordinator(TimeSpan.FromMilliseconds(30));
         var applied = new List<string>();
+        var snapshotCount = 0;
 
         var first = coordinator.RefreshAsync(
-            CreateRequest("first"),
+            _ =>
+            {
+                snapshotCount++;
+                return Task.FromResult(CreateRequest("first"));
+            },
             (result, _) =>
             {
                 applied.Add(result.Results[1].MatchingFilter!.Pattern);
                 return Task.CompletedTask;
             });
         var second = coordinator.RefreshAsync(
-            CreateRequest("second"),
+            _ =>
+            {
+                snapshotCount++;
+                return Task.FromResult(CreateRequest("second"));
+            },
             (result, _) =>
             {
                 applied.Add(result.Results[1].MatchingFilter!.Pattern);
@@ -28,6 +37,7 @@ public class LineFilterRefreshCoordinatorTests
 
         await Task.WhenAll(first, second);
 
+        Assert.Equal(1, snapshotCount);
         Assert.Equal(["second"], applied);
     }
 
@@ -35,10 +45,15 @@ public class LineFilterRefreshCoordinatorTests
     public async Task Dispose_CancelsPendingRefresh()
     {
         var coordinator = new LineFilterRefreshCoordinator(TimeSpan.FromSeconds(10));
+        var captured = false;
         var applied = false;
 
         var pending = coordinator.RefreshAsync(
-            CreateRequest("pending"),
+            _ =>
+            {
+                captured = true;
+                return Task.FromResult(CreateRequest("pending"));
+            },
             (_, _) =>
             {
                 applied = true;
@@ -47,6 +62,7 @@ public class LineFilterRefreshCoordinatorTests
         coordinator.Dispose();
         await pending.WaitAsync(TimeSpan.FromSeconds(2));
 
+        Assert.False(captured);
         Assert.False(applied);
     }
 
@@ -73,7 +89,7 @@ public class LineFilterRefreshCoordinatorTests
         var applied = new List<string>();
 
         var first = coordinator.RefreshAsync(
-            CreateRequest("stale"),
+            _ => Task.FromResult(CreateRequest("stale")),
             (result, _) =>
             {
                 applied.Add(result.Results[1].MatchingFilter!.Pattern);
@@ -81,7 +97,7 @@ public class LineFilterRefreshCoordinatorTests
             });
         await firstComputationStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         var second = coordinator.RefreshAsync(
-            CreateRequest("current"),
+            _ => Task.FromResult(CreateRequest("current")),
             (result, _) =>
             {
                 applied.Add(result.Results[1].MatchingFilter!.Pattern);
@@ -98,10 +114,15 @@ public class LineFilterRefreshCoordinatorTests
     public async Task Cancel_PreventsPendingRefreshFromApplying()
     {
         using var coordinator = new LineFilterRefreshCoordinator(TimeSpan.FromSeconds(10));
+        var captured = false;
         var applied = false;
 
         var pending = coordinator.RefreshAsync(
-            CreateRequest("pending"),
+            _ =>
+            {
+                captured = true;
+                return Task.FromResult(CreateRequest("pending"));
+            },
             (_, _) =>
             {
                 applied = true;
@@ -110,7 +131,38 @@ public class LineFilterRefreshCoordinatorTests
         coordinator.Cancel();
         await pending.WaitAsync(TimeSpan.FromSeconds(2));
 
+        Assert.False(captured);
         Assert.False(applied);
+    }
+
+    [Fact]
+    public async Task RefreshAsync_CapturesBeforeComputingAndApplying()
+    {
+        var sequence = new List<string>();
+        using var coordinator = new LineFilterRefreshCoordinator(TimeSpan.Zero);
+
+        await coordinator.RefreshAsync(
+            _ =>
+            {
+                sequence.Add("capture");
+                var filter = new LineFilter { Pattern = "match" };
+                return Task.FromResult(new LineFilterRefreshRequest(
+                    ["match"],
+                    HasActiveFilters: true,
+                    ShowOnlyFilteredLines: false,
+                    line =>
+                    {
+                        sequence.Add("evaluate");
+                        return new LineFilterResult(line == "match", false, filter);
+                    }));
+            },
+            (_, _) =>
+            {
+                sequence.Add("apply");
+                return Task.CompletedTask;
+            });
+
+        Assert.Equal(["capture", "evaluate", "apply"], sequence);
     }
 
     private static LineFilterRefreshRequest CreateRequest(string value)
