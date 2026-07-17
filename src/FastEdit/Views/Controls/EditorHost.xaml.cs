@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Windows;
@@ -55,11 +54,9 @@ public partial class EditorHost : UserControl
     private MainViewModel? _mainViewModel;
     private Dictionary<int, Models.LineFilterResult> _filterCache = new();
     private bool _isFilterFoldingActive;
-    private readonly DebouncedActionCoordinator _filterRefreshCoordinator =
+    private readonly LineFilterRefreshCoordinator _filterRefreshCoordinator =
         new(TimeSpan.FromMilliseconds(150));
-    private readonly ExternalChangeTracker _externalChangeTracker = new();
-    private CancellationTokenSource? _externalReloadCts;
-    private int _externalChangeActive;
+    private readonly EditorExternalReloadCoordinator _externalReloadCoordinator;
     private bool _isRuntimeAttached;
 
     private static readonly IReadOnlyDictionary<MacroAction, Action<EditorHost, MacroStep, ITextToolsService?>> MacroStepHandlers =
@@ -78,6 +75,27 @@ public partial class EditorHost : UserControl
     public EditorHost()
     {
         InitializeComponent();
+        _externalReloadCoordinator = new EditorExternalReloadCoordinator(
+            TimeSpan.FromMilliseconds(200),
+            filePath => _fileSystemService!.ReadAllTextAsync(filePath),
+            action => Dispatcher.InvokeAsync(action).Task,
+            ResolveAutoReloadTab,
+            ConfirmExternalReload,
+            vm => SetStatus($"Kept unsaved changes; external update not loaded: {vm.FileName}"),
+            vm => SetStatus($"External update not loaded because the buffer changed: {vm.FileName}"),
+            filePath =>
+            {
+                TextEditor.ScrollToEnd();
+                SetStatus($"Auto-reloaded: {_fileSystemService!.GetFileName(filePath)}");
+            },
+            (filePath, exception) =>
+            {
+                var reason = exception is UnauthorizedAccessException
+                    ? "access denied"
+                    : "file is unavailable";
+                SetStatus($"Auto-reload skipped; {reason}: {_fileSystemService!.GetFileName(filePath)}");
+            },
+            CanAutoReloadPath);
         DataContextChanged += OnDataContextChanged;
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
@@ -289,7 +307,7 @@ public partial class EditorHost : UserControl
         _isRuntimeAttached = false;
 
         _filterRefreshCoordinator.Cancel();
-        CancelExternalReload();
+        _externalReloadCoordinator.Cancel();
         _fileWatcher.StopWatching();
         _fileWatcher.FileChanged -= OnFileWatcherChanged;
         if (_lineFilterService != null)
@@ -924,54 +942,42 @@ public partial class EditorHost : UserControl
 
     private Task RefreshLineFiltersAsync()
     {
-        return _filterRefreshCoordinator.RunAsync(async cancellationToken =>
+        var document = TextEditor.Document;
+        var lines = new string[document?.LineCount ?? 0];
+        if (document != null)
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            for (var lineNumber = 1; lineNumber <= document.LineCount; lineNumber++)
+            {
+                var line = document.GetLineByNumber(lineNumber);
+                lines[lineNumber - 1] = document.GetText(line.Offset, line.Length);
+            }
+        }
+
+        var service = _lineFilterService!;
+        var request = new LineFilterRefreshRequest(
+            lines,
+            service.HasActiveFilters,
+            service.ShowOnlyFilteredLines,
+            service.EvaluateLine);
+        return _filterRefreshCoordinator.RefreshAsync(request, async (result, cancellationToken) =>
+        {
             await Dispatcher.InvokeAsync(() =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                RecomputeFilterCache();
-                ApplyFilterFolding();
+                ApplyFilterRefresh(result);
             });
         });
     }
 
-    private void RecomputeFilterCache()
+    private void ApplyFilterRefresh(LineFilterRefreshResult refresh)
     {
-        _filterCache.Clear();
-
-        if (_lineFilterService == null || !_lineFilterService.HasActiveFilters)
-        {
-            _filterRenderer?.UpdateResults(_filterCache);
-            _filterDimTransformer?.UpdateResults(_filterCache, false);
-            TextEditor.TextArea.TextView.Redraw();
-            UpdateFilterMatchCount();
-            return;
-        }
-
-        var doc = TextEditor.Document;
-        if (doc == null) return;
-
-        for (int i = 1; i <= doc.LineCount; i++)
-        {
-            var line = doc.GetLineByNumber(i);
-            var text = doc.GetText(line.Offset, line.Length);
-            var result = _lineFilterService.EvaluateLine(text);
-            if (result != Models.LineFilterResult.NoMatch)
-                _filterCache[i] = result;
-        }
-
+        _filterCache = refresh.Results;
         _filterRenderer?.UpdateResults(_filterCache);
-        _filterDimTransformer?.UpdateResults(_filterCache, true);
+        _filterDimTransformer?.UpdateResults(_filterCache, refresh.HasActiveFilters);
         TextEditor.TextArea.TextView.Redraw();
         UpdateFilterMatchCount();
-    }
 
-    private void ApplyFilterFolding()
-    {
-        if (_lineFilterService == null) return;
-
-        if (_lineFilterService.ShowOnlyFilteredLines && _lineFilterService.HasActiveFilters)
+        if (refresh.ShowOnlyFilteredLines && refresh.HasActiveFilters)
             EnterFilterFoldingMode();
         else if (_isFilterFoldingActive)
             ExitFilterFoldingMode();
@@ -1137,151 +1143,34 @@ public partial class EditorHost : UserControl
         }
         else
         {
-            CancelExternalReload();
+            _externalReloadCoordinator.Cancel();
             _fileWatcher.StopWatching();
         }
     }
 
     private async void OnFileWatcherChanged(object? sender, string filePath)
     {
-        _externalChangeTracker.Record(filePath);
-        if (Interlocked.CompareExchange(ref _externalChangeActive, 1, 0) != 0)
-            return;
-
-        var reloadCts = new CancellationTokenSource();
-        var cancellationToken = reloadCts.Token;
-        var previous = Interlocked.Exchange(ref _externalReloadCts, reloadCts);
-        previous?.Cancel();
-        previous?.Dispose();
-        var promptDeclined = false;
-        ExternalReloadDecision? approvedDecision = null;
-
-        try
-        {
-            do
-            {
-                await Task.Delay(200, cancellationToken);
-
-                var change = _externalChangeTracker.Capture(filePath);
-                filePath = change.FilePath;
-                var decision = approvedDecision is { } approval &&
-                               string.Equals(
-                                   approval.ViewModel?.FilePath,
-                                   filePath,
-                                   StringComparison.OrdinalIgnoreCase)
-                    ? approval
-                    : await Dispatcher.InvokeAsync(() =>
-                        GetExternalReloadDecision(filePath));
-
-                if (decision.WasPrompted && decision.ShouldReload)
-                    approvedDecision = decision;
-
-                if (decision.ShouldReload)
-                {
-                    var content = await _fileSystemService!.ReadAllTextAsync(filePath);
-                    cancellationToken.ThrowIfCancellationRequested();
-
-                    var contentApplied = false;
-                    var generationCurrent = await Dispatcher.InvokeAsync(() =>
-                        _externalChangeTracker.TryApply(change.Generation, () =>
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        var vm = _currentVm;
-                        if (vm == null ||
-                            !IsTextMode(vm) ||
-                            !ReferenceEquals(vm, decision.ViewModel) ||
-                            !string.Equals(vm.FilePath, filePath, StringComparison.OrdinalIgnoreCase))
-                            return;
-
-                        if (!string.Equals(vm.Content, decision.ContentSnapshot, StringComparison.Ordinal))
-                        {
-                            SetStatus($"External update not loaded because the buffer changed: {vm.FileName}");
-                            return;
-                        }
-
-                        vm.ReplaceContentFromDisk(content);
-                        contentApplied = true;
-                        TextEditor.ScrollToEnd();
-                        SetStatus($"Auto-reloaded: {_fileSystemService.GetFileName(filePath)}");
-                    }));
-
-                    if (!generationCurrent)
-                        continue;
-                    if (!contentApplied)
-                        break;
-
-                    approvedDecision = null;
-                }
-
-                if (decision.WasPrompted && !decision.ShouldReload)
-                {
-                    promptDeclined = true;
-                    _externalChangeTracker.TakePendingPath();
-                    break;
-                }
-
-                var pendingPath = _externalChangeTracker.TakePendingPath();
-                if (pendingPath == null)
-                    break;
-                filePath = pendingPath;
-            }
-            while (true);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-        }
-        catch (IOException ex)
-        {
-            Trace.TraceWarning($"Auto-reload skipped for '{filePath}': {ex.Message}");
-            await Dispatcher.InvokeAsync(() =>
-                SetStatus($"Auto-reload skipped; file is unavailable: {_fileSystemService!.GetFileName(filePath)}"));
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            Trace.TraceWarning($"Auto-reload skipped for '{filePath}': {ex.Message}");
-            await Dispatcher.InvokeAsync(() =>
-                SetStatus($"Auto-reload skipped; access denied: {_fileSystemService!.GetFileName(filePath)}"));
-        }
-        finally
-        {
-            Interlocked.CompareExchange(ref _externalReloadCts, null, reloadCts);
-            reloadCts.Dispose();
-            Volatile.Write(ref _externalChangeActive, 0);
-            var pendingPath = _externalChangeTracker.TakePendingPath();
-            if (!promptDeclined && pendingPath != null && CanAutoReloadPath(pendingPath))
-                OnFileWatcherChanged(this, pendingPath);
-        }
+        await _externalReloadCoordinator.NotifyAsync(filePath);
     }
 
-    private ExternalReloadDecision GetExternalReloadDecision(string filePath)
+    private EditorTabViewModel? ResolveAutoReloadTab(string filePath)
     {
         var vm = _currentVm;
         if (vm == null ||
             !IsTextMode(vm) ||
             !string.Equals(vm.FilePath, filePath, StringComparison.OrdinalIgnoreCase))
-            return new ExternalReloadDecision(false, false, null, null);
+            return null;
+        return vm;
+    }
 
-        if (!vm.IsModified)
-            return new ExternalReloadDecision(true, false, vm, vm.Content);
-
+    private bool ConfirmExternalReload(EditorTabViewModel vm)
+    {
         var result = _dialogService!.ShowMessage(
             $"{vm.FileName} changed on disk. Reload it and discard your unsaved changes?",
             "File Changed",
             DialogButtons.YesNo,
             DialogIcon.Warning);
-        if (result == Services.Interfaces.DialogResult.Yes)
-            return new ExternalReloadDecision(true, true, vm, vm.Content);
-
-        SetStatus($"Kept unsaved changes; external update not loaded: {vm.FileName}");
-        return new ExternalReloadDecision(false, true, vm, vm.Content);
-    }
-
-    private void CancelExternalReload()
-    {
-        _externalChangeTracker.Invalidate();
-        var reloadCts = Interlocked.Exchange(ref _externalReloadCts, null);
-        reloadCts?.Cancel();
-        reloadCts?.Dispose();
+        return result == Services.Interfaces.DialogResult.Yes;
     }
 
     private bool CanAutoReloadPath(string filePath) =>
@@ -1289,12 +1178,6 @@ public partial class EditorHost : UserControl
         _mainViewModel?.IsAutoReloadEnabled == true &&
         IsTextMode(_currentVm) &&
         string.Equals(_currentVm.FilePath, filePath, StringComparison.OrdinalIgnoreCase);
-
-    private readonly record struct ExternalReloadDecision(
-        bool ShouldReload,
-        bool WasPrompted,
-        EditorTabViewModel? ViewModel,
-        string? ContentSnapshot);
 
     private bool IsActiveEditorHost()
     {
@@ -1430,7 +1313,7 @@ public partial class EditorHost : UserControl
 
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
-        CancelExternalReload();
+        _externalReloadCoordinator.Cancel();
         if (e.OldValue is EditorTabViewModel oldVm)
         {
             oldVm.PropertyChanged -= OnViewModelPropertyChanged;
@@ -1539,7 +1422,7 @@ public partial class EditorHost : UserControl
     {
         UninstallFolding();
         DocumentMap.DetachEditor();
-        CancelExternalReload();
+        _externalReloadCoordinator.Cancel();
         _fileWatcher.StopWatching();
     }
 
@@ -1614,7 +1497,7 @@ public partial class EditorHost : UserControl
             _fileWatcher.StartWatching(vm.FilePath);
         else
         {
-            CancelExternalReload();
+            _externalReloadCoordinator.Cancel();
             _fileWatcher.StopWatching();
         }
     }
