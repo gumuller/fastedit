@@ -205,6 +205,132 @@ public class DocumentSessionCoordinatorTests
     }
 
     [Fact]
+    public void PlanRecoveryBatch_DivergentSavedGenerationsRetainFirstAndRekeyAdditional()
+    {
+        var generatedIdentities = new Queue<string>(new[] { "rekeyed" });
+        var sut = new DocumentSessionCoordinator(
+            _settingsService.Object,
+            _fileSystemService.Object,
+            _tabFactory.Object,
+            generatedIdentities.Dequeue);
+        var entries = new[]
+        {
+            new AutoSaveEntry(
+                "generation-a:tab-shared",
+                "saved.txt",
+                @"C:\saved.txt",
+                "first edit",
+                false,
+                TabIdentity: "shared"),
+            new AutoSaveEntry(
+                "generation-b:tab-shared",
+                "saved.txt",
+                @"C:\saved.txt",
+                "second edit",
+                false,
+                TabIdentity: "shared")
+        };
+
+        var plan = sut.PlanRecoveryBatch(
+            entries,
+            Array.Empty<EditorTabViewModel>());
+
+        Assert.Equal(2, plan.Candidates.Count);
+        Assert.Equal("shared", plan.Candidates[0].AssignedIdentity);
+        Assert.Equal("rekeyed", plan.Candidates[1].AssignedIdentity);
+        Assert.Empty(plan.DuplicateEntryIds);
+    }
+
+    [Fact]
+    public void PlanRecoveryBatch_LiveIdentityCollisionRekeysDivergentCandidate()
+    {
+        var live = CreateTab("Untitled-1");
+        live.RestoreAutoSaveIdentity("shared");
+        live.SetContentBaseline("live", isModified: true);
+        var sut = new DocumentSessionCoordinator(
+            _settingsService.Object,
+            _fileSystemService.Object,
+            _tabFactory.Object,
+            () => "rekeyed");
+        var entry = new AutoSaveEntry(
+            "source",
+            "Untitled-1",
+            null,
+            "divergent",
+            true,
+            TabIdentity: "shared");
+
+        var plan = sut.PlanRecoveryBatch(new[] { entry }, new[] { live });
+
+        Assert.Equal("rekeyed", Assert.Single(plan.Candidates).AssignedIdentity);
+        Assert.Empty(plan.DuplicateEntryIds);
+    }
+
+    [Fact]
+    public void PlanRecoveryBatch_ExactLiveDuplicateSkipsWithoutRekeying()
+    {
+        var generatorCalls = 0;
+        var live = CreateTab("Untitled-1");
+        live.RestoreAutoSaveIdentity("shared");
+        live.SetContentBaseline("same", isModified: true);
+        var sut = new DocumentSessionCoordinator(
+            _settingsService.Object,
+            _fileSystemService.Object,
+            _tabFactory.Object,
+            () =>
+            {
+                generatorCalls++;
+                return "unused";
+            });
+        var entry = new AutoSaveEntry(
+            "source",
+            "Untitled-1",
+            null,
+            "same",
+            true,
+            TabIdentity: "shared");
+
+        var result = sut.RecoverTabs(new[] { entry }, new[] { live });
+
+        Assert.True(result.Success);
+        Assert.Empty(result.RecoveredTabs!);
+        Assert.Equal(new[] { "source" }, result.RecoveredEntryIds);
+        Assert.Equal(0, generatorCalls);
+        _tabFactory.Verify(
+            factory => factory.CreateUntitled(It.IsAny<string?>()),
+            Times.Never);
+        Assert.Equal("shared", live.AutoSaveIdentity);
+        Assert.Equal("same", live.Content);
+    }
+
+    [Fact]
+    public void PlanRecoveryBatch_DifferentCaretStateIsDivergent()
+    {
+        var live = CreateTab("Untitled-1");
+        live.RestoreAutoSaveIdentity("shared");
+        live.SetContentBaseline("same", isModified: true);
+        live.CursorOffset = 1;
+        var sut = new DocumentSessionCoordinator(
+            _settingsService.Object,
+            _fileSystemService.Object,
+            _tabFactory.Object,
+            () => "rekeyed");
+        var entry = new AutoSaveEntry(
+            "source",
+            "Untitled-1",
+            null,
+            "same",
+            true,
+            CursorOffset: 2,
+            TabIdentity: "shared");
+
+        var plan = sut.PlanRecoveryBatch(new[] { entry }, new[] { live });
+
+        Assert.Equal("rekeyed", Assert.Single(plan.Candidates).AssignedIdentity);
+        Assert.Empty(plan.DuplicateEntryIds);
+    }
+
+    [Fact]
     public void AdoptRestoredTabs_CaseVariantIsNotDiscarded()
     {
         var live = CreateTab("File.txt", @"C:\CaseSensitive\File.txt");

@@ -983,7 +983,7 @@ public partial class MainViewModel : ObservableObject
 
     public TabRecoveryResult RecoverTabs(IReadOnlyList<AutoSaveEntry> entries)
     {
-        var recovery = _sessionCoordinator.RecoverTabs(entries);
+        var recovery = _sessionCoordinator.RecoverTabs(entries, Tabs);
         foreach (var tab in recovery.RecoveredTabs ?? Array.Empty<EditorTabViewModel>())
             Tabs.Add(tab);
 

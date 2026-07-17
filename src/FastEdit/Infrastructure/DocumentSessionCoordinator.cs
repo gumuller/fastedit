@@ -10,16 +10,31 @@ public sealed class DocumentSessionCoordinator
     private readonly ISettingsService _settingsService;
     private readonly IFileSystemService _fileSystemService;
     private readonly IEditorTabFactory _tabFactory;
+    private readonly Func<string> _tabIdentityGenerator;
     private readonly HashSet<EditorTabViewModel> _shutdownDiscardedTabs = new();
 
     public DocumentSessionCoordinator(
         ISettingsService settingsService,
         IFileSystemService fileSystemService,
         IEditorTabFactory tabFactory)
+        : this(
+            settingsService,
+            fileSystemService,
+            tabFactory,
+            () => Guid.NewGuid().ToString("N"))
+    {
+    }
+
+    internal DocumentSessionCoordinator(
+        ISettingsService settingsService,
+        IFileSystemService fileSystemService,
+        IEditorTabFactory tabFactory,
+        Func<string> tabIdentityGenerator)
     {
         _settingsService = settingsService;
         _fileSystemService = fileSystemService;
         _tabFactory = tabFactory;
+        _tabIdentityGenerator = tabIdentityGenerator;
     }
 
     public SessionData CreateNamedSession(
@@ -337,28 +352,102 @@ public sealed class DocumentSessionCoordinator
         return tab;
     }
 
-    public TabRecoveryResult RecoverTabs(IReadOnlyList<AutoSaveEntry> entries)
+    public RecoveryBatchPlan PlanRecoveryBatch(
+        IReadOnlyList<AutoSaveEntry> entries,
+        IReadOnlyList<EditorTabViewModel> liveTabs)
     {
-        var recoveredTabs = new List<EditorTabViewModel>(entries.Count);
-        var recoveredEntryIds = new List<string>(entries.Count);
+        var usedIdentities = liveTabs
+            .Select(tab => tab.AutoSaveIdentity)
+            .ToHashSet(StringComparer.Ordinal);
+        var reservedPersistedIdentities = entries
+            .Select(entry => entry.TabIdentity)
+            .Where(identity => !string.IsNullOrEmpty(identity))
+            .Cast<string>()
+            .ToHashSet(StringComparer.Ordinal);
+        var logicalOwners = liveTabs
+            .Select(tab => RecoveryLogicalOwner.FromLiveTab(tab))
+            .ToList();
+        var candidates = new List<PlannedRecoveryEntry>(entries.Count);
+        var duplicateEntryIds = new List<string>();
+
         foreach (var entry in entries)
+        {
+            if (!string.IsNullOrEmpty(entry.TabIdentity) &&
+                logicalOwners.Any(owner =>
+                    string.Equals(
+                        owner.OriginalIdentity,
+                        entry.TabIdentity,
+                        StringComparison.Ordinal) &&
+                    owner.IsEquivalentTo(entry)))
+            {
+                duplicateEntryIds.Add(entry.Id);
+                continue;
+            }
+
+            var assignedIdentity = entry.TabIdentity;
+            if (string.IsNullOrEmpty(assignedIdentity) ||
+                usedIdentities.Contains(assignedIdentity))
+            {
+                assignedIdentity = GenerateUniqueTabIdentity(
+                    usedIdentities,
+                    reservedPersistedIdentities);
+            }
+
+            usedIdentities.Add(assignedIdentity);
+            candidates.Add(new PlannedRecoveryEntry(entry, assignedIdentity));
+            if (!string.IsNullOrEmpty(entry.TabIdentity))
+            {
+                logicalOwners.Add(
+                    RecoveryLogicalOwner.FromRecoveryEntry(entry));
+            }
+        }
+
+        return new RecoveryBatchPlan(candidates, duplicateEntryIds);
+    }
+
+    public TabRecoveryResult RecoverTabs(
+        IReadOnlyList<AutoSaveEntry> entries,
+        IReadOnlyList<EditorTabViewModel> liveTabs)
+    {
+        var plan = PlanRecoveryBatch(entries, liveTabs);
+        var recoveredTabs = new List<EditorTabViewModel>(entries.Count);
+        var recoveredEntryIds = new List<string>(plan.DuplicateEntryIds);
+        foreach (var candidate in plan.Candidates)
         {
             try
             {
-                recoveredTabs.Add(CreateRecoveryTab(entry));
+                var entry = candidate.Entry with
+                {
+                    TabIdentity = candidate.AssignedIdentity
+                };
+                var tab = CreateRecoveryTab(entry);
+                if (entry.IsUntitled)
+                {
+                    tab.FileName = UntitledTabNameAllocator.Allocate(
+                        liveTabs.Concat(recoveredTabs),
+                        tab.FileName);
+                }
+
+                recoveredTabs.Add(tab);
                 recoveredEntryIds.Add(entry.Id);
             }
             catch (Exception ex)
             {
-                Trace.TraceWarning("Failed to recover auto-save entry '{0}': {1}", entry.FileName, ex);
+                Trace.TraceWarning(
+                    "Failed to recover auto-save entry '{0}': {1}",
+                    candidate.Entry.FileName,
+                    ex);
             }
         }
 
         return new TabRecoveryResult(
-            recoveredTabs.Count == entries.Count,
+            recoveredEntryIds.Count == entries.Count,
             recoveredEntryIds,
             recoveredTabs);
     }
+
+    public TabRecoveryResult RecoverTabs(IReadOnlyList<AutoSaveEntry> entries) =>
+        RecoverTabs(entries, Array.Empty<EditorTabViewModel>());
 
     internal static string NormalizeFilePath(string filePath) =>
         Path.GetFullPath(filePath)
@@ -438,6 +527,26 @@ public sealed class DocumentSessionCoordinator
         return liveTabs.FirstOrDefault(tab =>
             !string.IsNullOrEmpty(tab.FilePath) &&
             HasSameOpenIdentity(tab.FilePath, candidate.Tab.FilePath));
+    }
+
+    private string GenerateUniqueTabIdentity(
+        IReadOnlySet<string> usedIdentities,
+        IReadOnlySet<string> reservedPersistedIdentities)
+    {
+        string identity;
+        do
+        {
+            identity = _tabIdentityGenerator();
+            if (string.IsNullOrWhiteSpace(identity))
+            {
+                throw new InvalidOperationException(
+                    "The tab identity generator returned an empty identity.");
+            }
+        }
+        while (usedIdentities.Contains(identity) ||
+               reservedPersistedIdentities.Contains(identity));
+
+        return identity;
     }
 
     private void PersistUntitledContent(
@@ -603,3 +712,58 @@ public sealed record TabRecoveryResult(
     bool Success,
     IReadOnlyList<string> RecoveredEntryIds,
     IReadOnlyList<EditorTabViewModel>? RecoveredTabs = null);
+
+public sealed record RecoveryBatchPlan(
+    IReadOnlyList<PlannedRecoveryEntry> Candidates,
+    IReadOnlyList<string> DuplicateEntryIds);
+
+public sealed record PlannedRecoveryEntry(
+    AutoSaveEntry Entry,
+    string AssignedIdentity);
+
+internal sealed record RecoveryLogicalOwner(
+    string OriginalIdentity,
+    string Content,
+    bool IsUntitled,
+    string? FilePath,
+    int CursorOffset,
+    double ScrollOffset)
+{
+    public static RecoveryLogicalOwner FromLiveTab(EditorTabViewModel tab) =>
+        new(
+            tab.AutoSaveIdentity,
+            tab.Content,
+            string.IsNullOrEmpty(tab.FilePath),
+            string.IsNullOrEmpty(tab.FilePath) ? null : tab.FilePath,
+            tab.CursorOffset,
+            tab.ScrollOffset);
+
+    public static RecoveryLogicalOwner FromRecoveryEntry(AutoSaveEntry entry) =>
+        new(
+            entry.TabIdentity!,
+            entry.Content,
+            entry.IsUntitled,
+            entry.FilePath,
+            entry.CursorOffset,
+            entry.ScrollOffset);
+
+    public bool IsEquivalentTo(AutoSaveEntry entry)
+    {
+        if (IsUntitled != entry.IsUntitled ||
+            !string.Equals(Content, entry.Content, StringComparison.Ordinal) ||
+            CursorOffset != entry.CursorOffset ||
+            ScrollOffset != entry.ScrollOffset)
+        {
+            return false;
+        }
+
+        if (IsUntitled)
+            return true;
+
+        return !string.IsNullOrEmpty(FilePath) &&
+            !string.IsNullOrEmpty(entry.FilePath) &&
+            DocumentSessionCoordinator.HasSameOpenIdentity(
+                FilePath,
+                entry.FilePath);
+    }
+}
