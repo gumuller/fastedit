@@ -1,3 +1,4 @@
+using System.IO;
 using FastEdit.Infrastructure;
 using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
@@ -62,5 +63,29 @@ public class CrashRecoveryCoordinatorTests
             It.IsAny<IEnumerable<AutoSaveEntry>>(),
             It.IsAny<IEnumerable<string>>(),
             true), Times.Once);
+    }
+
+    [Fact]
+    public void Recover_ReplacementSnapshotCaptureFailureRetainsSourceGeneration()
+    {
+        var autoSave = new Mock<IAutoSaveService>();
+        var source = new AutoSaveEntry("source", "recovered.txt", null, "recovered", true);
+        autoSave.Setup(service => service.GetRecoveryEntries())
+            .Returns(new RecoveryEntriesResult(true, new[] { source }));
+
+        var result = CrashRecoveryCoordinator.Recover(
+            autoSave.Object,
+            _ => new TabRecoveryResult(true, new[] { source.Id }),
+            () => throw new InvalidDataException("malformed path"));
+
+        Assert.False(result.Success);
+        Assert.Contains("could not be persisted", result.FailureMessage);
+        autoSave.Verify(service => service.CompleteRecovery(
+            It.IsAny<IEnumerable<AutoSaveEntry>>(),
+            It.IsAny<IEnumerable<string>>(),
+            It.IsAny<bool>()), Times.Never);
+        autoSave.Verify(service => service.RecordRecoveredEntries(
+            It.IsAny<IEnumerable<string>>()), Times.Never);
+        autoSave.Verify(service => service.ClearRecoveryFiles(), Times.Never);
     }
 }

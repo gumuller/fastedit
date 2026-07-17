@@ -1,4 +1,5 @@
 using System.IO;
+using System.IO.Enumeration;
 using FastEdit.Services;
 using FastEdit.Services.Interfaces;
 using FluentAssertions;
@@ -212,6 +213,175 @@ public class AutoSaveServiceTests
 
         _fileSystem.Verify(f => f.DeleteFile(contentPath), Times.Exactly(2));
         _fileSystem.Verify(f => f.DeleteFile(retiredManifest), Times.Once);
+    }
+
+    [Fact]
+    public void FailedFirstSnapshot_ShutdownQuarantinesAndNextStartRetriesCleanup()
+    {
+        var existingFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var fileContents = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        string? activeContentPath = null;
+        string? activeMarkerPath = null;
+        string? retiredManifestPath = null;
+        var manifestWriteAttempts = 0;
+        var contentDeleteAttempts = 0;
+        var unrelatedContentPath = Path.Combine(_autoSaveDir, "unrelated-content.txt");
+        existingFiles.Add(unrelatedContentPath);
+        fileContents[unrelatedContentPath] = "unrelated";
+
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.FileExists(It.IsAny<string>()))
+            .Returns((string path) => existingFiles.Contains(path));
+        _fileSystem.Setup(f => f.ReadAllText(It.IsAny<string>()))
+            .Returns((string path) => fileContents[path]);
+        _fileSystem.Setup(f => f.GetFiles(
+                _autoSaveDir,
+                It.IsAny<string>(),
+                false))
+            .Returns((string _, string pattern, bool _) =>
+                existingFiles
+                    .Where(path => FileSystemName.MatchesSimpleExpression(
+                        pattern,
+                        Path.GetFileName(path),
+                        ignoreCase: true))
+                    .ToArray());
+        _fileSystem.Setup(f => f.WriteAllTextAtomic(
+                It.IsAny<string>(),
+                It.IsAny<string>()))
+            .Callback<string, string>((path, content) =>
+            {
+                if (path.EndsWith(".txt", StringComparison.Ordinal))
+                    activeContentPath = path;
+                else if (path.EndsWith(".lock", StringComparison.Ordinal))
+                    activeMarkerPath = path;
+
+                if (path.Contains("manifest-", StringComparison.OrdinalIgnoreCase) &&
+                    path.EndsWith(".json", StringComparison.OrdinalIgnoreCase) &&
+                    manifestWriteAttempts++ == 0)
+                {
+                    throw new IOException("manifest write failed");
+                }
+
+                existingFiles.Add(path);
+                fileContents[path] = content;
+            });
+        _fileSystem.Setup(f => f.MoveFile(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                false))
+            .Callback<string, string, bool>((source, destination, _) =>
+            {
+                existingFiles.Remove(source);
+                existingFiles.Add(destination);
+                fileContents[destination] = fileContents[source];
+                fileContents.Remove(source);
+                retiredManifestPath = destination;
+            });
+        _fileSystem.Setup(f => f.DeleteFile(It.IsAny<string>()))
+            .Callback<string>(path =>
+            {
+                if (path == activeContentPath && contentDeleteAttempts++ == 0)
+                    throw new IOException("content locked");
+
+                existingFiles.Remove(path);
+                fileContents.Remove(path);
+            });
+        _sut.Start();
+
+        var firstSnapshot = () => _sut.SaveNow(new[]
+        {
+            new AutoSaveEntry("orphan", "orphan.txt", null, "recover me", true)
+        });
+        firstSnapshot.Should().Throw<IOException>();
+        _sut.Stop();
+
+        _sut.MarkCleanShutdown().Should().BeFalse();
+        existingFiles.Should().Contain(activeContentPath!);
+        existingFiles.Should().Contain(retiredManifestPath!);
+        existingFiles.Should().NotContain(activeMarkerPath!);
+
+        var nextRun = new AutoSaveService(
+            _fileSystem.Object,
+            _settings.Object,
+            new InlineDispatcherService());
+        nextRun.Start();
+        nextRun.Stop();
+
+        existingFiles.Should().NotContain(activeContentPath!);
+        existingFiles.Should().NotContain(retiredManifestPath!);
+        existingFiles.Should().Contain(unrelatedContentPath);
+        contentDeleteAttempts.Should().Be(2);
+    }
+
+    [Fact]
+    public void Start_ManifestlessCleanupSkipsLiveAndRetiredGenerations()
+    {
+        const string liveGeneration = "live";
+        const string retiredGeneration = "retired";
+        var liveMarker = Path.Combine(_autoSaveDir, $"active-{liveGeneration}.lock");
+        var liveContent = Path.Combine(_autoSaveDir, $"{liveGeneration}-entry.txt");
+        var liveManifest = Path.Combine(_autoSaveDir, $"manifest-{liveGeneration}.json");
+        var retiredMarker = Path.Combine(_autoSaveDir, $"active-{retiredGeneration}.lock");
+        var retiredContent = Path.Combine(_autoSaveDir, $"{retiredGeneration}-entry.txt");
+        var retiredSourceManifest = Path.Combine(
+            _autoSaveDir,
+            $"manifest-{retiredGeneration}.json");
+        var retiredManifest = Path.Combine(
+            _autoSaveDir,
+            $".retired-operation-{Path.GetFileName(retiredSourceManifest)}");
+        var retiredManifestJson = $$"""
+            [{"Id":"entry","FileName":"retired.txt","FilePath":null,"ContentFile":"{{Path.GetFileName(retiredContent)}}","IsUntitled":true,"CursorOffset":0,"ScrollOffset":0}]
+            """;
+        var existingFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            liveMarker,
+            liveContent,
+            retiredMarker,
+            retiredContent,
+            retiredManifest
+        };
+        var fileContents = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            [retiredManifest] = retiredManifestJson,
+            [retiredMarker] = "retired"
+        };
+        using var process = System.Diagnostics.Process.GetCurrentProcess();
+        fileContents[liveMarker] =
+            $"{process.Id}|{process.StartTime.ToUniversalTime().Ticks}";
+        _fileSystem.Setup(f => f.FileExists(It.IsAny<string>()))
+            .Returns((string path) => existingFiles.Contains(path));
+        _fileSystem.Setup(f => f.ReadAllText(It.IsAny<string>()))
+            .Returns((string path) => fileContents[path]);
+        _fileSystem.Setup(f => f.GetFiles(
+                _autoSaveDir,
+                It.IsAny<string>(),
+                false))
+            .Returns((string _, string pattern, bool _) =>
+                existingFiles
+                    .Where(path => FileSystemName.MatchesSimpleExpression(
+                        pattern,
+                        Path.GetFileName(path),
+                        ignoreCase: true))
+                    .ToArray());
+        _fileSystem.Setup(f => f.DeleteFile(retiredContent))
+            .Throws(new IOException("retired content locked"));
+        _fileSystem.Setup(f => f.DeleteFile(retiredMarker))
+            .Throws(new IOException("retired marker locked"));
+
+        _sut.Start();
+        _sut.Stop();
+
+        _fileSystem.Verify(f => f.WriteAllTextAtomic(
+            liveManifest,
+            It.IsAny<string>()), Times.Never);
+        _fileSystem.Verify(f => f.WriteAllTextAtomic(
+            retiredSourceManifest,
+            It.IsAny<string>()), Times.Never);
+        _fileSystem.Verify(f => f.DeleteFile(liveContent), Times.Never);
+        _fileSystem.Verify(f => f.DeleteFile(liveMarker), Times.Never);
+        _fileSystem.Verify(f => f.DeleteFile(retiredContent), Times.Once);
+        _fileSystem.Verify(f => f.DeleteFile(retiredMarker), Times.Once);
+        _fileSystem.Verify(f => f.DeleteFile(retiredManifest), Times.Never);
     }
 
     [Fact]
@@ -605,7 +775,7 @@ public class AutoSaveServiceTests
             .Throws(new IOException("locked"));
         _sut.GetRecoveryEntries();
 
-        _sut.ClearRecoveryFiles().Should().BeTrue();
+        _sut.ClearRecoveryFiles().Should().BeFalse();
 
         _fileSystem.Verify(f => f.MoveFile(manifestPath, It.IsAny<string>(), false), Times.Once);
         _fileSystem.Verify(f => f.DeleteFile(manifestPath), Times.Never);

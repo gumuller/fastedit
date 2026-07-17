@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
 
@@ -16,14 +17,23 @@ public static class CrashRecoveryCoordinator
 
         if (recoveredAll || tabRecovery.RecoveredEntryIds.Count > 0)
         {
-            if (!autoSaveService.CompleteRecovery(
-                captureReplacementSnapshot(),
-                tabRecovery.RecoveredEntryIds,
-                recoveredAll))
+            try
             {
-                return new CrashRecoveryAttemptResult(
-                    false,
-                    "Recovered files could not be persisted and retired safely.");
+                var replacementSnapshot = captureReplacementSnapshot();
+                if (!autoSaveService.CompleteRecovery(
+                    replacementSnapshot,
+                    tabRecovery.RecoveredEntryIds,
+                    recoveredAll))
+                {
+                    return ReplacementPersistenceFailure();
+                }
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning(
+                    "Failed to capture or persist the replacement recovery snapshot: {0}",
+                    ex);
+                return ReplacementPersistenceFailure();
             }
         }
 
@@ -36,6 +46,11 @@ public static class CrashRecoveryCoordinator
 
         return new CrashRecoveryAttemptResult(true);
     }
+
+    private static CrashRecoveryAttemptResult ReplacementPersistenceFailure() =>
+        new(
+            false,
+            "Recovered files could not be persisted and retired safely.");
 }
 
 public record CrashRecoveryAttemptResult(

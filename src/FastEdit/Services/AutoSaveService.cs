@@ -73,6 +73,7 @@ public sealed class AutoSaveService : IAutoSaveService
             IntervalSeconds = _settings.AutoSaveIntervalSeconds;
             _fileSystem.CreateDirectory(_autoSaveDir);
             CleanupRetiredGenerations();
+            CleanupAbandonedManifestlessGenerations();
             var wasCleanShutdown = _fileSystem.FileExists(_shutdownMarkerPath);
             if (wasCleanShutdown)
                 _fileSystem.DeleteFile(_shutdownMarkerPath);
@@ -446,9 +447,15 @@ public sealed class AutoSaveService : IAutoSaveService
             {
                 var contentPaths = GetGenerationContentPaths(manifestPath);
                 var markerPath = GetGenerationMarkerPath(manifestPath);
-                if (RetireGeneration(manifestPath, contentPaths, markerPath))
+                if (RetireGeneration(
+                    manifestPath,
+                    contentPaths,
+                    markerPath,
+                    out var cleanupComplete))
                 {
                     retiredManifests.Add(manifestPath);
+                    if (!cleanupComplete)
+                        allRetired = false;
                 }
                 else
                 {
@@ -483,10 +490,32 @@ public sealed class AutoSaveService : IAutoSaveService
             if (_fileSystem.FileExists(_activeManifestPath))
             {
                 var contentPaths = GetGenerationContentPaths(_activeManifestPath);
-                return RetireGeneration(
+                var retired = RetireGeneration(
                     _activeManifestPath,
                     contentPaths,
-                    _activeGenerationMarkerPath);
+                    _activeGenerationMarkerPath,
+                    out var cleanupComplete);
+                return retired && cleanupComplete;
+            }
+
+            var manifestlessContentPaths = _fileSystem.GetFiles(
+                _autoSaveDir,
+                $"{_activeContentPrefix}*.txt");
+            if (manifestlessContentPaths.Length > 0)
+            {
+                if (!TryWriteSyntheticManifest(
+                    _activeManifestPath,
+                    manifestlessContentPaths))
+                {
+                    return false;
+                }
+
+                var retired = RetireGeneration(
+                    _activeManifestPath,
+                    manifestlessContentPaths,
+                    _activeGenerationMarkerPath,
+                    out var cleanupComplete);
+                return retired && cleanupComplete;
             }
 
             if (_fileSystem.FileExists(_activeGenerationMarkerPath))
@@ -597,8 +626,10 @@ public sealed class AutoSaveService : IAutoSaveService
     private bool RetireGeneration(
         string manifestPath,
         IReadOnlyCollection<string> contentPaths,
-        string? markerPath)
+        string? markerPath,
+        out bool cleanupComplete)
     {
+        cleanupComplete = false;
         var retiredManifestPath = Path.Combine(
             _autoSaveDir,
             $".retired-{Guid.NewGuid():N}-{Path.GetFileName(manifestPath)}");
@@ -615,7 +646,7 @@ public sealed class AutoSaveService : IAutoSaveService
             return false;
         }
 
-        var cleanupComplete = true;
+        cleanupComplete = true;
         foreach (var contentPath in contentPaths)
         {
             try
@@ -666,6 +697,96 @@ public sealed class AutoSaveService : IAutoSaveService
         }
 
         return true;
+    }
+
+    private void CleanupAbandonedManifestlessGenerations()
+    {
+        var retiredManifestNames = _fileSystem
+            .GetFiles(_autoSaveDir, ".retired-*.json")
+            .Select(GetOriginalManifestName)
+            .OfType<string>()
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var markerPath in _fileSystem.GetFiles(_autoSaveDir, "active-*.lock"))
+        {
+            var markerName = Path.GetFileNameWithoutExtension(markerPath);
+            const string markerPrefix = "active-";
+            if (!markerName.StartsWith(markerPrefix, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var generationId = markerName[markerPrefix.Length..];
+            var manifestName = $"manifest-{generationId}.json";
+            var manifestPath = Path.Combine(_autoSaveDir, manifestName);
+            if (_fileSystem.FileExists(manifestPath) ||
+                retiredManifestNames.Contains(manifestName) ||
+                IsActiveGeneration(manifestPath))
+            {
+                continue;
+            }
+
+            var contentPaths = _fileSystem.GetFiles(
+                _autoSaveDir,
+                $"{generationId}-*.txt");
+            if (contentPaths.Length == 0)
+            {
+                TryDeleteAbandonedMarker(markerPath);
+                continue;
+            }
+
+            if (!TryWriteSyntheticManifest(manifestPath, contentPaths))
+                continue;
+
+            RetireGeneration(
+                manifestPath,
+                contentPaths,
+                markerPath,
+                out _);
+        }
+    }
+
+    private void TryDeleteAbandonedMarker(string markerPath)
+    {
+        try
+        {
+            if (_fileSystem.FileExists(markerPath))
+                _fileSystem.DeleteFile(markerPath);
+        }
+        catch (Exception ex)
+        {
+            Trace.TraceWarning(
+                "Failed to delete abandoned auto-save marker '{0}': {1}",
+                markerPath,
+                ex);
+        }
+    }
+
+    private bool TryWriteSyntheticManifest(
+        string manifestPath,
+        IReadOnlyCollection<string> contentPaths)
+    {
+        try
+        {
+            var manifest = contentPaths.Select(contentPath => new AutoSaveManifestEntry
+            {
+                Id = Path.GetFileNameWithoutExtension(contentPath),
+                FileName = Path.GetFileName(contentPath),
+                ContentFile = Path.GetFileName(contentPath),
+                IsUntitled = true
+            });
+            var json = JsonSerializer.Serialize(
+                manifest,
+                new JsonSerializerOptions { WriteIndented = true });
+            _fileSystem.WriteAllTextAtomic(manifestPath, json);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Trace.TraceWarning(
+                "Failed to persist cleanup metadata for manifest-less generation '{0}': {1}",
+                manifestPath,
+                ex);
+            return false;
+        }
     }
 
     private IReadOnlyList<string> GetManifestPaths()
