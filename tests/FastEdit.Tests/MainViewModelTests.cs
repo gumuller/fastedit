@@ -557,7 +557,7 @@ public class MainViewModelTests
     }
 
     [Fact]
-    public async Task ConfirmExit_NoThenShutdownSession_ExcludesOnlyDiscardedUntitledContent()
+    public async Task PrepareForExit_NoThenShutdownSession_ExcludesOnlyDiscardedUntitledContent()
     {
         var discarded = CreateMockTab("Untitled-discarded");
         var retained = CreateMockTab("Untitled-retained");
@@ -573,7 +573,7 @@ public class MainViewModelTests
                 DialogButtons.YesNoCancel, DialogIcon.Warning))
             .Returns(Services.Interfaces.DialogResult.No);
 
-        Assert.True(await _sut.ConfirmExitAsync(trackDiscardedUntitledContent: true));
+        Assert.True(await _sut.PrepareForExitAsync());
         _sut.SaveSession();
 
         _settingsService.VerifySet(s => s.OpenFiles = It.Is<List<SessionFile>>(files =>
