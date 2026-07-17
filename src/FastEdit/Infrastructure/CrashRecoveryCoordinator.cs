@@ -11,13 +11,13 @@ public static class CrashRecoveryCoordinator
         Func<IReadOnlyList<AutoSaveEntry>, TabRecoveryResult> recoverTabs,
         Func<IReadOnlyList<AutoSaveEntry>> captureReplacementSnapshot)
     {
-        var recovery = autoSaveService.GetRecoveryEntries();
-        var tabRecovery = recoverTabs(recovery.Entries);
-        var recoveredAll = recovery.Success && tabRecovery.Success;
-
-        if (recoveredAll || tabRecovery.RecoveredEntryIds.Count > 0)
+        try
         {
-            try
+            var recovery = autoSaveService.GetRecoveryEntries();
+            var tabRecovery = recoverTabs(recovery.Entries);
+            var recoveredAll = recovery.Success && tabRecovery.Success;
+
+            if (recoveredAll || tabRecovery.RecoveredEntryIds.Count > 0)
             {
                 var replacementSnapshot = captureReplacementSnapshot();
                 if (!autoSaveService.CompleteRecovery(
@@ -28,23 +28,21 @@ public static class CrashRecoveryCoordinator
                     return ReplacementPersistenceFailure();
                 }
             }
-            catch (Exception ex)
+
+            if (!recoveredAll)
             {
-                Trace.TraceWarning(
-                    "Failed to capture or persist the replacement recovery snapshot: {0}",
-                    ex);
-                return ReplacementPersistenceFailure();
+                return new CrashRecoveryAttemptResult(
+                    false,
+                    recovery.ErrorMessage ?? "One or more files could not be recovered.");
             }
-        }
 
-        if (!recoveredAll)
+            return new CrashRecoveryAttemptResult(true);
+        }
+        catch (Exception ex)
         {
-            return new CrashRecoveryAttemptResult(
-                false,
-                recovery.ErrorMessage ?? "One or more files could not be recovered.");
+            Trace.TraceWarning("Crash recovery failed safely: {0}", ex);
+            return ReplacementPersistenceFailure();
         }
-
-        return new CrashRecoveryAttemptResult(true);
     }
 
     private static CrashRecoveryAttemptResult ReplacementPersistenceFailure() =>
