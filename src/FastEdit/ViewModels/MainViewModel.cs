@@ -206,7 +206,9 @@ public partial class MainViewModel : ObservableObject
             }
 
             await SelectedTab.SaveCommand.ExecuteAsync(null);
-            StatusText = $"Saved: {SelectedTab.FileName}";
+            StatusText = SelectedTab.IsModified
+                ? $"Save cancelled: {SelectedTab.FileName}"
+                : $"Saved: {SelectedTab.FileName}";
         }
         catch (Exception ex)
         {
@@ -602,10 +604,8 @@ public partial class MainViewModel : ObservableObject
 
             if (result == Services.Interfaces.DialogResult.Yes)
             {
-                var saved = await tab.SaveCommand.ExecuteAsync(null)
-                    .ContinueWith(_ => !tab.IsModified);
-                if (!saved)
-                    return; // Save was cancelled or failed
+                if (!await TrySaveTabAsync(tab))
+                    return;
             }
         }
 
@@ -662,25 +662,56 @@ public partial class MainViewModel : ObservableObject
         var name = _dialogService.ShowInputDialog("Save Session As", "Session name:");
         if (string.IsNullOrWhiteSpace(name)) return;
 
-        var session = BuildSessionData();
-        session.Name = name;
-        _workspaceService.SaveNamedSession(name, session);
-        StatusText = $"Session saved: {name}";
+        try
+        {
+            var session = BuildSessionData();
+            session.Name = name;
+            _workspaceService.SaveNamedSession(name, session);
+            StatusText = $"Session saved: {name}";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Failed to save session '{name}': {ex.Message}";
+        }
     }
 
     [RelayCommand]
     private async Task LoadSession(string? name)
     {
         if (string.IsNullOrEmpty(name)) return;
-        var session = _workspaceService.LoadNamedSession(name);
+
+        SessionData? session;
+        try
+        {
+            session = _workspaceService.LoadNamedSession(name);
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Failed to load session '{name}': {ex.Message}";
+            return;
+        }
+
         if (session == null)
         {
             StatusText = $"Session not found: {name}";
             return;
         }
 
-        await RestoreFromSessionDataAsync(session);
-        StatusText = $"Session loaded: {name}";
+        if (!await ConfirmExitAsync())
+        {
+            StatusText = $"Session load cancelled: {name}";
+            return;
+        }
+
+        try
+        {
+            await RestoreFromSessionDataAsync(session);
+            StatusText = $"Session loaded: {name}";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Failed to load session '{name}': {ex.Message}";
+        }
     }
 
     [RelayCommand]
@@ -694,8 +725,15 @@ public partial class MainViewModel : ObservableObject
             Name = Path.GetFileNameWithoutExtension(path),
             RootFolders = FileTree.RootPaths.ToList()
         };
-        _workspaceService.SaveWorkspace(path, workspace);
-        StatusText = $"Workspace saved: {workspace.Name}";
+        try
+        {
+            _workspaceService.SaveWorkspace(path, workspace);
+            StatusText = $"Workspace saved: {workspace.Name}";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Failed to save workspace: {ex.Message}";
+        }
     }
 
     [RelayCommand]
@@ -704,15 +742,22 @@ public partial class MainViewModel : ObservableObject
         var path = _dialogService.ShowOpenFileDialog("FastEdit Workspace|*.fastedit-workspace");
         if (string.IsNullOrEmpty(path)) return;
 
-        var workspace = _workspaceService.LoadWorkspace(path);
-        if (workspace == null)
+        try
         {
-            StatusText = "Failed to load workspace";
-            return;
-        }
+            var workspace = _workspaceService.LoadWorkspace(path);
+            if (workspace == null)
+            {
+                StatusText = $"Workspace not found: {path}";
+                return;
+            }
 
-        FileTree.SetMultipleRoots(workspace.RootFolders);
-        StatusText = $"Workspace loaded: {workspace.Name} ({workspace.RootFolders.Count} folders)";
+            FileTree.SetMultipleRoots(workspace.RootFolders);
+            StatusText = $"Workspace loaded: {workspace.Name} ({workspace.RootFolders.Count} folders)";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Failed to load workspace: {ex.Message}";
+        }
     }
 
     private SessionData BuildSessionData()
@@ -735,40 +780,51 @@ public partial class MainViewModel : ObservableObject
 
     private async Task RestoreFromSessionDataAsync(SessionData session)
     {
-        // Close all current tabs
-        foreach (var tab in Tabs.ToList())
-            tab.Dispose();
-        Tabs.Clear();
-
-        // Open session files
-        foreach (var entry in session.Files)
+        var replacementTabs = new List<EditorTabViewModel>();
+        try
         {
-            try
+            foreach (var entry in session.Files)
             {
                 if (entry.IsUntitled)
                 {
                     var tab = _tabFactory.CreateUntitled(entry.Content);
                     tab.FileName = Path.GetFileName(entry.FilePath);
-                    Tabs.Add(tab);
+                    tab.CursorOffset = entry.CursorOffset;
+                    tab.ScrollOffset = entry.ScrollOffset;
+                    tab.IsModified = true;
+                    replacementTabs.Add(tab);
                 }
-                else if (_fileSystemService.FileExists(entry.FilePath))
+                else
                 {
+                    if (!_fileSystemService.FileExists(entry.FilePath))
+                        throw new FileNotFoundException("Session file was not found.", entry.FilePath);
+
                     var tab = _tabFactory.Create();
                     await tab.LoadFileAsync(entry.FilePath);
-                    Tabs.Add(tab);
+                    tab.CursorOffset = entry.CursorOffset;
+                    tab.ScrollOffset = entry.ScrollOffset;
+                    replacementTabs.Add(tab);
                 }
             }
-            catch (Exception ex)
-            {
-                Trace.TraceWarning("Failed to restore workspace session file '{0}': {1}", entry.FilePath, ex.Message);
-            }
+        }
+        catch
+        {
+            foreach (var tab in replacementTabs)
+                tab.Dispose();
+            throw;
         }
 
+        var previousTabs = Tabs.ToList();
+        SelectedTab = null;
+        Tabs.Clear();
+        foreach (var tab in replacementTabs)
+            Tabs.Add(tab);
+
         if (Tabs.Count > 0)
-        {
-            var index = Math.Clamp(session.ActiveTabIndex, 0, Tabs.Count - 1);
-            SelectedTab = Tabs[index];
-        }
+            SelectedTab = Tabs[Math.Clamp(session.ActiveTabIndex, 0, Tabs.Count - 1)];
+
+        foreach (var tab in previousTabs)
+            tab.Dispose();
     }
 
     [RelayCommand]
@@ -1046,13 +1102,31 @@ public partial class MainViewModel : ObservableObject
         {
             foreach (var tab in unsavedTabs)
             {
-                await tab.SaveCommand.ExecuteAsync(null);
-                if (tab.IsModified)
-                    return false; // Save was cancelled or failed
+                if (!await TrySaveTabAsync(tab))
+                    return false;
             }
         }
 
         return true;
+    }
+
+    private async Task<bool> TrySaveTabAsync(EditorTabViewModel tab)
+    {
+        try
+        {
+            await tab.SaveCommand.ExecuteAsync(null);
+            return !tab.IsModified;
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Failed to save '{tab.FileName}': {ex.Message}";
+            _dialogService.ShowMessage(
+                $"FastEdit could not save '{tab.FileName}':\n\n{ex.Message}",
+                "Save Failed",
+                DialogButtons.Ok,
+                DialogIcon.Error);
+            return false;
+        }
     }
 
     public IEnumerable<AutoSaveEntry> GetAutoSaveEntries()
@@ -1062,8 +1136,8 @@ public partial class MainViewModel : ObservableObject
             if (!tab.IsModified && !string.IsNullOrEmpty(tab.FilePath)) continue;
 
             var id = string.IsNullOrEmpty(tab.FilePath)
-                ? $"untitled-{Tabs.IndexOf(tab)}"
-                : Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(tab.FilePath)).ToLowerInvariant()[..16];
+                ? tab.UntitledAutoSaveId
+                : AutoSaveId.ForFilePath(tab.FilePath);
 
             yield return new AutoSaveEntry(
                 id,
@@ -1076,21 +1150,15 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
-    public EditorTabViewModel? RecoverTab(AutoSaveEntry entry)
+    public EditorTabViewModel RecoverTab(AutoSaveEntry entry)
     {
-        try
-        {
-            var tab = _tabFactory.CreateUntitled(entry.Content);
-            tab.FileName = entry.FileName;
-            if (!entry.IsUntitled && !string.IsNullOrEmpty(entry.FilePath))
-                tab.FilePath = entry.FilePath;
-            tab.CursorOffset = entry.CursorOffset;
-            tab.ScrollOffset = entry.ScrollOffset;
-            return tab;
-        }
-        catch
-        {
-            return null;
-        }
+        var tab = _tabFactory.CreateUntitled(entry.Content);
+        tab.FileName = entry.FileName;
+        if (!entry.IsUntitled && !string.IsNullOrEmpty(entry.FilePath))
+            tab.FilePath = entry.FilePath;
+        tab.CursorOffset = entry.CursorOffset;
+        tab.ScrollOffset = entry.ScrollOffset;
+        tab.IsModified = true;
+        return tab;
     }
 }

@@ -22,6 +22,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     private VirtualizedByteBuffer? _byteBuffer;
     private LargeFileDocument? _largeFileDoc;
     private bool _disposed;
+    private readonly string _untitledAutoSaveId = AutoSaveId.ForUntitled(Guid.NewGuid().ToString("N"));
 
     private Encoding _fileEncoding = new UTF8Encoding(false);
     private bool _hasBom;
@@ -107,6 +108,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
 
     public Encoding FileEncoding => _fileEncoding;
     public bool HasBom => _hasBom;
+    public string UntitledAutoSaveId => _untitledAutoSaveId;
 
     public EditorTabViewModel(IFileService fileService, IFileSystemService fileSystemService, IDialogService dialogService)
     {
@@ -324,10 +326,8 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
 
     partial void OnContentChanged(string value)
     {
-        if (!string.IsNullOrEmpty(FilePath))
-        {
+        if (!_disposed)
             IsModified = true;
-        }
     }
 
     public void Dispose()

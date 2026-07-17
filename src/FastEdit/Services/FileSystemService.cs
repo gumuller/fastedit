@@ -20,6 +20,7 @@ public class FileSystemService : IFileSystemService
     public void WriteAllText(string path, string content, Encoding encoding) => File.WriteAllText(path, content, encoding);
     public void WriteAllBytes(string path, byte[] bytes) => File.WriteAllBytes(path, bytes);
     public void CopyFile(string source, string destination, bool overwrite = false) => File.Copy(source, destination, overwrite);
+    public void MoveFile(string source, string destination, bool overwrite = false) => File.Move(source, destination, overwrite);
     public void DeleteFile(string path) => File.Delete(path);
     public void CreateDirectory(string path) => Directory.CreateDirectory(path);
     public string GetTempPath() => Path.GetTempPath();

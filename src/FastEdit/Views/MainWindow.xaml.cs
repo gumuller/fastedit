@@ -182,6 +182,7 @@ public partial class MainWindow : FluentWindow
                 _autoSaveService.HasRecoveryFiles(),
                 App.HasAnotherRunningInstance))
             {
+                var recovery = _autoSaveService.GetRecoveryEntries();
                 var result = _dialogService.ShowMessage(
                     "FastEdit was not shut down cleanly. Would you like to recover unsaved files?",
                     "Crash Recovery",
@@ -190,16 +191,42 @@ public partial class MainWindow : FluentWindow
 
                 if (result == Services.Interfaces.DialogResult.Yes)
                 {
-                    var entries = _autoSaveService.GetRecoveryEntries();
-                    foreach (var entry in entries)
+                    var recoveredIds = new List<string>();
+                    var failures = recovery.Failures.ToList();
+                    foreach (var entry in recovery.Entries)
                     {
-                        var tab = _viewModel.RecoverTab(entry);
-                        if (tab != null) _viewModel.Tabs.Add(tab);
+                        try
+                        {
+                            var tab = _viewModel.RecoverTab(entry);
+                            _viewModel.Tabs.Add(tab);
+                            recoveredIds.Add(entry.Id);
+                        }
+                        catch (Exception ex)
+                        {
+                            failures.Add($"{entry.FileName}: {ex.Message}");
+                        }
+                    }
+
+                    try
+                    {
+                        _autoSaveService.RemoveRecoveryEntries(recoveredIds);
+                    }
+                    catch (Exception ex)
+                    {
+                        failures.Add($"Recovered items could not be cleared from recovery storage: {ex.Message}");
                     }
                     if (_viewModel.Tabs.Count > 0)
                         _viewModel.SelectedTab = _viewModel.Tabs[0];
+
+                    if (failures.Count > 0)
+                    {
+                        _dialogService.ShowMessage(
+                            $"Some recovery items could not be restored and were retained for a future attempt:\n\n{string.Join("\n", failures)}",
+                            "Crash Recovery - Partial Failure",
+                            DialogButtons.Ok,
+                            DialogIcon.Warning);
+                    }
                 }
-                _autoSaveService.ClearRecoveryFiles();
             }
 
             await _viewModel.RestoreSessionAsync();
@@ -242,19 +269,17 @@ public partial class MainWindow : FluentWindow
         if (_viewModel == null) return;
 
         if (_isClosingConfirmed)
-        {
-            SaveEditorState();
-            SaveWindowState();
-            _viewModel.SaveSession();
             return;
-        }
 
         if (!_viewModel.HasUnsavedChanges())
         {
+            if (!TrySaveApplicationState())
+            {
+                e.Cancel = true;
+                return;
+            }
+
             _isClosingConfirmed = true;
-            SaveEditorState();
-            SaveWindowState();
-            _viewModel.SaveSession();
             return;
         }
 
@@ -263,18 +288,38 @@ public partial class MainWindow : FluentWindow
         var canClose = await _viewModel.ConfirmExitAsync();
         if (canClose)
         {
-            _isClosingConfirmed = true;
             // Defer the Close() call — calling it synchronously from inside an
             // async-void Closing handler (even after the await) can race with
             // WPF's internal "window is closing" state and throw
             // "Cannot set Visibility / call Close … while a Window is closing".
             _ = Dispatcher.BeginInvoke(new Action(() =>
             {
-                SaveEditorState();
-                SaveWindowState();
-                _viewModel.SaveSession();
+                if (!TrySaveApplicationState())
+                    return;
+
+                _isClosingConfirmed = true;
                 Close();
             }), System.Windows.Threading.DispatcherPriority.Background);
+        }
+    }
+
+    private bool TrySaveApplicationState()
+    {
+        try
+        {
+            SaveEditorState();
+            SaveWindowState();
+            _viewModel!.SaveSession();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _dialogService.ShowMessage(
+                $"FastEdit could not save the current session:\n\n{ex.Message}",
+                "Session Save Failed",
+                DialogButtons.Ok,
+                DialogIcon.Error);
+            return false;
         }
     }
 

@@ -239,7 +239,7 @@ public class EditorTabViewModelTests
     }
 
     [Fact]
-    public void ContentChange_Untitled_DoesNotSetModified()
+    public void ContentChange_Untitled_SetsModified()
     {
         var sut = CreateSut();
         sut.FilePath = "";
@@ -247,7 +247,7 @@ public class EditorTabViewModelTests
 
         sut.Content = "changed";
 
-        Assert.False(sut.IsModified);
+        Assert.True(sut.IsModified);
     }
 
     // --- ToggleMode ---

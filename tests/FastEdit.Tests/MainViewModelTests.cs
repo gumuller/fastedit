@@ -299,6 +299,24 @@ public class MainViewModelTests
     }
 
     [Fact]
+    public async Task CloseTab_EditedUntitledTab_Cancel_KeepsTab()
+    {
+        var tab = CreateMockTab("Untitled");
+        _tabFactory.Setup(f => f.CreateUntitled(null)).Returns(tab);
+        _sut.NewFileCommand.Execute(null);
+        tab.Content = "unsaved text";
+        _dialogService.Setup(d => d.ShowMessage(
+                It.IsAny<string>(), It.IsAny<string>(),
+                DialogButtons.YesNoCancel, DialogIcon.Warning))
+            .Returns(Services.Interfaces.DialogResult.Cancel);
+
+        await _sut.CloseTabCoreAsync(tab);
+
+        Assert.True(tab.IsModified);
+        Assert.Single(_sut.Tabs);
+    }
+
+    [Fact]
     public async Task CloseTab_ModifiedTab_No_RemovesWithoutSaving()
     {
         var tab = CreateMockTab("test.txt", isModified: true);
@@ -475,6 +493,18 @@ public class MainViewModelTests
         Assert.True(_sut.HasUnsavedChanges());
     }
 
+    [Fact]
+    public void HasUnsavedChanges_WithEditedUntitledTab_ReturnsTrue()
+    {
+        var tab = CreateMockTab("Untitled");
+        _tabFactory.Setup(f => f.CreateUntitled(null)).Returns(tab);
+        _sut.NewFileCommand.Execute(null);
+
+        tab.Content = "draft";
+
+        Assert.True(_sut.HasUnsavedChanges());
+    }
+
     // --- ConfirmExit ---
 
     [Fact]
@@ -579,6 +609,73 @@ public class MainViewModelTests
         {
             File.Delete(tempFile);
         }
+    }
+
+    [Fact]
+    public async Task LoadSession_UnsavedConfirmationCancelled_LeavesWorkspaceIntact()
+    {
+        var currentTab = CreateMockTab("Untitled-1");
+        _tabFactory.Setup(f => f.CreateUntitled(null)).Returns(currentTab);
+        _sut.NewFileCommand.Execute(null);
+        currentTab.Content = "keep me";
+        _workspaceService.Setup(service => service.LoadNamedSession("saved"))
+            .Returns(new SessionData
+            {
+                Files = { new SessionFileEntry { FilePath = "replacement", IsUntitled = true, Content = "new" } }
+            });
+        _dialogService.Setup(dialog => dialog.ShowMessage(
+                It.IsAny<string>(), It.IsAny<string>(),
+                DialogButtons.YesNoCancel, DialogIcon.Warning))
+            .Returns(Services.Interfaces.DialogResult.Cancel);
+
+        await _sut.LoadSessionCommand.ExecuteAsync("saved");
+
+        Assert.Single(_sut.Tabs);
+        Assert.Same(currentTab, _sut.Tabs[0]);
+        Assert.Equal("keep me", currentTab.Content);
+        Assert.Equal("Session load cancelled: saved", _sut.StatusText);
+    }
+
+    [Fact]
+    public async Task LoadSession_ReplacementPreparationFails_LeavesWorkspaceIntact()
+    {
+        var currentTab = CreateMockTab("current.txt");
+        _tabFactory.SetupSequence(factory => factory.CreateUntitled(It.IsAny<string?>()))
+            .Returns(currentTab)
+            .Returns(CreateMockTab("replacement"));
+        _sut.NewFileCommand.Execute(null);
+        currentTab.IsModified = false;
+        _workspaceService.Setup(service => service.LoadNamedSession("saved"))
+            .Returns(new SessionData
+            {
+                Files =
+                {
+                    new SessionFileEntry { FilePath = "replacement", IsUntitled = true, Content = "new" },
+                    new SessionFileEntry { FilePath = @"C:\missing.txt", IsUntitled = false }
+                }
+            });
+        _fileSystemService.Setup(fileSystem => fileSystem.FileExists(@"C:\missing.txt")).Returns(false);
+
+        await _sut.LoadSessionCommand.ExecuteAsync("saved");
+
+        Assert.Single(_sut.Tabs);
+        Assert.Same(currentTab, _sut.Tabs[0]);
+        Assert.Contains("Failed to load session 'saved'", _sut.StatusText);
+    }
+
+    [Fact]
+    public void GetAutoSaveEntries_CommonPathPrefix_ProducesDistinctStableIds()
+    {
+        var first = CreateMockTab("alpha.txt", @"C:\Users\person\source\alpha.txt", true);
+        var second = CreateMockTab("beta.txt", @"C:\Users\person\source\beta.txt", true);
+        _sut.Tabs.Add(first);
+        _sut.Tabs.Add(second);
+
+        var firstSnapshot = _sut.GetAutoSaveEntries().ToList();
+        var secondSnapshot = _sut.GetAutoSaveEntries().ToList();
+
+        Assert.Equal(2, firstSnapshot.Select(entry => entry.Id).Distinct().Count());
+        Assert.Equal(firstSnapshot.Select(entry => entry.Id), secondSnapshot.Select(entry => entry.Id));
     }
 
     // --- RestoreSession ---
