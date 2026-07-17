@@ -73,6 +73,7 @@ public sealed class AutoSaveService : IAutoSaveService
             IntervalSeconds = _settings.AutoSaveIntervalSeconds;
             _fileSystem.CreateDirectory(_autoSaveDir);
             CleanupRetiredGenerations();
+            CleanupAbandonedManifestlessGenerations();
             var wasCleanShutdown = _fileSystem.FileExists(_shutdownMarkerPath);
             if (wasCleanShutdown)
                 _fileSystem.DeleteFile(_shutdownMarkerPath);
@@ -376,9 +377,15 @@ public sealed class AutoSaveService : IAutoSaveService
             {
                 var contentPaths = GetGenerationContentPaths(manifestPath);
                 var markerPath = GetGenerationMarkerPath(manifestPath);
-                if (RetireGeneration(manifestPath, contentPaths, markerPath))
+                if (RetireGeneration(
+                    manifestPath,
+                    contentPaths,
+                    markerPath,
+                    out var cleanupComplete))
                 {
                     retiredManifests.Add(manifestPath);
+                    if (!cleanupComplete)
+                        allRetired = false;
                 }
                 else
                 {
@@ -412,10 +419,32 @@ public sealed class AutoSaveService : IAutoSaveService
             if (_fileSystem.FileExists(_activeManifestPath))
             {
                 var contentPaths = GetGenerationContentPaths(_activeManifestPath);
-                return RetireGeneration(
+                var retired = RetireGeneration(
                     _activeManifestPath,
                     contentPaths,
-                    _activeGenerationMarkerPath);
+                    _activeGenerationMarkerPath,
+                    out var cleanupComplete);
+                return retired && cleanupComplete;
+            }
+
+            var manifestlessContentPaths = _fileSystem.GetFiles(
+                _autoSaveDir,
+                $"{_activeContentPrefix}*.txt");
+            if (manifestlessContentPaths.Length > 0)
+            {
+                if (!TryWriteSyntheticManifest(
+                    _activeManifestPath,
+                    manifestlessContentPaths))
+                {
+                    return false;
+                }
+
+                var retired = RetireGeneration(
+                    _activeManifestPath,
+                    manifestlessContentPaths,
+                    _activeGenerationMarkerPath,
+                    out var cleanupComplete);
+                return retired && cleanupComplete;
             }
 
             if (_fileSystem.FileExists(_activeGenerationMarkerPath))
@@ -526,8 +555,10 @@ public sealed class AutoSaveService : IAutoSaveService
     private bool RetireGeneration(
         string manifestPath,
         IReadOnlyCollection<string> contentPaths,
-        string? markerPath)
+        string? markerPath,
+        out bool cleanupComplete)
     {
+        cleanupComplete = false;
         var retiredManifestPath = Path.Combine(
             _autoSaveDir,
             $".retired-{Guid.NewGuid():N}-{Path.GetFileName(manifestPath)}");
@@ -544,7 +575,7 @@ public sealed class AutoSaveService : IAutoSaveService
             return false;
         }
 
-        var cleanupComplete = true;
+        cleanupComplete = true;
         foreach (var contentPath in contentPaths)
         {
             try
@@ -595,6 +626,79 @@ public sealed class AutoSaveService : IAutoSaveService
         }
 
         return true;
+    }
+
+    private void CleanupAbandonedManifestlessGenerations()
+    {
+        foreach (var markerPath in _fileSystem.GetFiles(_autoSaveDir, "active-*.lock"))
+        {
+            var markerName = Path.GetFileNameWithoutExtension(markerPath);
+            const string markerPrefix = "active-";
+            if (!markerName.StartsWith(markerPrefix, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var generationId = markerName[markerPrefix.Length..];
+            var manifestPath = Path.Combine(_autoSaveDir, $"manifest-{generationId}.json");
+            if (_fileSystem.FileExists(manifestPath) || IsActiveGeneration(manifestPath))
+                continue;
+
+            var contentPaths = _fileSystem.GetFiles(
+                _autoSaveDir,
+                $"{generationId}-*.txt");
+            if (contentPaths.Length == 0)
+            {
+                try
+                {
+                    _fileSystem.DeleteFile(markerPath);
+                }
+                catch (Exception ex)
+                {
+                    Trace.TraceWarning(
+                        "Failed to delete abandoned auto-save marker '{0}': {1}",
+                        markerPath,
+                        ex);
+                }
+                continue;
+            }
+
+            if (!TryWriteSyntheticManifest(manifestPath, contentPaths))
+                continue;
+
+            RetireGeneration(
+                manifestPath,
+                contentPaths,
+                markerPath,
+                out _);
+        }
+    }
+
+    private bool TryWriteSyntheticManifest(
+        string manifestPath,
+        IReadOnlyCollection<string> contentPaths)
+    {
+        try
+        {
+            var manifest = contentPaths.Select(contentPath => new AutoSaveManifestEntry
+            {
+                Id = Path.GetFileNameWithoutExtension(contentPath),
+                FileName = Path.GetFileName(contentPath),
+                ContentFile = Path.GetFileName(contentPath),
+                IsUntitled = true
+            });
+            var json = JsonSerializer.Serialize(
+                manifest,
+                new JsonSerializerOptions { WriteIndented = true });
+            _fileSystem.WriteAllTextAtomic(manifestPath, json);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Trace.TraceWarning(
+                "Failed to persist cleanup metadata for manifest-less generation '{0}': {1}",
+                manifestPath,
+                ex);
+            return false;
+        }
     }
 
     private IReadOnlyList<string> GetManifestPaths()
