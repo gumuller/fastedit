@@ -330,6 +330,13 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         }
     }
 
+    public void ReplaceContentFromDisk(string content)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+        Content = content;
+        IsModified = false;
+    }
+
     public void Dispose()
     {
         if (_disposed) return;

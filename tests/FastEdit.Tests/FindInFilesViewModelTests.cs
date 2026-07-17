@@ -108,6 +108,73 @@ public class FindInFilesViewModelTests
         Assert.False(sut.IsSearching);
     }
 
+    [Fact]
+    public async Task SearchCommand_Overlapping_Search_Ignores_Stale_Results()
+    {
+        var file = Path.Combine(Root, "sample.txt");
+        SetupFiles("*.txt", file);
+        SetupReadableFile(file);
+        var firstStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        _fileSystemService
+            .SetupSequence(x => x.ReadLines(file))
+            .Returns(SlowLines(firstStarted, "first"))
+            .Returns(["second"]);
+
+        var sut = CreateSut("first", "*.txt");
+        var firstSearch = sut.SearchCommand.ExecuteAsync(null);
+        await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        sut.SearchPattern = "second";
+        var secondSearch = sut.SearchCommand.ExecuteAsync(null);
+        await Task.WhenAll(firstSearch, secondSearch);
+
+        var result = Assert.Single(sut.Results);
+        Assert.Equal("second", result.LineText);
+        Assert.Equal("Found 1 match(es) in 1 file(s)", sut.StatusText);
+        Assert.False(sut.IsSearching);
+    }
+
+    [Fact]
+    public async Task CancelSearchCommand_Reports_Cancellation_Without_Error()
+    {
+        var file = Path.Combine(Root, "sample.txt");
+        SetupFiles("*.txt", file);
+        SetupReadableFile(file);
+        var started = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        _fileSystemService
+            .Setup(x => x.ReadLines(file))
+            .Returns(SlowLines(started, "needle"));
+
+        var sut = CreateSut("needle", "*.txt");
+        var search = sut.SearchCommand.ExecuteAsync(null);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        sut.CancelSearchCommand.Execute(null);
+        await search;
+
+        Assert.Equal("Search cancelled", sut.StatusText);
+        Assert.False(sut.IsSearching);
+    }
+
+    [Fact]
+    public async Task SearchCommand_ResultCap_Is_Exact_And_Uses_Batched_Dispatch()
+    {
+        var file = Path.Combine(Root, "sample.txt");
+        SetupFiles("*.txt", file);
+        SetupTextFile(file, Enumerable.Repeat("needle", FindInFilesViewModel.ResultLimit + 1).ToArray());
+        var sut = CreateSut("needle", "*.txt");
+
+        await sut.SearchCommand.ExecuteAsync(null);
+
+        Assert.Equal(FindInFilesViewModel.ResultLimit, sut.Results.Count);
+        Assert.Contains("result limit reached", sut.StatusText);
+        _dispatcherService.Verify(
+            x => x.Invoke(It.IsAny<Action>()),
+            Times.AtMost(FindInFilesViewModel.ResultLimit / 50));
+    }
+
     private FindInFilesViewModel CreateSut(string pattern, string filter) => new(_fileSystemService.Object, _dispatcherService.Object)
     {
         FolderPath = Root,
@@ -124,12 +191,29 @@ public class FindInFilesViewModelTests
 
     private void SetupTextFile(string file, params string[] lines)
     {
-        _fileSystemService
-            .Setup(x => x.OpenRead(file))
-            .Returns(() => new MemoryStream(System.Text.Encoding.UTF8.GetBytes(string.Join(Environment.NewLine, lines))));
+        SetupReadableFile(file);
         _fileSystemService
             .Setup(x => x.ReadLines(file))
             .Returns(lines);
+    }
+
+    private void SetupReadableFile(string file)
+    {
+        _fileSystemService
+            .Setup(x => x.OpenRead(file))
+            .Returns(() => new MemoryStream(System.Text.Encoding.UTF8.GetBytes("text")));
+    }
+
+    private static IEnumerable<string> SlowLines(
+        TaskCompletionSource started,
+        string value)
+    {
+        started.TrySetResult();
+        for (var i = 0; i < 10_000; i++)
+        {
+            Thread.Sleep(1);
+            yield return value;
+        }
     }
 
     private void SetupBinaryFile(string file)

@@ -4,6 +4,12 @@ namespace FastEdit.Views.Controls;
 
 public static class LargeFileFilterPolicy
 {
+    /// <summary>
+    /// Maximum physical line numbers retained by show-only mode (about 2 MB of raw
+    /// line-number storage). Additional matches are reported as truncated.
+    /// </summary>
+    public const int MaxShowOnlyLineResults = 250_000;
+
     public static IReadOnlyList<LineFilter> GetActiveFilters(IReadOnlyList<LineFilter>? filters)
     {
         return filters == null

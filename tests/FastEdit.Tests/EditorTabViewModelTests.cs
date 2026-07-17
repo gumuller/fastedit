@@ -250,6 +250,20 @@ public class EditorTabViewModelTests
         Assert.False(sut.IsModified);
     }
 
+    [Fact]
+    public void ReplaceContentFromDisk_Establishes_Clean_External_Baseline()
+    {
+        var sut = CreateSut();
+        sut.FilePath = @"C:\test.txt";
+        sut.Content = "local edit";
+        Assert.True(sut.IsModified);
+
+        sut.ReplaceContentFromDisk("external content");
+
+        Assert.Equal("external content", sut.Content);
+        Assert.False(sut.IsModified);
+    }
+
     // --- ToggleMode ---
 
     [Theory]

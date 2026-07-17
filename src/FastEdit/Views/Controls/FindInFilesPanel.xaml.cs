@@ -10,11 +10,21 @@ public partial class FindInFilesPanel : UserControl
     public FindInFilesPanel()
     {
         InitializeComponent();
+        Unloaded += OnUnloaded;
     }
 
     private void ClosePanel_Click(object sender, RoutedEventArgs e)
     {
+        CancelSearch();
         Visibility = Visibility.Collapsed;
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e) => CancelSearch();
+
+    private void CancelSearch()
+    {
+        if (DataContext is FindInFilesViewModel viewModel)
+            viewModel.CancelSearchCommand.Execute(null);
     }
 
     private void SearchBox_KeyDown(object sender, KeyEventArgs e)

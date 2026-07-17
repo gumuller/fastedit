@@ -1,4 +1,5 @@
 using System.IO.MemoryMappedFiles;
+using FastEdit.Core.Search;
 
 namespace FastEdit.Core.HexEngine;
 
@@ -11,13 +12,28 @@ public class VirtualizedByteBuffer : IDisposable
     private bool _useMemoryMapping;
     private readonly LruCache<long, byte[]> _pageCache;
     private readonly Dictionary<long, byte> _modifications = new();
+    private readonly object _modificationsLock = new();
+    private readonly object _streamLock = new();
     private bool _disposed;
 
     private const int PageSize = 64 * 1024;
     private const int MaxCachedPages = 16;
+    private const int SearchChunkSize = 64 * 1024;
+
+    /// <summary>
+    /// Default ceiling for exhaustive hex-search offsets (80 KB of raw offset storage).
+    /// </summary>
+    public const int DefaultSearchResultLimit = 10_000;
 
     public long Length => _fileLength;
-    public bool HasModifications => _modifications.Count > 0;
+    public bool HasModifications
+    {
+        get
+        {
+            lock (_modificationsLock)
+                return _modifications.Count > 0;
+        }
+    }
     public event EventHandler? ModificationsChanged;
 
     public VirtualizedByteBuffer(string filePath)
@@ -53,7 +69,8 @@ public class VirtualizedByteBuffer : IDisposable
         if (offset < 0 || offset >= _fileLength)
             return;
 
-        _modifications[offset] = value;
+        lock (_modificationsLock)
+            _modifications[offset] = value;
 
         // Update cached page if present
         long pageNumber = offset / PageSize;
@@ -71,8 +88,11 @@ public class VirtualizedByteBuffer : IDisposable
 
     public byte GetByte(long offset)
     {
-        if (_modifications.TryGetValue(offset, out var modifiedByte))
-            return modifiedByte;
+        lock (_modificationsLock)
+        {
+            if (_modifications.TryGetValue(offset, out var modifiedByte))
+                return modifiedByte;
+        }
 
         var bytes = GetBytes(offset, 1);
         return bytes.Length > 0 ? bytes[0] : (byte)0;
@@ -80,13 +100,20 @@ public class VirtualizedByteBuffer : IDisposable
 
     public bool IsModified(long offset)
     {
-        return _modifications.ContainsKey(offset);
+        lock (_modificationsLock)
+            return _modifications.ContainsKey(offset);
     }
 
     public void Save()
     {
-        if (_modifications.Count == 0)
-            return;
+        KeyValuePair<long, byte>[] modifications;
+        lock (_modificationsLock)
+        {
+            if (_modifications.Count == 0)
+                return;
+
+            modifications = _modifications.OrderBy(m => m.Key).ToArray();
+        }
 
         // Write modifications to a temporary approach: close current handles,
         // write changes, then reopen. Use local variables to ensure failure safety.
@@ -97,14 +124,15 @@ public class VirtualizedByteBuffer : IDisposable
         {
             using (var writeStream = new FileStream(_filePath, FileMode.Open, FileAccess.Write, FileShare.None))
             {
-                foreach (var (offset, value) in _modifications.OrderBy(m => m.Key))
+                foreach (var (offset, value) in modifications)
                 {
                     writeStream.Position = offset;
                     writeStream.WriteByte(value);
                 }
             }
 
-            _modifications.Clear();
+            lock (_modificationsLock)
+                _modifications.Clear();
             _pageCache.Clear();
         }
         finally
@@ -143,9 +171,126 @@ public class VirtualizedByteBuffer : IDisposable
 
     public void DiscardModifications()
     {
-        _modifications.Clear();
+        lock (_modificationsLock)
+            _modifications.Clear();
         _pageCache.Clear();
         ModificationsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    public async Task<BoundedSearchResult<long>> SearchAsync(
+        ReadOnlyMemory<byte> pattern,
+        int maxResults,
+        IProgress<double>? progress,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (pattern.IsEmpty)
+            return new BoundedSearchResult<long>(Array.Empty<long>(), false);
+        if (maxResults <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxResults));
+
+        var patternBytes = pattern.ToArray();
+        return await Task.Run(
+                () => Search(patternBytes, maxResults, progress, cancellationToken),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private BoundedSearchResult<long> Search(
+        byte[] pattern,
+        int maxResults,
+        IProgress<double>? progress,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (pattern.LongLength > _fileLength)
+            return new BoundedSearchResult<long>(Array.Empty<long>(), false);
+
+        KeyValuePair<long, byte>[] modifications;
+        lock (_modificationsLock)
+            modifications = _modifications.OrderBy(pair => pair.Key).ToArray();
+
+        var results = new List<long>(Math.Min(maxResults, DefaultSearchResultLimit));
+        var overlap = pattern.Length - 1;
+        var buffer = new byte[checked(SearchChunkSize + overlap)];
+        long position = 0;
+        using var searchStream = new FileStream(
+            _filePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            bufferSize: SearchChunkSize,
+            FileOptions.RandomAccess | FileOptions.Asynchronous);
+
+        while (position <= _fileLength - pattern.Length)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var bytesToRead = (int)Math.Min(buffer.Length, _fileLength - position);
+            ReadSearchChunk(searchStream, position, buffer, bytesToRead);
+            ApplyModifications(buffer, bytesToRead, position, modifications);
+
+            var finalChunk = position + bytesToRead >= _fileLength;
+            var candidates = finalChunk
+                ? bytesToRead - pattern.Length + 1
+                : Math.Min(SearchChunkSize, bytesToRead - pattern.Length + 1);
+
+            for (var offset = 0; offset < candidates; offset++)
+            {
+                if ((offset & 0xFFF) == 0)
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                if (!buffer.AsSpan(offset, pattern.Length).SequenceEqual(pattern))
+                    continue;
+
+                if (results.Count >= maxResults)
+                    return new BoundedSearchResult<long>(results, true);
+
+                results.Add(position + offset);
+            }
+
+            position += candidates;
+            progress?.Report(Math.Min(1.0, (double)position / _fileLength));
+        }
+
+        progress?.Report(1.0);
+        return new BoundedSearchResult<long>(results, false);
+    }
+
+    private void ReadSearchChunk(
+        FileStream searchStream,
+        long position,
+        byte[] buffer,
+        int bytesToRead)
+    {
+        var totalRead = 0;
+        while (totalRead < bytesToRead)
+        {
+            var read = RandomAccess.Read(
+                searchStream.SafeFileHandle,
+                buffer.AsSpan(totalRead, bytesToRead - totalRead),
+                position + totalRead);
+            if (read == 0)
+                break;
+            totalRead += read;
+        }
+    }
+
+    private static void ApplyModifications(
+        byte[] buffer,
+        int bytesRead,
+        long position,
+        IReadOnlyList<KeyValuePair<long, byte>> modifications)
+    {
+        var end = position + bytesRead;
+        foreach (var modification in modifications)
+        {
+            if (modification.Key < position)
+                continue;
+            if (modification.Key >= end)
+                break;
+
+            buffer[(int)(modification.Key - position)] = modification.Value;
+        }
     }
 
     public ReadOnlySpan<byte> GetBytes(long offset, int count)
@@ -211,8 +356,11 @@ public class VirtualizedByteBuffer : IDisposable
         }
         else
         {
-            _fileStream.Position = pageOffset;
-            _ = _fileStream.Read(buffer, 0, bytesToRead);
+            lock (_streamLock)
+            {
+                _fileStream.Position = pageOffset;
+                _ = _fileStream.Read(buffer, 0, bytesToRead);
+            }
         }
 
         return buffer;

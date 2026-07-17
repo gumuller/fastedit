@@ -20,6 +20,12 @@ public class LargeFileFilterPolicyTests : IDisposable
     }
 
     [Fact]
+    public void ShowOnly_Result_Limit_Is_Documented_And_Bounded()
+    {
+        Assert.Equal(250_000, LargeFileFilterPolicy.MaxShowOnlyLineResults);
+    }
+
+    [Fact]
     public void GetActiveFilters_Ignores_Disabled_And_Empty_Filters()
     {
         var filters = new[]
