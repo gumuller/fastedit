@@ -131,6 +131,19 @@ public class CommandRunnerServiceTests
     }
 
     [Fact]
+    public async Task ExecuteCommand_DoesNotRenderProtocolSeparatorAsBlankLine()
+    {
+        await using var sut = new CommandRunnerService();
+        var output = new StringBuilder();
+        sut.OutputReceived += text => output.Append(text);
+
+        await StartReadyShellAsync(sut);
+        await ExecuteAndWaitAsync(sut, "Write-Output 'HELLO'");
+
+        Assert.Equal("HELLO\n", output.ToString());
+    }
+
+    [Fact]
     public async Task ExecuteCommand_EmitsStderrAndStillCompletes()
     {
         await using var sut = new CommandRunnerService();

@@ -21,6 +21,86 @@ public class TerminalOutputFramerTests
     }
 
     [Fact]
+    public void Append_StreamingStdout_EmitsSafePartialAndRetainsPossibleSentinel()
+    {
+        var framer = new TerminalOutputFramer(emitPartialChunks: true);
+
+        Assert.Equal("O1", Assert.Single(framer.Append("O1")).Text);
+        Assert.Empty(framer.Append("##FASTEDIT_SENT"));
+        Assert.Empty(framer.Append($"INEL##42|{CommandToken}|C:\\work"));
+        var sentinel = Assert.Single(framer.Append("\n"));
+
+        Assert.Equal(TerminalOutputFrameKind.Sentinel, sentinel.Kind);
+        Assert.True(sentinel.IsValidSentinel);
+    }
+
+    [Fact]
+    public void Append_StreamingStdout_PreservesLaterLineTerminators()
+    {
+        var framer = new TerminalOutputFramer(emitPartialChunks: true);
+        var frames = new List<TerminalOutputFrame>();
+
+        frames.AddRange(framer.Append("first"));
+        frames.AddRange(framer.Append("\n"));
+        frames.AddRange(framer.Append("second"));
+        frames.AddRange(framer.Append(
+            $"\n\n{TerminalOutputFramer.SentinelPrefix}42|{CommandToken}|C:\\work\n"));
+
+        Assert.Equal(
+            "first\nsecond\n",
+            string.Concat(frames
+                .Where(frame => frame.Kind == TerminalOutputFrameKind.Output)
+                .Select(frame => frame.Text)));
+        Assert.Equal(TerminalOutputFrameKind.Sentinel, frames[^1].Kind);
+    }
+
+    [Fact]
+    public void Append_StreamingStdout_PreservesBlankBeforeLaterPartialOutput()
+    {
+        var framer = new TerminalOutputFramer(emitPartialChunks: true);
+        var frames = new List<TerminalOutputFrame>();
+
+        frames.AddRange(framer.Append("\n"));
+        frames.AddRange(framer.Append("partial"));
+        frames.AddRange(framer.Append(
+            $"\n\n{TerminalOutputFramer.SentinelPrefix}42|{CommandToken}|C:\\work\n"));
+
+        Assert.Equal(
+            "\npartial\n",
+            string.Concat(frames
+                .Where(frame => frame.Kind == TerminalOutputFrameKind.Output)
+                .Select(frame => frame.Text)));
+        Assert.Equal(TerminalOutputFrameKind.Sentinel, frames[^1].Kind);
+    }
+
+    [Fact]
+    public void Append_ConsumesOnlyProtocolSeparatorBlankLine()
+    {
+        var framer = new TerminalOutputFramer(emitPartialChunks: true);
+
+        var frames = framer.Append(
+            $"HELLO\n\n{TerminalOutputFramer.SentinelPrefix}42|{CommandToken}|C:\\work\n");
+
+        Assert.Equal(2, frames.Count);
+        Assert.Equal("HELLO\n", frames[0].Text);
+        Assert.Equal(TerminalOutputFrameKind.Sentinel, frames[1].Kind);
+    }
+
+    [Fact]
+    public void Append_PreservesGenuineBlankLineBeforeProtocolSeparator()
+    {
+        var framer = new TerminalOutputFramer(emitPartialChunks: true);
+
+        var frames = framer.Append(
+            $"HELLO\n\n\n{TerminalOutputFramer.SentinelPrefix}42|{CommandToken}|C:\\work\n");
+
+        Assert.Equal("HELLO\n\n", string.Concat(
+            frames.Where(frame => frame.Kind == TerminalOutputFrameKind.Output)
+                .Select(frame => frame.Text)));
+        Assert.Equal(TerminalOutputFrameKind.Sentinel, frames[^1].Kind);
+    }
+
+    [Fact]
     public void Append_SentinelSplitAcrossChunks_ParsesOnceAndNeverEmitsMarker()
     {
         var framer = new TerminalOutputFramer();

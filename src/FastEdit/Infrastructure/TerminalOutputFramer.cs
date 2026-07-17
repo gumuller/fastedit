@@ -28,6 +28,8 @@ internal sealed class TerminalOutputFramer
     private readonly bool _parseSentinels;
     private readonly bool _emitPartialChunks;
     private int _scanIndex;
+    private int _deferredBlankLineCount;
+    private bool _hasEmittedPartialLineContent;
 
     public TerminalOutputFramer(bool parseSentinels = true, bool emitPartialChunks = false)
     {
@@ -49,7 +51,7 @@ internal sealed class TerminalOutputFramer
             if (_pending[i] != '\n')
                 continue;
 
-            frames.Add(CreateFrame(_pending.ToString(start, i - start), hasNewLine: true));
+            AddCompleteLineFrames(_pending.ToString(start, i - start), frames);
             start = i + 1;
         }
 
@@ -70,13 +72,57 @@ internal sealed class TerminalOutputFramer
 
     public IReadOnlyList<TerminalOutputFrame> Complete()
     {
-        if (_pending.Length == 0)
-            return Array.Empty<TerminalOutputFrame>();
-
-        var frame = CreateFrame(_pending.ToString(), hasNewLine: false);
+        var frames = new List<TerminalOutputFrame>();
+        AddDeferredBlankLines(frames, _deferredBlankLineCount);
+        _deferredBlankLineCount = 0;
+        if (_pending.Length > 0)
+            frames.Add(CreateFrame(_pending.ToString(), hasNewLine: false));
         _pending.Clear();
         _scanIndex = 0;
-        return [frame];
+        _hasEmittedPartialLineContent = false;
+        return frames;
+    }
+
+    private void AddCompleteLineFrames(string rawLine, List<TerminalOutputFrame> frames)
+    {
+        var line = rawLine.TrimEnd('\r');
+        if (line.Length == 0 && _hasEmittedPartialLineContent)
+        {
+            AddDeferredBlankLines(frames, 1);
+            _hasEmittedPartialLineContent = false;
+            return;
+        }
+
+        if (_parseSentinels && line.Length == 0)
+        {
+            _deferredBlankLineCount++;
+            return;
+        }
+
+        var frame = CreateFrame(rawLine, hasNewLine: true);
+        var blankLinesToEmit = frame.Kind == TerminalOutputFrameKind.Sentinel
+            ? Math.Max(0, _deferredBlankLineCount - 1)
+            : _deferredBlankLineCount;
+        AddDeferredBlankLines(frames, blankLinesToEmit);
+        _deferredBlankLineCount = 0;
+        frames.Add(frame);
+        _hasEmittedPartialLineContent = false;
+    }
+
+    private static void AddDeferredBlankLines(
+        List<TerminalOutputFrame> frames,
+        int blankLineCount)
+    {
+        for (var index = 0; index < blankLineCount; index++)
+        {
+            frames.Add(new TerminalOutputFrame(
+                TerminalOutputFrameKind.Output,
+                "\n",
+                0,
+                Guid.Empty,
+                "",
+                false));
+        }
     }
 
     private TerminalOutputFrame CreateFrame(string rawLine, bool hasNewLine)
@@ -101,15 +147,6 @@ internal sealed class TerminalOutputFramer
 
     private void DrainSafePartialOutput(List<TerminalOutputFrame> frames)
     {
-        if (_emitPartialChunks)
-        {
-            EmitPartialPrefix(frames, _pending.Length);
-            return;
-        }
-
-        if (_pending.Length <= MaxBufferedOutputLength)
-            return;
-
         if (_parseSentinels)
         {
             var pendingText = _pending.ToString();
@@ -128,11 +165,13 @@ internal sealed class TerminalOutputFramer
             }
 
             var possibleSentinelPrefixLength = GetPossibleSentinelPrefixLength(pendingText);
-            EmitPartialPrefix(frames, _pending.Length - possibleSentinelPrefixLength);
+            if (_emitPartialChunks || _pending.Length > MaxBufferedOutputLength)
+                EmitPartialPrefix(frames, _pending.Length - possibleSentinelPrefixLength);
             return;
         }
 
-        EmitPartialPrefix(frames, _pending.Length);
+        if (_emitPartialChunks || _pending.Length > MaxBufferedOutputLength)
+            EmitPartialPrefix(frames, _pending.Length);
     }
 
     private void EmitPartialPrefix(List<TerminalOutputFrame> frames, int length)
@@ -145,6 +184,9 @@ internal sealed class TerminalOutputFramer
         _scanIndex = _pending.Length;
         if (!string.IsNullOrEmpty(output))
         {
+            AddDeferredBlankLines(frames, _deferredBlankLineCount);
+            _deferredBlankLineCount = 0;
+            _hasEmittedPartialLineContent = true;
             frames.Add(new TerminalOutputFrame(
                 TerminalOutputFrameKind.Output,
                 output,

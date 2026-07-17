@@ -376,7 +376,7 @@ public sealed class CommandRunnerService : ICommandRunner
             generation = ++_shellGeneration;
             _shellProcess = process;
             _readerCancellation = readerCancellation;
-            _outputFramer = new TerminalOutputFramer();
+            _outputFramer = new TerminalOutputFramer(emitPartialChunks: true);
             _errorFramer = new TerminalOutputFramer(
                 parseSentinels: false,
                 emitPartialChunks: true);

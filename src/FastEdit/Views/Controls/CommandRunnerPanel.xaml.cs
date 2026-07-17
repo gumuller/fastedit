@@ -54,8 +54,11 @@ public partial class CommandRunnerPanel : UserControl
     private static readonly ICommandRunnerFactory FallbackRunnerFactory = new CommandRunnerFactory();
     private readonly List<TerminalTabInfo> _tabs = new();
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
+    private readonly object _shutdownLock = new();
     private TerminalTabInfo? _activeTab;
+    private Task? _shutdownTask;
     private int _tabCounter;
+    private int _loadGeneration;
     private bool _shutdownRequested;
     private string? _desiredWorkingDirectory;
     private const int MaxParagraphs = 5000;
@@ -102,9 +105,12 @@ public partial class CommandRunnerPanel : UserControl
 
             if (_activeTab != null)
             {
-                await _activeTab.Service.StartShellAsync(
+                var runner = _activeTab.Service;
+                await runner.StartShellAsync(
                     _desiredWorkingDirectory,
                     cancellationToken);
+                if (_shutdownRequested)
+                    await runner.ShutdownAsync();
             }
         }
         finally
@@ -113,10 +119,52 @@ public partial class CommandRunnerPanel : UserControl
         }
     }
 
-    public async Task ShutdownAsync(CancellationToken cancellationToken = default)
+    public Task ShutdownAsync(CancellationToken cancellationToken = default)
     {
         _shutdownRequested = true;
-        await _lifecycleGate.WaitAsync(cancellationToken);
+        Task shutdownTask;
+        TaskCompletionSource? shutdownCompletion = null;
+        lock (_shutdownLock)
+        {
+            if (_shutdownTask == null)
+            {
+                shutdownCompletion =
+                    new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                _shutdownTask = shutdownCompletion.Task;
+            }
+            shutdownTask = _shutdownTask;
+        }
+
+        if (shutdownCompletion != null)
+            _ = CompleteShutdownAsync(shutdownCompletion);
+
+        return shutdownTask.WaitAsync(cancellationToken);
+    }
+
+    private async Task CompleteShutdownAsync(TaskCompletionSource completion)
+    {
+        try
+        {
+            await ShutdownCoreAsync();
+            completion.TrySetResult();
+        }
+        catch (Exception ex)
+        {
+            completion.TrySetException(ex);
+        }
+        finally
+        {
+            lock (_shutdownLock)
+            {
+                if (ReferenceEquals(_shutdownTask, completion.Task))
+                    _shutdownTask = null;
+            }
+        }
+    }
+
+    private async Task ShutdownCoreAsync()
+    {
+        await _lifecycleGate.WaitAsync();
         try
         {
             if (_tabs.Count == 0)
@@ -129,7 +177,7 @@ public partial class CommandRunnerPanel : UserControl
             var shutdownTask = Task.WhenAll(tabs.Select(tab => tab.Service.ShutdownAsync()));
             try
             {
-                await shutdownTask.WaitAsync(cancellationToken);
+                await shutdownTask;
             }
             finally
             {
@@ -150,6 +198,16 @@ public partial class CommandRunnerPanel : UserControl
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
+        var loadGeneration = ++_loadGeneration;
+        Task? pendingShutdown;
+        lock (_shutdownLock)
+            pendingShutdown = _shutdownTask;
+        if (pendingShutdown != null)
+            await pendingShutdown;
+
+        if (loadGeneration != _loadGeneration)
+            return;
+
         _shutdownRequested = false;
         try
         {
@@ -163,6 +221,7 @@ public partial class CommandRunnerPanel : UserControl
 
     private async void OnUnloaded(object sender, RoutedEventArgs e)
     {
+        _loadGeneration++;
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         try
         {

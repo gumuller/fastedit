@@ -2,6 +2,7 @@ using System.IO;
 using System.Threading;
 using System.Windows;
 using System.Windows.Media;
+using System.Windows.Threading;
 using FastEdit.Services.Interfaces;
 using FastEdit.Views.Controls;
 using Xunit;
@@ -46,6 +47,40 @@ public class CommandRunnerPanelLifecycleTests
         });
     }
 
+    [Fact]
+    public async Task ShutdownTimeout_DoesNotCancelCleanupWaitingForStartup()
+    {
+        await RunOnStaThreadAsync(async () =>
+        {
+            var startCompletion =
+                new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var factory = new FakeCommandRunnerFactory(
+                () => new FakeCommandRunner(startCompletion.Task));
+            var panel = new CommandRunnerPanel { RunnerFactory = factory };
+            AddTerminalResources(panel);
+
+            var startupTask = panel.EnsureStartedAsync();
+            var runner = Assert.Single(factory.Created);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => panel.ShutdownAsync(timeout.Token));
+            var continuingCleanup = panel.ShutdownAsync();
+            panel.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent, panel));
+            panel.RaiseEvent(new RoutedEventArgs(FrameworkElement.UnloadedEvent, panel));
+
+            startCompletion.TrySetResult();
+            await startupTask;
+            await continuingCleanup;
+            await Dispatcher.Yield();
+
+            Assert.False(runner.IsRunning);
+            Assert.Equal(1, runner.ShutdownCount);
+            Assert.Equal(0, runner.SubscriptionCount);
+            Assert.Single(factory.Created);
+        });
+    }
+
     private static void AddTerminalResources(FrameworkElement element)
     {
         element.Resources["EditorForegroundBrush"] = Brushes.White;
@@ -57,17 +92,28 @@ public class CommandRunnerPanelLifecycleTests
     private static Task RunOnStaThreadAsync(Func<Task> action)
     {
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(async () =>
+        var thread = new Thread(() =>
         {
-            try
+            var dispatcher = Dispatcher.CurrentDispatcher;
+            SynchronizationContext.SetSynchronizationContext(
+                new DispatcherSynchronizationContext(dispatcher));
+            _ = dispatcher.BeginInvoke(new Action(async () =>
             {
-                await action();
-                completion.TrySetResult();
-            }
-            catch (Exception ex)
-            {
-                completion.TrySetException(ex);
-            }
+                try
+                {
+                    await action();
+                    completion.TrySetResult();
+                }
+                catch (Exception ex)
+                {
+                    completion.TrySetException(ex);
+                }
+                finally
+                {
+                    dispatcher.BeginInvokeShutdown(DispatcherPriority.Background);
+                }
+            }));
+            Dispatcher.Run();
         });
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
@@ -76,11 +122,23 @@ public class CommandRunnerPanelLifecycleTests
 
     private sealed class FakeCommandRunnerFactory : ICommandRunnerFactory
     {
+        private readonly Func<FakeCommandRunner> _createRunner;
+
+        public FakeCommandRunnerFactory()
+            : this(() => new FakeCommandRunner())
+        {
+        }
+
+        public FakeCommandRunnerFactory(Func<FakeCommandRunner> createRunner)
+        {
+            _createRunner = createRunner;
+        }
+
         public List<FakeCommandRunner> Created { get; } = new();
 
         public ICommandRunner Create()
         {
-            var runner = new FakeCommandRunner();
+            var runner = _createRunner();
             Created.Add(runner);
             return runner;
         }
@@ -92,6 +150,13 @@ public class CommandRunnerPanelLifecycleTests
         private Action<string>? _workingDirectoryChanged;
         private Action? _commandStarted;
         private Action? _commandCompleted;
+        private readonly Task _startTask;
+        private bool _shutdown;
+
+        public FakeCommandRunner(Task? startTask = null)
+        {
+            _startTask = startTask ?? Task.CompletedTask;
+        }
 
         public int StartCount { get; private set; }
         public int ShutdownCount { get; private set; }
@@ -158,7 +223,7 @@ public class CommandRunnerPanelLifecycleTests
             }
         }
 
-        public Task StartShellAsync(
+        public async Task StartShellAsync(
             string? initialDirectory = null,
             CancellationToken cancellationToken = default)
         {
@@ -168,7 +233,7 @@ public class CommandRunnerPanelLifecycleTests
             if (initialDirectory != null)
                 WorkingDirectory = initialDirectory;
             IsRunning = true;
-            return Task.CompletedTask;
+            await _startTask.WaitAsync(cancellationToken);
         }
 
         public Task ExecuteCommandAsync(
@@ -181,6 +246,10 @@ public class CommandRunnerPanelLifecycleTests
 
         public Task ShutdownAsync(CancellationToken cancellationToken = default)
         {
+            if (_shutdown)
+                return Task.CompletedTask;
+
+            _shutdown = true;
             ShutdownCount++;
             IsRunning = false;
             return Task.CompletedTask;
