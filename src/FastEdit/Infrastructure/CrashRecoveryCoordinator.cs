@@ -10,31 +10,41 @@ public static class CrashRecoveryCoordinator
         Func<IReadOnlyList<AutoSaveEntry>, TabRecoveryResult> recoverTabs,
         Func<IReadOnlyList<AutoSaveEntry>> captureReplacementSnapshot)
     {
-        var recovery = autoSaveService.GetRecoveryEntries();
-        var tabRecovery = recoverTabs(recovery.Entries);
-        var recoveredAll = recovery.Success && tabRecovery.Success;
-
-        if (recoveredAll || tabRecovery.RecoveredEntryIds.Count > 0)
+        try
         {
-            if (!autoSaveService.CompleteRecovery(
-                captureReplacementSnapshot(),
-                tabRecovery.RecoveredEntryIds,
-                recoveredAll))
+            var recovery = autoSaveService.GetRecoveryEntries();
+            var tabRecovery = recoverTabs(recovery.Entries);
+            var recoveredAll = recovery.Success && tabRecovery.Success;
+
+            if (recoveredAll || tabRecovery.RecoveredEntryIds.Count > 0)
+            {
+                var replacementSnapshot = captureReplacementSnapshot();
+                if (!autoSaveService.CompleteRecovery(
+                    replacementSnapshot,
+                    tabRecovery.RecoveredEntryIds,
+                    recoveredAll))
+                {
+                    return new CrashRecoveryAttemptResult(
+                        false,
+                        "Recovered files could not be persisted and retired safely.");
+                }
+            }
+
+            if (!recoveredAll)
             {
                 return new CrashRecoveryAttemptResult(
                     false,
-                    "Recovered files could not be persisted and retired safely.");
+                    recovery.ErrorMessage ?? "One or more files could not be recovered.");
             }
-        }
 
-        if (!recoveredAll)
+            return new CrashRecoveryAttemptResult(true);
+        }
+        catch (Exception ex)
         {
             return new CrashRecoveryAttemptResult(
                 false,
-                recovery.ErrorMessage ?? "One or more files could not be recovered.");
+                $"Crash recovery could not be completed: {ex.Message}");
         }
-
-        return new CrashRecoveryAttemptResult(true);
     }
 }
 

@@ -63,4 +63,28 @@ public class CrashRecoveryCoordinatorTests
             It.IsAny<IEnumerable<string>>(),
             true), Times.Once);
     }
+
+    [Fact]
+    public void Recover_ThrowingReplacementCaptureReturnsControlledFailureAndRetainsSources()
+    {
+        var autoSave = new Mock<IAutoSaveService>();
+        var source = new AutoSaveEntry("source", "recovered.txt", null, "recovered", true);
+        autoSave.Setup(service => service.GetRecoveryEntries())
+            .Returns(new RecoveryEntriesResult(true, new[] { source }));
+
+        var result = CrashRecoveryCoordinator.Recover(
+            autoSave.Object,
+            _ => new TabRecoveryResult(true, new[] { source.Id }),
+            () => throw new InvalidOperationException("snapshot failed"));
+
+        Assert.False(result.Success);
+        Assert.Contains("snapshot failed", result.FailureMessage);
+        autoSave.Verify(service => service.CompleteRecovery(
+            It.IsAny<IEnumerable<AutoSaveEntry>>(),
+            It.IsAny<IEnumerable<string>>(),
+            It.IsAny<bool>()), Times.Never);
+        autoSave.Verify(service => service.ClearRecoveryFiles(), Times.Never);
+        autoSave.Verify(service => service.RecordRecoveredEntries(
+            It.IsAny<IEnumerable<string>>()), Times.Never);
+    }
 }

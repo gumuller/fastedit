@@ -83,7 +83,7 @@ public class AutoSaveServiceTests
             {
                 if (path.EndsWith(".txt", StringComparison.Ordinal))
                     contentPath = path;
-                else if (path.EndsWith(".json", StringComparison.Ordinal))
+                else if (Path.GetFileName(path).StartsWith("manifest-", StringComparison.Ordinal))
                 {
                     manifestPath = path;
                     manifestJson = _;
@@ -123,7 +123,7 @@ public class AutoSaveServiceTests
         _fileSystem.Setup(f => f.WriteAllTextAtomic(It.IsAny<string>(), It.IsAny<string>()))
             .Callback<string, string>((path, _) =>
             {
-                if (path.EndsWith(".json", StringComparison.Ordinal))
+                if (Path.GetFileName(path).StartsWith("manifest-", StringComparison.Ordinal))
                     manifestPath = path;
             });
         _sut.SaveNow(new[]
@@ -154,7 +154,7 @@ public class AutoSaveServiceTests
             {
                 if (path.EndsWith(".txt", StringComparison.Ordinal))
                     contentPaths.Add(path);
-                else if (path.EndsWith(".json", StringComparison.Ordinal))
+                else if (Path.GetFileName(path).StartsWith("manifest-", StringComparison.Ordinal))
                 {
                     manifestPath = path;
                     manifestJson = content;
@@ -621,6 +621,7 @@ public class AutoSaveServiceTests
         string? retiredManifestPath = null;
         var manifestWriteAttempts = 0;
         var contentDeleteAttempts = 0;
+        var cleanupOperations = new List<string>();
 
         _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
         _fileSystem.Setup(f => f.FileExists(It.IsAny<string>()))
@@ -651,6 +652,8 @@ public class AutoSaveServiceTests
                 {
                     throw new IOException("manifest write failed");
                 }
+                if (Path.GetFileName(path).StartsWith("cleanup-", StringComparison.OrdinalIgnoreCase))
+                    cleanupOperations.Add("intent");
 
                 existingFiles.Add(path);
                 fileContents[path] = content;
@@ -666,6 +669,7 @@ public class AutoSaveServiceTests
                 fileContents[destination] = fileContents[source];
                 fileContents.Remove(source);
                 retiredManifestPath = destination;
+                cleanupOperations.Add("quarantine");
             });
         _fileSystem.Setup(f => f.DeleteFile(It.IsAny<string>()))
             .Callback<string>(path =>
@@ -684,6 +688,7 @@ public class AutoSaveServiceTests
         firstRun.Should().Throw<IOException>();
 
         _sut.MarkCleanShutdown().Should().BeFalse();
+        cleanupOperations.Take(2).Should().Equal("intent", "quarantine");
         existingFiles.Should().Contain(activeContentPath!);
         existingFiles.Should().Contain(retiredManifestPath!);
 
@@ -697,6 +702,81 @@ public class AutoSaveServiceTests
         existingFiles.Should().NotContain(activeContentPath!);
         existingFiles.Should().NotContain(retiredManifestPath!);
         contentDeleteAttempts.Should().Be(2);
+    }
+
+    [Fact]
+    public void CrashDuringFirstSnapshot_ExposesManifestlessContentForRecovery()
+    {
+        var existingFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var fileContents = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        string? activeContentPath = null;
+        string? activeMarkerPath = null;
+        var manifestWriteAttempts = 0;
+
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.FileExists(It.IsAny<string>()))
+            .Returns((string path) => existingFiles.Contains(path));
+        _fileSystem.Setup(f => f.ReadAllText(It.IsAny<string>()))
+            .Returns((string path) => fileContents[path]);
+        _fileSystem.Setup(f => f.GetLastWriteTime(It.IsAny<string>()))
+            .Returns(DateTime.UtcNow);
+        _fileSystem.Setup(f => f.GetFiles(
+                _autoSaveDir,
+                It.IsAny<string>(),
+                false))
+            .Returns((string directory, string pattern, bool recursive) =>
+                existingFiles
+                    .Where(path => FileSystemName.MatchesSimpleExpression(
+                        pattern,
+                        Path.GetFileName(path),
+                        ignoreCase: true))
+                    .ToArray());
+        _fileSystem.Setup(f => f.WriteAllTextAtomic(
+                It.IsAny<string>(),
+                It.IsAny<string>()))
+            .Callback<string, string>((path, content) =>
+            {
+                if (path.EndsWith(".txt", StringComparison.Ordinal))
+                    activeContentPath = path;
+                if (path.EndsWith(".lock", StringComparison.Ordinal))
+                    activeMarkerPath = path;
+                if (Path.GetFileName(path).StartsWith("manifest-", StringComparison.OrdinalIgnoreCase) &&
+                    manifestWriteAttempts++ == 0)
+                {
+                    throw new IOException("manifest write failed");
+                }
+
+                existingFiles.Add(path);
+                fileContents[path] = content;
+            });
+        _fileSystem.Setup(f => f.DeleteFile(It.IsAny<string>()))
+            .Callback<string>(path =>
+            {
+                existingFiles.Remove(path);
+                fileContents.Remove(path);
+            });
+
+        _sut.Start();
+        var firstRun = () => _sut.SaveNow(new[]
+        {
+            new AutoSaveEntry("orphan", "orphan.txt", null, "recover me", true)
+        });
+        firstRun.Should().Throw<IOException>();
+        _sut.Stop();
+        fileContents[activeMarkerPath!] = $"{int.MaxValue}|0";
+
+        var nextRun = new AutoSaveService(
+            _fileSystem.Object,
+            _settings.Object,
+            new InlineDispatcherService());
+
+        nextRun.HasRecoveryFiles().Should().BeTrue();
+        var recovery = nextRun.GetRecoveryEntries();
+
+        recovery.Success.Should().BeTrue();
+        recovery.Entries.Should().ContainSingle(entry => entry.Content == "recover me");
+        existingFiles.Should().Contain(activeContentPath!);
+        _fileSystem.Verify(f => f.DeleteFile(activeContentPath!), Times.Never);
     }
 
     [Fact]
