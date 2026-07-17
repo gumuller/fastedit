@@ -25,6 +25,7 @@ internal sealed class TerminalOutputFramer
     private const int MaxSentinelLength = 65536;
 
     private readonly StringBuilder _pending = new();
+    private readonly AnsiEscapeFilter _ansiFilter = new();
     private readonly bool _parseSentinels;
     private readonly bool _emitPartialChunks;
     private int _scanIndex;
@@ -80,6 +81,7 @@ internal sealed class TerminalOutputFramer
         _pending.Clear();
         _scanIndex = 0;
         _hasEmittedPartialLineContent = false;
+        _ansiFilter.Complete();
         return frames;
     }
 
@@ -88,6 +90,7 @@ internal sealed class TerminalOutputFramer
         var line = rawLine.TrimEnd('\r');
         if (line.Length == 0 && _hasEmittedPartialLineContent)
         {
+            _ansiFilter.EndLine();
             AddDeferredBlankLines(frames, 1);
             _hasEmittedPartialLineContent = false;
             return;
@@ -95,11 +98,13 @@ internal sealed class TerminalOutputFramer
 
         if (_parseSentinels && line.Length == 0)
         {
+            _ansiFilter.EndLine();
             _deferredBlankLineCount++;
             return;
         }
 
         var frame = CreateFrame(rawLine, hasNewLine: true);
+        _ansiFilter.EndLine();
         var blankLinesToEmit = frame.Kind == TerminalOutputFrameKind.Sentinel
             ? Math.Max(0, _deferredBlankLineCount - 1)
             : _deferredBlankLineCount;
@@ -134,7 +139,7 @@ internal sealed class TerminalOutputFramer
         if (sentinelIndex >= 0)
             return ParseSentinel(line[(sentinelIndex + SentinelPrefix.Length)..]);
 
-        var cleaned = CommandRunnerService.StripAnsiCodes(line);
+        var cleaned = _ansiFilter.Filter(line);
         return new TerminalOutputFrame(
             TerminalOutputFrameKind.Output,
             hasNewLine ? cleaned + "\n" : cleaned,
@@ -179,7 +184,7 @@ internal sealed class TerminalOutputFramer
         if (length <= 0)
             return;
 
-        var output = CommandRunnerService.StripAnsiCodes(_pending.ToString(0, length));
+        var output = _ansiFilter.Filter(_pending.ToString(0, length));
         _pending.Remove(0, length);
         _scanIndex = _pending.Length;
         if (string.IsNullOrEmpty(output))
@@ -264,5 +269,105 @@ internal sealed class TerminalOutputFramer
             commandToken,
             workingDirectory,
             true);
+    }
+
+    private sealed class AnsiEscapeFilter
+    {
+        private const int MaxPendingEscapeLength = 256;
+        private readonly StringBuilder _pendingEscape = new();
+        private bool _discardingCsi;
+
+        public string Filter(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+                return "";
+
+            var output = new StringBuilder(text.Length);
+            foreach (var character in text)
+            {
+                if (_discardingCsi)
+                {
+                    if (character is >= '\x40' and <= '\x7E')
+                    {
+                        _discardingCsi = false;
+                    }
+                    else if (character is < '\x20' or > '\x3F')
+                    {
+                        _discardingCsi = false;
+                        if (character == '\x1B')
+                            _pendingEscape.Append(character);
+                        else
+                            output.Append(character);
+                    }
+                    continue;
+                }
+
+                if (_pendingEscape.Length == 0)
+                {
+                    if (character == '\x1B')
+                        _pendingEscape.Append(character);
+                    else
+                        output.Append(character);
+                    continue;
+                }
+
+                if (_pendingEscape.Length == 1)
+                {
+                    if (character == '[')
+                    {
+                        _pendingEscape.Append(character);
+                        continue;
+                    }
+
+                    output.Append(_pendingEscape);
+                    _pendingEscape.Clear();
+                    if (character == '\x1B')
+                        _pendingEscape.Append(character);
+                    else
+                        output.Append(character);
+                    continue;
+                }
+
+                if (character is >= '\x40' and <= '\x7E')
+                {
+                    _pendingEscape.Clear();
+                    continue;
+                }
+
+                if (character is >= '\x20' and <= '\x3F')
+                {
+                    if (_pendingEscape.Length >= MaxPendingEscapeLength)
+                    {
+                        _pendingEscape.Clear();
+                        _discardingCsi = true;
+                    }
+                    else
+                    {
+                        _pendingEscape.Append(character);
+                    }
+                    continue;
+                }
+
+                _pendingEscape.Clear();
+                if (character == '\x1B')
+                    _pendingEscape.Append(character);
+                else
+                    output.Append(character);
+            }
+
+            return output.ToString();
+        }
+
+        public void EndLine()
+        {
+            _pendingEscape.Clear();
+            _discardingCsi = false;
+        }
+
+        public void Complete()
+        {
+            _pendingEscape.Clear();
+            _discardingCsi = false;
+        }
     }
 }

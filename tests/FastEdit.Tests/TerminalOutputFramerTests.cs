@@ -120,6 +120,55 @@ public class TerminalOutputFramerTests
     }
 
     [Fact]
+    public void Append_StreamingStdout_StripsAnsiSequenceSplitAcrossChunks()
+    {
+        var framer = new TerminalOutputFramer(emitPartialChunks: true);
+
+        Assert.Empty(framer.Append("\x1B[31"));
+        var frames = framer.Append(
+            $"mRED\x1B[0m\n\n{TerminalOutputFramer.SentinelPrefix}42|{CommandToken}|C:\\work\n");
+
+        Assert.Equal("RED\n", string.Concat(
+            frames.Where(frame => frame.Kind == TerminalOutputFrameKind.Output)
+                .Select(frame => frame.Text)));
+        Assert.DoesNotContain('\x1B', string.Concat(frames.Select(frame => frame.Text)));
+        Assert.Equal(TerminalOutputFrameKind.Sentinel, frames[^1].Kind);
+    }
+
+    [Fact]
+    public void Append_StreamingStdout_StripsSplitAnsiResetWithoutDelayingText()
+    {
+        var framer = new TerminalOutputFramer(emitPartialChunks: true);
+        var frames = new List<TerminalOutputFrame>();
+
+        frames.AddRange(framer.Append("\x1B[31mRED\x1B[0"));
+        frames.AddRange(framer.Append("m"));
+        frames.AddRange(framer.Append(
+            $"\n\n{TerminalOutputFramer.SentinelPrefix}42|{CommandToken}|C:\\work\n"));
+
+        Assert.Equal("RED\n", string.Concat(
+            frames.Where(frame => frame.Kind == TerminalOutputFrameKind.Output)
+                .Select(frame => frame.Text)));
+        Assert.Equal("RED", frames[0].Text);
+        Assert.Equal(TerminalOutputFrameKind.Sentinel, frames[^1].Kind);
+    }
+
+    [Fact]
+    public void Append_StreamingStdout_BoundsMalformedAnsiAndRecoversAtTerminator()
+    {
+        var framer = new TerminalOutputFramer(emitPartialChunks: true);
+
+        Assert.Empty(framer.Append("\x1B[" + new string('3', 10000)));
+        var frames = framer.Append(
+            $"mVISIBLE\n\n{TerminalOutputFramer.SentinelPrefix}42|{CommandToken}|C:\\work\n");
+
+        Assert.Equal("VISIBLE\n", string.Concat(
+            frames.Where(frame => frame.Kind == TerminalOutputFrameKind.Output)
+                .Select(frame => frame.Text)));
+        Assert.Equal(TerminalOutputFrameKind.Sentinel, frames[^1].Kind);
+    }
+
+    [Fact]
     public void Append_ConsumesOnlyProtocolSeparatorBlankLine()
     {
         var framer = new TerminalOutputFramer(emitPartialChunks: true);
