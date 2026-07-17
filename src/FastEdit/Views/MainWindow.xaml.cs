@@ -190,27 +190,12 @@ public partial class MainWindow : FluentWindow
 
                 if (result == Services.Interfaces.DialogResult.Yes)
                 {
-                    var recovery = _autoSaveService.GetRecoveryEntries();
-                    var tabRecovery = _viewModel.RecoverTabs(recovery.Entries);
-                    var recoveredAll = recovery.Success && tabRecovery.Success;
-                    var recoveryProgressSaved = recoveredAll ||
-                        tabRecovery.RecoveredEntryIds.Count == 0 ||
-                        _autoSaveService.RecordRecoveredEntries(tabRecovery.RecoveredEntryIds);
-                    if (CrashRecoveryStartupPolicy.ShouldClearRecoveryFiles(
-                        userRequestedRecovery: true,
-                        recoveryDataLoaded: recovery.Success,
-                        allEntriesRecovered: recoveredAll))
-                    {
-                        TryClearRecoveryFiles(
-                            "Recovered content is open, but the recovery files could not be cleared.");
-                    }
-                    else
-                    {
-                        var detail = !recoveryProgressSaved
-                            ? "Recovered files could not be marked complete."
-                            : recovery.ErrorMessage ?? "One or more files could not be recovered.";
-                        ReportRecoveryFailure(detail);
-                    }
+                    var recoveryAttempt = CrashRecoveryCoordinator.Recover(
+                        _autoSaveService,
+                        _viewModel.RecoverTabs,
+                        _viewModel.GetAutoSaveEntries);
+                    if (!recoveryAttempt.Success)
+                        ReportRecoveryFailure(recoveryAttempt.FailureMessage!);
                 }
                 else if (CrashRecoveryStartupPolicy.ShouldClearRecoveryFiles(
                     userRequestedRecovery: false,
@@ -285,7 +270,7 @@ public partial class MainWindow : FluentWindow
             return;
 
         e.Cancel = true;
-        if (_viewModel.HasUnsavedChanges() && !await _viewModel.ConfirmExitAsync())
+        if (_viewModel.HasUnsavedChanges() && !await _viewModel.PrepareForExitAsync())
             return;
 
         IsEnabled = false;
@@ -311,6 +296,7 @@ public partial class MainWindow : FluentWindow
         catch (Exception ex)
         {
             IsEnabled = true;
+            _viewModel.CancelExitPreparation();
             Trace.TraceError("Failed to persist the session during shutdown: {0}", ex);
             if (_viewModel != null)
                 _viewModel.StatusText = "Unable to save the current session; FastEdit remains open.";

@@ -23,6 +23,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     private LargeFileDocument? _largeFileDoc;
     private bool _disposed;
     private bool _isSettingContentBaseline;
+    private bool _isApplyingBinaryBaseline;
 
     private Encoding _fileEncoding = new UTF8Encoding(false);
     private bool _hasBom;
@@ -140,11 +141,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         {
             Encoding = analysis.DetectedEncoding ?? "Binary";
             _byteBuffer = new VirtualizedByteBuffer(filePath);
-            _byteBuffer.ModificationsChanged += (s, e) =>
-            {
-                ChangeVersion++;
-                IsModified = _byteBuffer.HasModifications;
-            };
+            _byteBuffer.ModificationsChanged += OnByteBufferModificationsChanged;
         }
         else if (Mode == FileOpenMode.LargeText)
         {
@@ -189,7 +186,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         {
             if (_byteBuffer != null)
             {
-                _byteBuffer.Save();
+                SaveBinaryBuffer();
                 IsModified = false;
                 return true;
             }
@@ -239,7 +236,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         {
             if (_byteBuffer != null)
             {
-                _byteBuffer.Save(); // saves to original path
+                SaveBinaryBuffer(); // saves to original path
                 // For Save As in binary mode, copy file to new location
                 if (savePath != FilePath)
                     _fileSystemService.CopyFile(FilePath, savePath, overwrite: true);
@@ -254,7 +251,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
             if (string.IsNullOrEmpty(FilePath))
                 return false;
 
-            if (!string.Equals(savePath, FilePath, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(savePath, FilePath, StringComparison.Ordinal))
             {
                 _fileSystemService.CopyFile(FilePath, savePath, overwrite: true);
 
@@ -325,11 +322,27 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
             Encoding = "Binary";
             SyntaxLanguage = string.Empty;
             _byteBuffer = new VirtualizedByteBuffer(FilePath);
-            _byteBuffer.ModificationsChanged += (s, e) =>
-            {
-                ChangeVersion++;
-                IsModified = _byteBuffer.HasModifications;
-            };
+            _byteBuffer.ModificationsChanged += OnByteBufferModificationsChanged;
+        }
+    }
+
+    private void OnByteBufferModificationsChanged(object? sender, EventArgs e)
+    {
+        if (!_isApplyingBinaryBaseline)
+            ChangeVersion++;
+        IsModified = _byteBuffer?.HasModifications == true;
+    }
+
+    private void SaveBinaryBuffer()
+    {
+        _isApplyingBinaryBaseline = true;
+        try
+        {
+            _byteBuffer!.Save();
+        }
+        finally
+        {
+            _isApplyingBinaryBaseline = false;
         }
     }
 

@@ -21,6 +21,7 @@ public partial class MainViewModel : ObservableObject
     private readonly IFileSystemService _fileSystemService;
     private readonly IEditorTabFactory _tabFactory;
     private readonly IWorkspaceService _workspaceService;
+    private readonly HashSet<EditorTabViewModel> _shutdownDiscardedTabs = new();
     private bool _isInitializing = true;
 
     [ObservableProperty]
@@ -165,7 +166,8 @@ public partial class MainViewModel : ObservableObject
         if (string.IsNullOrEmpty(filePath)) return;
 
         // Check if already open
-        var existingTab = Tabs.FirstOrDefault(t => t.FilePath == filePath);
+        var existingTab = Tabs.FirstOrDefault(t =>
+            string.Equals(t.FilePath, filePath, StringComparison.Ordinal));
         if (existingTab != null)
         {
             SelectedTab = existingTab;
@@ -1002,7 +1004,7 @@ public partial class MainViewModel : ObservableObject
     }
 
     private bool IsFileAlreadyOpen(string filePath) =>
-        Tabs.Any(t => string.Equals(t.FilePath, filePath, StringComparison.OrdinalIgnoreCase));
+        Tabs.Any(t => string.Equals(t.FilePath, filePath, StringComparison.Ordinal));
 
     private void SelectRestoredActiveTab()
     {
@@ -1048,6 +1050,7 @@ public partial class MainViewModel : ObservableObject
     public void SaveSession()
     {
         var sessionFiles = new List<SessionFile>();
+        var persistedActiveTabIndex = 0;
         var tempDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "FastEdit", "Temp");
@@ -1055,6 +1058,12 @@ public partial class MainViewModel : ObservableObject
 
         foreach (var tab in Tabs)
         {
+            if (_shutdownDiscardedTabs.Contains(tab) && string.IsNullOrEmpty(tab.FilePath))
+                continue;
+
+            if (tab == SelectedTab)
+                persistedActiveTabIndex = sessionFiles.Count;
+
             var sessionFile = new SessionFile
             {
                 FilePath = string.IsNullOrEmpty(tab.FilePath) ? tab.FileName : tab.FilePath,
@@ -1086,7 +1095,7 @@ public partial class MainViewModel : ObservableObject
         }
 
         _settingsService.OpenFiles = sessionFiles;
-        _settingsService.ActiveTabIndex = SelectedTab != null ? Tabs.IndexOf(SelectedTab) : 0;
+        _settingsService.ActiveTabIndex = persistedActiveTabIndex;
         _settingsService.Save();
         CleanupTempFiles(
             sessionFiles
@@ -1125,6 +1134,22 @@ public partial class MainViewModel : ObservableObject
 
     public async Task<bool> ConfirmExitAsync()
     {
+        return await ConfirmUnsavedChangesAsync(recordShutdownDiscards: false);
+    }
+
+    public async Task<bool> PrepareForExitAsync()
+    {
+        _shutdownDiscardedTabs.Clear();
+        return await ConfirmUnsavedChangesAsync(recordShutdownDiscards: true);
+    }
+
+    public void CancelExitPreparation()
+    {
+        _shutdownDiscardedTabs.Clear();
+    }
+
+    private async Task<bool> ConfirmUnsavedChangesAsync(bool recordShutdownDiscards)
+    {
         var unsavedTabs = Tabs.Where(t => t.IsModified).ToList();
         if (unsavedTabs.Count == 0)
             return true;
@@ -1138,6 +1163,12 @@ public partial class MainViewModel : ObservableObject
 
         if (result == Services.Interfaces.DialogResult.Cancel)
             return false;
+
+        if (result == Services.Interfaces.DialogResult.No && recordShutdownDiscards)
+        {
+            foreach (var tab in unsavedTabs.Where(tab => string.IsNullOrEmpty(tab.FilePath)))
+                _shutdownDiscardedTabs.Add(tab);
+        }
 
         if (result == Services.Interfaces.DialogResult.Yes)
         {
@@ -1176,7 +1207,7 @@ public partial class MainViewModel : ObservableObject
 
             var id = string.IsNullOrEmpty(tab.FilePath)
                 ? $"untitled-{tab.AutoSaveIdentity}"
-                : CreateSavedFileAutoSaveId(tab.FilePath);
+                : CreateSavedFileAutoSaveId(tab.FilePath, tab.AutoSaveIdentity);
 
             entries.Add(new AutoSaveEntry(
                 id,
@@ -1191,13 +1222,12 @@ public partial class MainViewModel : ObservableObject
         return entries;
     }
 
-    internal static string CreateSavedFileAutoSaveId(string filePath)
+    internal static string CreateSavedFileAutoSaveId(string filePath, string tabIdentity)
     {
         var normalizedPath = Path.GetFullPath(filePath)
-            .Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)
-            .ToUpperInvariant();
+            .Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(normalizedPath));
-        return $"file-{Convert.ToHexString(hash).ToLowerInvariant()}";
+        return $"file-{Convert.ToHexString(hash).ToLowerInvariant()}-{tabIdentity}";
     }
 
     public EditorTabViewModel RecoverTab(AutoSaveEntry entry)

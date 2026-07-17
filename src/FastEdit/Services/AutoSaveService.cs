@@ -72,6 +72,7 @@ public sealed class AutoSaveService : IAutoSaveService
             StopTimer();
             IntervalSeconds = _settings.AutoSaveIntervalSeconds;
             _fileSystem.CreateDirectory(_autoSaveDir);
+            CleanupRetiredGenerations();
             var wasCleanShutdown = _fileSystem.FileExists(_shutdownMarkerPath);
             if (wasCleanShutdown)
                 _fileSystem.DeleteFile(_shutdownMarkerPath);
@@ -364,37 +365,38 @@ public sealed class AutoSaveService : IAutoSaveService
             var manifestPaths = _lastRecoveryManifestPaths.Count > 0
                 ? _lastRecoveryManifestPaths.ToArray()
                 : GetManifestPaths().ToArray();
-            var contentPaths = _lastRecoveryContentPaths
-                .Concat(CaptureRecoveryContentPaths(manifestPaths))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray();
             var errors = new List<string>();
             var resolvedEntries = LoadResolvedEntries(errors);
             if (errors.Count > 0)
                 throw new InvalidDataException(string.Join(Environment.NewLine, errors));
 
-            foreach (var file in contentPaths)
-                _fileSystem.DeleteFile(file);
-
+            var allRetired = true;
+            var retiredManifests = new List<string>();
             foreach (var manifestPath in manifestPaths)
             {
-                _fileSystem.DeleteFile(manifestPath);
+                var contentPaths = GetGenerationContentPaths(manifestPath);
                 var markerPath = GetGenerationMarkerPath(manifestPath);
-                if (markerPath != null && _fileSystem.FileExists(markerPath))
-                    _fileSystem.DeleteFile(markerPath);
+                if (RetireGeneration(manifestPath, contentPaths, markerPath))
+                {
+                    retiredManifests.Add(manifestPath);
+                }
+                else
+                {
+                    allRetired = false;
+                }
             }
 
-            foreach (var manifestPath in manifestPaths)
+            foreach (var manifestPath in retiredManifests)
             {
                 var manifestName = Path.GetFileName(manifestPath);
                 if (!string.IsNullOrEmpty(manifestName))
                     resolvedEntries.Remove(manifestName);
             }
             SaveResolvedEntries(resolvedEntries);
-            _lastRecoveryManifestPaths.Clear();
+            _lastRecoveryManifestPaths.ExceptWith(retiredManifests);
             _lastRecoveryContentPaths.Clear();
             _lastRecoveryOrigins.Clear();
-            return true;
+            return allRetired;
         }
         catch (Exception ex)
         {
@@ -407,14 +409,15 @@ public sealed class AutoSaveService : IAutoSaveService
     {
         try
         {
-            if (!string.IsNullOrEmpty(_activeContentPrefix))
+            if (_fileSystem.FileExists(_activeManifestPath))
             {
-                foreach (var file in _fileSystem.GetFiles(_autoSaveDir, $"{_activeContentPrefix}*.txt"))
-                    _fileSystem.DeleteFile(file);
+                var contentPaths = GetGenerationContentPaths(_activeManifestPath);
+                return RetireGeneration(
+                    _activeManifestPath,
+                    contentPaths,
+                    _activeGenerationMarkerPath);
             }
 
-            if (_fileSystem.FileExists(_activeManifestPath))
-                _fileSystem.DeleteFile(_activeManifestPath);
             if (_fileSystem.FileExists(_activeGenerationMarkerPath))
                 _fileSystem.DeleteFile(_activeGenerationMarkerPath);
             return true;
@@ -424,6 +427,174 @@ public sealed class AutoSaveService : IAutoSaveService
             Trace.TraceWarning("Failed to clear current auto-save generation: {0}", ex);
             return false;
         }
+    }
+
+    private string[] GetGenerationContentPaths(string manifestPath)
+    {
+        var contentPaths = CaptureRecoveryContentPaths(new[] { manifestPath })
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        AddGenerationContentPaths(Path.GetFileName(manifestPath), contentPaths);
+        return contentPaths.ToArray();
+    }
+
+    private void AddGenerationContentPaths(
+        string manifestName,
+        ISet<string> contentPaths)
+    {
+        var fileName = Path.GetFileNameWithoutExtension(manifestName);
+        const string prefix = "manifest-";
+        if (fileName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            var generationId = fileName[prefix.Length..];
+            foreach (var path in _fileSystem.GetFiles(_autoSaveDir, $"{generationId}-*.txt"))
+                contentPaths.Add(path);
+        }
+    }
+
+    private void CleanupRetiredGenerations()
+    {
+        foreach (var retiredManifestPath in _fileSystem.GetFiles(_autoSaveDir, ".retired-*.json"))
+        {
+            var cleanupComplete = true;
+            var originalManifestName = GetOriginalManifestName(retiredManifestPath);
+            var contentPaths = CaptureRecoveryContentPaths(new[] { retiredManifestPath })
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (originalManifestName != null)
+                AddGenerationContentPaths(originalManifestName, contentPaths);
+
+            foreach (var contentPath in contentPaths)
+            {
+                try
+                {
+                    if (_fileSystem.FileExists(contentPath))
+                        _fileSystem.DeleteFile(contentPath);
+                }
+                catch (Exception ex)
+                {
+                    cleanupComplete = false;
+                    Trace.TraceWarning(
+                        "Failed to clean quarantined auto-save content '{0}': {1}",
+                        contentPath,
+                        ex);
+                }
+            }
+
+            var markerPath = originalManifestName == null
+                ? null
+                : GetGenerationMarkerPath(Path.Combine(_autoSaveDir, originalManifestName));
+            if (markerPath != null)
+            {
+                try
+                {
+                    if (_fileSystem.FileExists(markerPath))
+                        _fileSystem.DeleteFile(markerPath);
+                }
+                catch (Exception ex)
+                {
+                    cleanupComplete = false;
+                    Trace.TraceWarning(
+                        "Failed to clean quarantined auto-save marker '{0}': {1}",
+                        markerPath,
+                        ex);
+                }
+            }
+
+            if (!cleanupComplete)
+                continue;
+
+            try
+            {
+                _fileSystem.DeleteFile(retiredManifestPath);
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning(
+                    "Failed to clean quarantined auto-save manifest '{0}': {1}",
+                    retiredManifestPath,
+                    ex);
+            }
+        }
+    }
+
+    private static string? GetOriginalManifestName(string retiredManifestPath)
+    {
+        var fileName = Path.GetFileName(retiredManifestPath);
+        var manifestIndex = fileName.IndexOf("manifest", StringComparison.OrdinalIgnoreCase);
+        return manifestIndex < 0 ? null : fileName[manifestIndex..];
+    }
+
+    private bool RetireGeneration(
+        string manifestPath,
+        IReadOnlyCollection<string> contentPaths,
+        string? markerPath)
+    {
+        var retiredManifestPath = Path.Combine(
+            _autoSaveDir,
+            $".retired-{Guid.NewGuid():N}-{Path.GetFileName(manifestPath)}");
+        try
+        {
+            _fileSystem.MoveFile(manifestPath, retiredManifestPath);
+        }
+        catch (Exception ex)
+        {
+            Trace.TraceWarning(
+                "Failed to quarantine auto-save manifest '{0}': {1}",
+                manifestPath,
+                ex);
+            return false;
+        }
+
+        var cleanupComplete = true;
+        foreach (var contentPath in contentPaths)
+        {
+            try
+            {
+                if (_fileSystem.FileExists(contentPath))
+                    _fileSystem.DeleteFile(contentPath);
+            }
+            catch (Exception ex)
+            {
+                cleanupComplete = false;
+                Trace.TraceWarning(
+                    "Failed to delete retired auto-save content '{0}': {1}",
+                    contentPath,
+                    ex);
+            }
+        }
+
+        if (markerPath != null)
+        {
+            try
+            {
+                if (_fileSystem.FileExists(markerPath))
+                    _fileSystem.DeleteFile(markerPath);
+            }
+            catch (Exception ex)
+            {
+                cleanupComplete = false;
+                Trace.TraceWarning(
+                    "Failed to delete retired auto-save marker '{0}': {1}",
+                    markerPath,
+                    ex);
+            }
+        }
+
+        if (cleanupComplete)
+        {
+            try
+            {
+                _fileSystem.DeleteFile(retiredManifestPath);
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning(
+                    "Failed to delete quarantined auto-save manifest '{0}': {1}",
+                    retiredManifestPath,
+                    ex);
+            }
+        }
+
+        return true;
     }
 
     private IReadOnlyList<string> GetManifestPaths()

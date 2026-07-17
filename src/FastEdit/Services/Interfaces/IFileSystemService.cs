@@ -19,6 +19,7 @@ public interface IFileSystemService
     void WriteAllTextAtomic(string path, string content);
     void WriteAllBytes(string path, byte[] bytes);
     void CopyFile(string source, string destination, bool overwrite = false);
+    void MoveFile(string source, string destination, bool overwrite = false);
     void DeleteFile(string path);
     void CreateDirectory(string path);
     string GetTempPath();

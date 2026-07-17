@@ -357,6 +357,31 @@ public class EditorTabViewModelTests
         Assert.False(sut.IsModified);
     }
 
+    [Fact]
+    public async Task Save_BinaryFile_DoesNotIncrementUserChangeVersionWhenClearingModifications()
+    {
+        var sut = CreateSut();
+        var tempFile = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.bin");
+        try
+        {
+            File.WriteAllBytes(tempFile, new byte[] { 0, 1, 0, 2, 0, 3 });
+            await sut.LoadFileAsync(tempFile);
+            Assert.Equal(FileOpenMode.Binary, sut.Mode);
+            sut.ByteBuffer!.SetByte(0, 9);
+            var userChangeVersion = sut.ChangeVersion;
+
+            await sut.SaveCommand.ExecuteAsync(null);
+
+            Assert.False(sut.IsModified);
+            Assert.Equal(userChangeVersion, sut.ChangeVersion);
+        }
+        finally
+        {
+            sut.Dispose();
+            File.Delete(tempFile);
+        }
+    }
+
     // --- Dispose ---
 
     [Fact]

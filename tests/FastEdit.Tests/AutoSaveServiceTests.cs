@@ -74,6 +74,8 @@ public class AutoSaveServiceTests
     {
         string? contentPath = null;
         string? manifestPath = null;
+        string? manifestJson = null;
+        string? retiredManifestPath = null;
         _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
         _fileSystem.Setup(f => f.WriteAllTextAtomic(It.IsAny<string>(), It.IsAny<string>()))
             .Callback<string, string>((path, _) =>
@@ -81,7 +83,10 @@ public class AutoSaveServiceTests
                 if (path.EndsWith(".txt", StringComparison.Ordinal))
                     contentPath = path;
                 else if (path.EndsWith(".json", StringComparison.Ordinal))
+                {
                     manifestPath = path;
+                    manifestJson = _;
+                }
             });
         _sut.SaveNow(new[]
         {
@@ -93,12 +98,17 @@ public class AutoSaveServiceTests
                 false))
             .Returns(() => new[] { contentPath! });
         _fileSystem.Setup(f => f.FileExists(It.IsAny<string>()))
-            .Returns((string path) => path == manifestPath);
+            .Returns((string path) => path == manifestPath || path == contentPath);
+        _fileSystem.Setup(f => f.ReadAllText(It.IsAny<string>()))
+            .Returns(() => manifestJson!);
+        _fileSystem.Setup(f => f.MoveFile(manifestPath!, It.IsAny<string>(), false))
+            .Callback<string, string, bool>((_, destination, _) => retiredManifestPath = destination);
 
         _sut.MarkCleanShutdown().Should().BeTrue();
 
         _fileSystem.Verify(f => f.DeleteFile(contentPath!), Times.Once);
-        _fileSystem.Verify(f => f.DeleteFile(manifestPath!), Times.Once);
+        _fileSystem.Verify(f => f.MoveFile(manifestPath!, It.IsAny<string>(), false), Times.Once);
+        _fileSystem.Verify(f => f.DeleteFile(retiredManifestPath!), Times.Once);
         _fileSystem.Verify(f => f.WriteAllTextAtomic(
             Path.Combine(_autoSaveDir, ".clean-shutdown"),
             It.IsAny<string>()), Times.Never);
@@ -108,10 +118,20 @@ public class AutoSaveServiceTests
     public void MarkCleanShutdown_ActiveGenerationCleanupFailure_ReturnsFalse()
     {
         _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
-        _fileSystem.Setup(f => f.GetFiles(
-                _autoSaveDir,
-                It.Is<string>(pattern => pattern.EndsWith("*.txt", StringComparison.Ordinal)),
-                false))
+        string? manifestPath = null;
+        _fileSystem.Setup(f => f.WriteAllTextAtomic(It.IsAny<string>(), It.IsAny<string>()))
+            .Callback<string, string>((path, _) =>
+            {
+                if (path.EndsWith(".json", StringComparison.Ordinal))
+                    manifestPath = path;
+            });
+        _sut.SaveNow(new[]
+        {
+            new AutoSaveEntry("id", "test.txt", null, "content", true)
+        });
+        _fileSystem.Setup(f => f.FileExists(It.IsAny<string>()))
+            .Returns((string path) => path == manifestPath);
+        _fileSystem.Setup(f => f.MoveFile(manifestPath!, It.IsAny<string>(), false))
             .Throws(new IOException("unavailable"));
 
         _sut.MarkCleanShutdown().Should().BeFalse();
@@ -119,6 +139,105 @@ public class AutoSaveServiceTests
         _fileSystem.Verify(f => f.WriteAllTextAtomic(
             Path.Combine(_autoSaveDir, ".clean-shutdown"),
             It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public void MarkCleanShutdown_RemovesContentFromOlderSnapshotsInActiveGeneration()
+    {
+        string? manifestPath = null;
+        string? manifestJson = null;
+        var contentPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.WriteAllTextAtomic(It.IsAny<string>(), It.IsAny<string>()))
+            .Callback<string, string>((path, content) =>
+            {
+                if (path.EndsWith(".txt", StringComparison.Ordinal))
+                    contentPaths.Add(path);
+                else if (path.EndsWith(".json", StringComparison.Ordinal))
+                {
+                    manifestPath = path;
+                    manifestJson = content;
+                }
+            });
+        _sut.SaveNow(new[]
+        {
+            new AutoSaveEntry("one", "one.txt", null, "one", true),
+            new AutoSaveEntry("two", "two.txt", null, "two", true)
+        });
+        _sut.SaveNow(new[]
+        {
+            new AutoSaveEntry("one", "one.txt", null, "new one", true)
+        });
+        _fileSystem.Setup(f => f.FileExists(It.IsAny<string>()))
+            .Returns((string path) => path == manifestPath || contentPaths.Contains(path));
+        _fileSystem.Setup(f => f.ReadAllText(manifestPath!)).Returns(() => manifestJson!);
+        _fileSystem.Setup(f => f.GetFiles(
+                _autoSaveDir,
+                It.Is<string>(pattern => pattern.EndsWith("-*.txt", StringComparison.Ordinal)),
+                false))
+            .Returns(() => contentPaths.ToArray());
+
+        _sut.MarkCleanShutdown().Should().BeTrue();
+
+        foreach (var contentPath in contentPaths)
+            _fileSystem.Verify(f => f.DeleteFile(contentPath), Times.Once);
+    }
+
+    [Fact]
+    public void Start_RetriesQuarantinedGenerationCleanup()
+    {
+        var retiredManifest = Path.Combine(
+            _autoSaveDir,
+            ".retired-operation-manifest-old.json");
+        var contentPath = Path.Combine(_autoSaveDir, "old-content.txt");
+        var manifest = """[{"Id":"old","FileName":"old.txt","FilePath":null,"ContentFile":"old-content.txt","IsUntitled":true,"CursorOffset":0,"ScrollOffset":0}]""";
+        var deleteAttempts = 0;
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, ".retired-*.json", false))
+            .Returns(new[] { retiredManifest });
+        _fileSystem.Setup(f => f.ReadAllText(retiredManifest)).Returns(manifest);
+        _fileSystem.Setup(f => f.FileExists(contentPath)).Returns(true);
+        _fileSystem.Setup(f => f.DeleteFile(contentPath))
+            .Callback(() =>
+            {
+                deleteAttempts++;
+                if (deleteAttempts == 1)
+                    throw new IOException("locked");
+            });
+
+        _sut.Start();
+        _sut.Stop();
+        _sut.Start();
+        _sut.Stop();
+
+        _fileSystem.Verify(f => f.DeleteFile(contentPath), Times.Exactly(2));
+        _fileSystem.Verify(f => f.DeleteFile(retiredManifest), Times.Once);
+    }
+
+    [Fact]
+    public void Start_RetryCleanupIncludesOlderSnapshotFilesFromGenerationPrefix()
+    {
+        var retiredManifest = Path.Combine(
+            _autoSaveDir,
+            ".retired-operation-manifest-generation.json");
+        var currentContent = Path.Combine(_autoSaveDir, "generation-current.txt");
+        var staleContent = Path.Combine(_autoSaveDir, "generation-stale.txt");
+        var manifest = """[{"Id":"current","FileName":"current.txt","FilePath":null,"ContentFile":"generation-current.txt","IsUntitled":true,"CursorOffset":0,"ScrollOffset":0}]""";
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, ".retired-*.json", false))
+            .Returns(new[] { retiredManifest });
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "generation-*.txt", false))
+            .Returns(new[] { currentContent, staleContent });
+        _fileSystem.Setup(f => f.ReadAllText(retiredManifest)).Returns(manifest);
+        _fileSystem.Setup(f => f.FileExists(currentContent)).Returns(true);
+        _fileSystem.Setup(f => f.FileExists(staleContent)).Returns(true);
+
+        _sut.Start();
+        _sut.Stop();
+
+        _fileSystem.Verify(f => f.DeleteFile(currentContent), Times.Once);
+        _fileSystem.Verify(f => f.DeleteFile(staleContent), Times.Once);
+        _fileSystem.Verify(f => f.DeleteFile(retiredManifest), Times.Once);
     }
 
     [Fact]
@@ -385,7 +504,8 @@ public class AutoSaveServiceTests
         _sut.ClearRecoveryFiles().Should().BeTrue();
 
         _fileSystem.Verify(f => f.DeleteFile(crashedContentPath), Times.Once);
-        _fileSystem.Verify(f => f.DeleteFile(crashedManifestPath), Times.Once);
+        _fileSystem.Verify(f => f.MoveFile(crashedManifestPath, It.IsAny<string>(), false), Times.Once);
+        _fileSystem.Verify(f => f.DeleteFile(crashedManifestPath), Times.Never);
         _fileSystem.Verify(f => f.DeleteFile(liveManifestPath), Times.Never);
     }
 
@@ -451,7 +571,7 @@ public class AutoSaveServiceTests
     }
 
     [Fact]
-    public void ClearRecoveryFiles_DeleteFailure_ReturnsFalseAndPreservesManifest()
+    public void ClearRecoveryFiles_ContentDeleteFailure_LeavesOnlyQuarantinedManifest()
     {
         var contentPath = Path.Combine(_autoSaveDir, "id1.txt");
         var manifestPath = Path.Combine(_autoSaveDir, "manifest.json");
@@ -465,9 +585,32 @@ public class AutoSaveServiceTests
         _sut.GetRecoveryEntries();
         _fileSystem.Setup(f => f.DeleteFile(contentPath)).Throws(new IOException("locked"));
 
+        _sut.ClearRecoveryFiles().Should().BeTrue();
+
+        _fileSystem.Verify(f => f.MoveFile(manifestPath, It.IsAny<string>(), false), Times.Once);
+        _fileSystem.Verify(f => f.DeleteFile(manifestPath), Times.Never);
+    }
+
+    [Fact]
+    public void ClearRecoveryFiles_LaterQuarantineFailureLeavesThatGenerationIntact()
+    {
+        var firstManifest = Path.Combine(_autoSaveDir, "manifest-first.json");
+        var secondManifest = Path.Combine(_autoSaveDir, "manifest-second.json");
+        var firstContent = SetupRecoveryGeneration(firstManifest, "first.txt", "first");
+        var secondContent = SetupRecoveryGeneration(secondManifest, "second.txt", "second");
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(new[] { firstManifest, secondManifest });
+        _sut.GetRecoveryEntries();
+        _fileSystem.Setup(f => f.MoveFile(secondManifest, It.IsAny<string>(), false))
+            .Throws(new IOException("locked"));
+
         _sut.ClearRecoveryFiles().Should().BeFalse();
 
-        _fileSystem.Verify(f => f.DeleteFile(manifestPath), Times.Never);
+        _fileSystem.Verify(f => f.MoveFile(firstManifest, It.IsAny<string>(), false), Times.Once);
+        _fileSystem.Verify(f => f.DeleteFile(firstContent), Times.Once);
+        _fileSystem.Verify(f => f.DeleteFile(secondContent), Times.Never);
+        _fileSystem.Verify(f => f.DeleteFile(secondManifest), Times.Never);
     }
 
     private string SetupRecoveryGeneration(

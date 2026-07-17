@@ -592,6 +592,35 @@ public class MainViewModelTests
         Assert.True(tab.IsModified);
     }
 
+    [Fact]
+    public async Task ConfirmExit_BinarySaveBaselineTransition_ReturnsTrue()
+    {
+        var tempFile = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.bin");
+        var tab = CreateMockTab();
+        try
+        {
+            File.WriteAllBytes(tempFile, new byte[] { 0, 1, 0, 2, 0, 3 });
+            await tab.LoadFileAsync(tempFile);
+            tab.ByteBuffer!.SetByte(0, 9);
+            _sut.Tabs.Add(tab);
+            _sut.SelectedTab = tab;
+            _dialogService.Setup(d => d.ShowMessage(
+                    It.IsAny<string>(), It.IsAny<string>(),
+                    DialogButtons.YesNoCancel, DialogIcon.Warning))
+                .Returns(Services.Interfaces.DialogResult.Yes);
+
+            var canExit = await _sut.ConfirmExitAsync();
+
+            Assert.True(canExit);
+            Assert.False(tab.IsModified);
+        }
+        finally
+        {
+            tab.Dispose();
+            File.Delete(tempFile);
+        }
+    }
+
     // --- SaveSession ---
 
     [Fact]
@@ -637,6 +666,69 @@ public class MainViewModelTests
         _fileSystemService.Verify(
             f => f.GetFiles(It.IsAny<string>(), "*.tmp", false),
             Times.Never);
+    }
+
+    [Fact]
+    public async Task SaveSession_ExplicitlyDiscardedUntitledTab_IsExcluded()
+    {
+        var tab = CreateMockTab("Untitled-1");
+        tab.Content = "discard me";
+        _tabFactory.Setup(f => f.CreateUntitled(null)).Returns(tab);
+        _sut.NewFileCommand.Execute(null);
+        _dialogService.Setup(d => d.ShowMessage(
+                It.IsAny<string>(), It.IsAny<string>(),
+                DialogButtons.YesNoCancel, DialogIcon.Warning))
+            .Returns(Services.Interfaces.DialogResult.No);
+
+        Assert.True(await _sut.PrepareForExitAsync());
+        _sut.SaveSession();
+
+        _settingsService.VerifySet(s => s.OpenFiles = It.Is<List<SessionFile>>(files => files.Count == 0));
+        _fileSystemService.Verify(
+            f => f.WriteAllTextAtomic(It.IsAny<string>(), "discard me"),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task CancelExitPreparation_RestoresUntitledSessionPersistence()
+    {
+        var tab = CreateMockTab("Untitled-1");
+        tab.Content = "keep me";
+        _tabFactory.Setup(f => f.CreateUntitled(null)).Returns(tab);
+        _sut.NewFileCommand.Execute(null);
+        _dialogService.Setup(d => d.ShowMessage(
+                It.IsAny<string>(), It.IsAny<string>(),
+                DialogButtons.YesNoCancel, DialogIcon.Warning))
+            .Returns(Services.Interfaces.DialogResult.No);
+
+        Assert.True(await _sut.PrepareForExitAsync());
+        _sut.CancelExitPreparation();
+        _sut.SaveSession();
+
+        _settingsService.VerifySet(s => s.OpenFiles = It.Is<List<SessionFile>>(
+            files => files.Count == 1 && files[0].IsUntitled));
+    }
+
+    [Fact]
+    public async Task SaveSession_DiscardedTabDoesNotShiftPersistedActiveIndex()
+    {
+        var discarded = CreateMockTab("Untitled-1");
+        var selected = CreateMockTab("selected.txt", @"C:\selected.txt");
+        var other = CreateMockTab("other.txt", @"C:\other.txt");
+        discarded.Content = "discard";
+        _sut.Tabs.Add(discarded);
+        _sut.Tabs.Add(selected);
+        _sut.Tabs.Add(other);
+        _sut.SelectedTab = selected;
+        _dialogService.Setup(d => d.ShowMessage(
+                It.IsAny<string>(), It.IsAny<string>(),
+                DialogButtons.YesNoCancel, DialogIcon.Warning))
+            .Returns(Services.Interfaces.DialogResult.No);
+
+        Assert.True(await _sut.PrepareForExitAsync());
+        _sut.SaveSession();
+
+        _settingsService.VerifySet(s => s.ActiveTabIndex = 0);
     }
 
     [Fact]
@@ -833,16 +925,42 @@ public class MainViewModelTests
     [Fact]
     public void AutoSaveIds_SavedPathsAreFullPathHashes()
     {
-        var first = MainViewModel.CreateSavedFileAutoSaveId(@"C:\Users\alice\one.txt");
-        var second = MainViewModel.CreateSavedFileAutoSaveId(@"C:\Users\alice\two.txt");
-        var shortPath = MainViewModel.CreateSavedFileAutoSaveId(@"C:\a");
+        const string firstIdentity = "11111111111111111111111111111111";
+        const string secondIdentity = "22222222222222222222222222222222";
+        var first = MainViewModel.CreateSavedFileAutoSaveId(@"C:\Users\alice\one.txt", firstIdentity);
+        var second = MainViewModel.CreateSavedFileAutoSaveId(@"C:\Users\alice\two.txt", firstIdentity);
+        var shortPath = MainViewModel.CreateSavedFileAutoSaveId(@"C:\a", firstIdentity);
+        var samePathOtherTab = MainViewModel.CreateSavedFileAutoSaveId(
+            @"C:\Users\alice\one.txt",
+            secondIdentity);
+        var caseVariant = MainViewModel.CreateSavedFileAutoSaveId(
+            @"c:\users\ALICE\one.txt",
+            firstIdentity);
 
         Assert.NotEqual(first, second);
+        Assert.NotEqual(first, samePathOtherTab);
+        Assert.NotEqual(first, caseVariant);
         Assert.StartsWith("file-", shortPath);
-        Assert.Equal(69, shortPath.Length);
-        Assert.Equal(
-            first,
-            MainViewModel.CreateSavedFileAutoSaveId(@"c:\users\ALICE\one.txt"));
+        Assert.Equal(102, shortPath.Length);
+    }
+
+    [Fact]
+    public void AutoSaveIds_ConcurrentSavedTabsAreUniqueAndStable()
+    {
+        var first = CreateMockTab("first.txt", @"C:\same.txt");
+        var second = CreateMockTab("second.txt", @"C:\same.txt");
+        first.Content = "first";
+        second.Content = "second";
+        _sut.Tabs.Add(first);
+        _sut.Tabs.Add(second);
+
+        var before = _sut.GetAutoSaveEntries().ToDictionary(entry => entry.Content, entry => entry.Id);
+        _sut.Tabs.Move(0, 1);
+        var after = _sut.GetAutoSaveEntries().ToDictionary(entry => entry.Content, entry => entry.Id);
+
+        Assert.NotEqual(before["first"], before["second"]);
+        Assert.Equal(before["first"], after["first"]);
+        Assert.Equal(before["second"], after["second"]);
     }
 
     [Fact]
