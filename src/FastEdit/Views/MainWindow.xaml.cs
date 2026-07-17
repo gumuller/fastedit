@@ -51,7 +51,8 @@ public partial class MainWindow : FluentWindow
         ILineFilterService lineFilterService,
         IThemeService themeService,
         ITextToolsService textToolsService,
-        IMacroService macroService)
+        IMacroService macroService,
+        ICommandRunnerFactory commandRunnerFactory)
     {
         _viewModel = MainViewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
         _findInFilesVm = findInFilesVm ?? throw new ArgumentNullException(nameof(findInFilesVm));
@@ -66,6 +67,8 @@ public partial class MainWindow : FluentWindow
         MacroService = macroService ?? throw new ArgumentNullException(nameof(macroService));
 
         InitializeComponent();
+        CommandRunner.RunnerFactory =
+            commandRunnerFactory ?? throw new ArgumentNullException(nameof(commandRunnerFactory));
 
         // Set window icon
         try
@@ -220,7 +223,7 @@ public partial class MainWindow : FluentWindow
             // Set command runner working directory
             var folder = _viewModel.FileTree.RootPath;
             if (!string.IsNullOrEmpty(folder))
-                CommandRunner.SetWorkingDirectory(folder);
+                await CommandRunner.SetWorkingDirectoryAsync(folder);
         }
 
         // Apply custom key bindings
@@ -248,6 +251,7 @@ public partial class MainWindow : FluentWindow
     }
 
     private bool _isClosingConfirmed;
+    private bool _isClosingInProgress;
 
     private void SaveWindowState()
     {
@@ -270,8 +274,15 @@ public partial class MainWindow : FluentWindow
             return;
 
         e.Cancel = true;
-        if (_viewModel.HasUnsavedChanges() && !await _viewModel.PrepareForExitAsync())
+        if (_isClosingInProgress)
             return;
+
+        _isClosingInProgress = true;
+        if (_viewModel.HasUnsavedChanges() && !await _viewModel.PrepareForExitAsync())
+        {
+            _isClosingInProgress = false;
+            return;
+        }
 
         IsEnabled = false;
         _ = Dispatcher.BeginInvoke(
@@ -279,11 +290,12 @@ public partial class MainWindow : FluentWindow
             System.Windows.Threading.DispatcherPriority.Background);
     }
 
-    private void PersistSessionAndClose()
+    private async void PersistSessionAndClose()
     {
         if (_viewModel == null)
         {
             IsEnabled = true;
+            _isClosingInProgress = false;
             return;
         }
 
@@ -296,16 +308,26 @@ public partial class MainWindow : FluentWindow
         catch (Exception ex)
         {
             IsEnabled = true;
+            _isClosingInProgress = false;
             _viewModel.CancelExitPreparation();
             Trace.TraceError("Failed to persist the session during shutdown: {0}", ex);
-            if (_viewModel != null)
-                _viewModel.StatusText = "Unable to save the current session; FastEdit remains open.";
+            _viewModel.StatusText = "Unable to save the current session; FastEdit remains open.";
             _dialogService.ShowMessage(
                 $"FastEdit could not save the current session:\n\n{ex.Message}",
                 "FastEdit - Save Failed",
                 DialogButtons.Ok,
                 DialogIcon.Error);
             return;
+        }
+
+        using var terminalShutdownTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        try
+        {
+            await CommandRunner.ShutdownAsync(terminalShutdownTimeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            Trace.TraceWarning("Terminal shutdown exceeded 5000 ms while closing the main window.");
         }
 
         _isClosingConfirmed = true;
@@ -448,7 +470,7 @@ public partial class MainWindow : FluentWindow
                         break;
                     case DroppedPathKind.Directory:
                         _viewModel.FileTree.OpenFolderCommand.Execute(action.Path);
-                        CommandRunner.SetWorkingDirectory(action.Path);
+                        await CommandRunner.SetWorkingDirectoryAsync(action.Path);
                         break;
                 }
             }
@@ -483,7 +505,7 @@ public partial class MainWindow : FluentWindow
     // --- Terminal row visibility ---
     private GridLength _savedTerminalHeight = new(250);
 
-    private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    private async void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(MainViewModel.IsCommandRunnerVisible))
         {
@@ -491,8 +513,8 @@ public partial class MainWindow : FluentWindow
             {
                 TerminalRow.Height = _savedTerminalHeight;
                 TerminalRow.MinHeight = 80;
-                CommandRunner.EnsureStarted();
-                Dispatcher.BeginInvoke(() => CommandRunner.FocusInput(),
+                await CommandRunner.EnsureStartedAsync();
+                _ = Dispatcher.BeginInvoke(() => CommandRunner.FocusInput(),
                     System.Windows.Threading.DispatcherPriority.Input);
             }
             else
