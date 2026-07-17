@@ -22,27 +22,22 @@ public class EditorHostStateIntegrationTests
                 Width = 500,
                 Height = 300
             };
-            var first = CreateTab(CreateLines(200), cursorOffset: 7, scrollOffset: 30);
+            var first = CreateTab(CreateLines(400), cursorOffset: 7, scrollOffset: 30);
             host.DataContext = first;
             host.Measure(new Size(500, 300));
             host.Arrange(new Rect(0, 0, 500, 300));
             host.UpdateLayout();
-            await Dispatcher.Yield(DispatcherPriority.Loaded);
-
             var editor = Assert.IsType<TextEditor>(host.FindName("TextEditor"));
-            Assert.Equal(7, editor.CaretOffset);
-            Assert.Equal(30, editor.VerticalOffset, precision: 3);
 
-            first.CursorOffset = 1;
-            first.ScrollOffset = 0;
-            first.ReplaceContentFromDisk(CreateLines(400));
-            editor.ScrollToEnd();
+            host.ApplyExternalReloadContent(first, first.Content);
             host.UpdateLayout();
             var tailOffset = editor.VerticalOffset;
+            var liveCaretOffset = editor.CaretOffset;
             Assert.True(tailOffset > 0);
 
             await Dispatcher.Yield(DispatcherPriority.Loaded);
             Assert.Equal(tailOffset, editor.VerticalOffset, precision: 3);
+            Assert.Equal(liveCaretOffset, editor.CaretOffset);
 
             var second = CreateTab(CreateLines(300), cursorOffset: 12, scrollOffset: 50);
             host.DataContext = second;

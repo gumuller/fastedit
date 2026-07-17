@@ -288,8 +288,12 @@ public partial class EditorHost : UserControl
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
         if (!_isRuntimeAttached)
+        {
+            InvalidatePendingStateRestore();
             return;
+        }
         SaveStateToViewModel();
+        InvalidatePendingStateRestore();
         _isRuntimeAttached = false;
 
         _filterRefreshCoordinator.Cancel();
@@ -1203,9 +1207,8 @@ public partial class EditorHost : UserControl
                             return;
                         }
 
-                        vm.ReplaceContentFromDisk(content);
+                        ApplyExternalReloadContent(vm, content);
                         contentApplied = true;
-                        TextEditor.ScrollToEnd();
                         SetStatus($"Auto-reloaded: {_fileSystemService.GetFileName(filePath)}");
                     }));
 
@@ -1440,7 +1443,11 @@ public partial class EditorHost : UserControl
             e.OldValue as EditorTabViewModel,
             incomingVm,
             SaveStateToViewModel,
-            vm => vm.PropertyChanged -= OnViewModelPropertyChanged,
+            vm =>
+            {
+                vm.PropertyChanged -= OnViewModelPropertyChanged;
+                InvalidatePendingStateRestore();
+            },
             vm =>
             {
                 _currentVm = vm;
@@ -1458,11 +1465,13 @@ public partial class EditorHost : UserControl
 
         if (e.PropertyName == nameof(EditorTabViewModel.Content))
         {
+            InvalidatePendingStateRestore();
             if (IsTextMode(vm) && TextEditor.Text != vm.Content)
                 TextEditor.Text = vm.Content;
         }
         else if (e.PropertyName == nameof(EditorTabViewModel.Mode))
         {
+            InvalidatePendingStateRestore();
             UpdateEditor(vm);
         }
     }
@@ -1517,6 +1526,18 @@ public partial class EditorHost : UserControl
             ShowNoEditor();
         else
             ShowTextEditor(vm);
+    }
+
+    internal void ApplyExternalReloadContent(
+        EditorTabViewModel vm,
+        string content)
+    {
+        if (!ReferenceEquals(_currentVm, vm) || !IsTextMode(vm))
+            return;
+
+        InvalidatePendingStateRestore();
+        vm.ReplaceContentFromDisk(content);
+        TextEditor.ScrollToEnd();
     }
 
     private void ShowBinaryEditor(EditorTabViewModel vm)
@@ -1828,6 +1849,7 @@ public partial class EditorHost : UserControl
             new Action(() =>
             {
                 if (restoreVersion != _stateRestoreVersion ||
+                    !ReferenceEquals(_pendingStateRestoreVm, vm) ||
                     !ReferenceEquals(_currentVm, vm))
                 {
                     return;
@@ -1847,6 +1869,12 @@ public partial class EditorHost : UserControl
                 }
             }),
             System.Windows.Threading.DispatcherPriority.Loaded);
+    }
+
+    private void InvalidatePendingStateRestore()
+    {
+        _stateRestoreVersion++;
+        _pendingStateRestoreVm = null;
     }
 
     private void RestoreStateFromViewModel(EditorTabViewModel vm)
