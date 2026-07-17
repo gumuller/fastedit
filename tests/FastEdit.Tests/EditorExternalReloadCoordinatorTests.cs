@@ -172,12 +172,36 @@ public class EditorExternalReloadCoordinatorTests
         Assert.Equal("baseline", viewModel.Content);
     }
 
+    [Fact]
+    public async Task NotifyAsync_AppliesIdenticalContentBeforeReloadNotification()
+    {
+        var viewModel = CreateViewModel("baseline");
+        var callbacks = new List<string>();
+        using var coordinator = CreateCoordinator(
+            viewModel,
+            readFileAsync: _ => Task.FromResult("baseline"),
+            applyContent: (vm, content) =>
+            {
+                callbacks.Add("apply");
+                vm.ReplaceContentFromDisk(content);
+            },
+            onReloaded: _ => callbacks.Add("reloaded"));
+
+        await coordinator.NotifyAsync(viewModel.FilePath);
+
+        Assert.Equal(["apply", "reloaded"], callbacks);
+        Assert.Equal("baseline", viewModel.Content);
+        Assert.False(viewModel.IsModified);
+    }
+
     private static EditorExternalReloadCoordinator CreateCoordinator(
         EditorTabViewModel viewModel,
         TimeSpan? settleDelay = null,
         Func<string, Task<string>>? readFileAsync = null,
         Func<EditorTabViewModel, bool>? confirmDiscard = null,
         Action<EditorTabViewModel>? onBufferChanged = null,
+        Action<EditorTabViewModel, string>? applyContent = null,
+        Action<string>? onReloaded = null,
         Func<string, bool>? canReload = null)
     {
         return new EditorExternalReloadCoordinator(
@@ -194,7 +218,8 @@ public class EditorExternalReloadCoordinatorTests
             confirmDiscard ?? (_ => true),
             _ => { },
             onBufferChanged ?? (_ => { }),
-            _ => { },
+            applyContent ?? ((vm, content) => vm.ReplaceContentFromDisk(content)),
+            onReloaded ?? (_ => { }),
             (_, _) => { },
             canReload ?? (path =>
                 string.Equals(path, viewModel.FilePath, StringComparison.OrdinalIgnoreCase)));

@@ -64,6 +64,7 @@ public class FileSystemService : IFileSystemService
     public string GetFileNameWithoutExtension(string path) => Path.GetFileNameWithoutExtension(path);
     public string GetExtension(string path) => Path.GetExtension(path);
     public long GetFileSize(string path) => new FileInfo(path).Length;
+    public FileAttributes GetAttributes(string path) => File.GetAttributes(path);
     public DateTime GetLastWriteTime(string path) => File.GetLastWriteTime(path);
     public IEnumerable<string> EnumerateFiles(string path, string searchPattern = "*", bool recursive = false)
         => Directory.EnumerateFiles(path, searchPattern, recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly);

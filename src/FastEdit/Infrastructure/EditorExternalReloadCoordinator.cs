@@ -13,6 +13,7 @@ internal sealed class EditorExternalReloadCoordinator : IDisposable
     private readonly Func<EditorTabViewModel, bool> _confirmDiscard;
     private readonly Action<EditorTabViewModel> _onDiscardDeclined;
     private readonly Action<EditorTabViewModel> _onBufferChanged;
+    private readonly Action<EditorTabViewModel, string> _applyContent;
     private readonly Action<string> _onReloaded;
     private readonly Action<string, Exception> _onReadFailed;
     private readonly Func<string, bool> _canReload;
@@ -30,6 +31,7 @@ internal sealed class EditorExternalReloadCoordinator : IDisposable
         Func<EditorTabViewModel, bool> confirmDiscard,
         Action<EditorTabViewModel> onDiscardDeclined,
         Action<EditorTabViewModel> onBufferChanged,
+        Action<EditorTabViewModel, string> applyContent,
         Action<string> onReloaded,
         Action<string, Exception> onReadFailed,
         Func<string, bool> canReload)
@@ -44,6 +46,7 @@ internal sealed class EditorExternalReloadCoordinator : IDisposable
         _confirmDiscard = confirmDiscard ?? throw new ArgumentNullException(nameof(confirmDiscard));
         _onDiscardDeclined = onDiscardDeclined ?? throw new ArgumentNullException(nameof(onDiscardDeclined));
         _onBufferChanged = onBufferChanged ?? throw new ArgumentNullException(nameof(onBufferChanged));
+        _applyContent = applyContent ?? throw new ArgumentNullException(nameof(applyContent));
         _onReloaded = onReloaded ?? throw new ArgumentNullException(nameof(onReloaded));
         _onReadFailed = onReadFailed ?? throw new ArgumentNullException(nameof(onReadFailed));
         _canReload = canReload ?? throw new ArgumentNullException(nameof(canReload));
@@ -252,7 +255,7 @@ internal sealed class EditorExternalReloadCoordinator : IDisposable
                     return;
                 }
 
-                currentViewModel.ReplaceContentFromDisk(content);
+                _applyContent(currentViewModel, content);
                 contentApplied = true;
                 _onReloaded(filePath);
             });

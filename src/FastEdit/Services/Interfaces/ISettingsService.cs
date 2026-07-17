@@ -29,6 +29,7 @@ public interface ISettingsService
 public class SessionFile
 {
     public string FilePath { get; set; } = string.Empty;
+    public string? TabIdentity { get; set; }
     public bool IsUntitled { get; set; }
     public bool IsBinaryMode { get; set; }
     public string? TempFilePath { get; set; }
