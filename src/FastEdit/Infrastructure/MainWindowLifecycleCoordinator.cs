@@ -43,6 +43,7 @@ public sealed class MainWindowLifecycleCoordinator
         ArgumentNullException.ThrowIfNull(startupFiles);
         ArgumentNullException.ThrowIfNull(requestRecovery);
 
+        TaskCompletionSource<MainWindowStartupResult> startupCompletion;
         lock (_startupLock)
         {
             if (_startupTask != null)
@@ -60,17 +61,17 @@ public sealed class MainWindowLifecycleCoordinator
                     }));
             }
 
-            var startupCompletion =
-                new TaskCompletionSource<MainWindowStartupResult>(
-                    TaskCreationOptions.RunContinuationsAsynchronously);
+            startupCompletion = new TaskCompletionSource<MainWindowStartupResult>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
             _startupTask = startupCompletion.Task;
-            _ = RunStartupAsync(
-                startupCompletion,
-                startupFiles,
-                hasAnotherRunningInstance,
-                requestRecovery);
-            return _startupTask;
         }
+
+        _ = RunStartupAsync(
+            startupCompletion,
+            startupFiles,
+            hasAnotherRunningInstance,
+            requestRecovery);
+        return startupCompletion.Task;
     }
 
     private async Task RunStartupAsync(

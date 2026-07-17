@@ -2,6 +2,7 @@ using FastEdit.Infrastructure;
 using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
 using Moq;
+using System.Windows.Threading;
 
 namespace FastEdit.Tests;
 
@@ -118,16 +119,18 @@ public class MainWindowLifecycleCoordinatorTests
                 return Task.CompletedTask;
             });
 
-        var result = await coordinator.StartAsync(
+        var startupTask = coordinator.StartAsync(
             new[] { "file.txt" },
             hasAnotherRunningInstance: false,
             requestRecovery: () => true);
+        var result = await startupTask.WaitAsync(TimeSpan.FromSeconds(1));
 
         Assert.Equal(MainWindowStartupOutcome.Failure, result.Outcome);
         var issue = Assert.Single(result.Issues);
         Assert.Equal(MainWindowStartupIssueKind.Startup, issue.Kind);
         Assert.IsType<InvalidOperationException>(issue.Exception);
         Assert.False(openCalled);
+        Assert.True(startupTask.IsCompletedSuccessfully);
     }
 
     [Fact]
@@ -137,10 +140,12 @@ public class MainWindowLifecycleCoordinatorTests
             new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var startupRelease =
             new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var restoreCount = 0;
         var coordinator = CreateCoordinator(
             Mock.Of<IAutoSaveService>(),
             restoreSessionAsync: async () =>
             {
+                restoreCount++;
                 startupStarted.TrySetResult();
                 await startupRelease.Task;
             });
@@ -162,6 +167,8 @@ public class MainWindowLifecycleCoordinatorTests
         var result = await repeatedStart;
 
         Assert.Equal(MainWindowStartupOutcome.Success, result.Outcome);
+        Assert.Same(result, await firstStart);
+        Assert.Equal(1, restoreCount);
     }
 
     [Fact]
@@ -321,28 +328,42 @@ public class MainWindowLifecycleCoordinatorTests
     public async Task CloseAsync_RequestedDuringRecoveryWaitsForStartupBeforePersisting()
     {
         var autoSave = new Mock<IAutoSaveService>();
+        var source = new AutoSaveEntry("source", "recovered.txt", null, "content", true);
+        var replacement = new AutoSaveEntry("replacement", "recovered.txt", null, "content", true);
         var operations = new List<string>();
         Task<MainWindowCloseResult>? closeTask = null;
         autoSave.Setup(service => service.HasRecoveryFiles()).Returns(true);
         autoSave.Setup(service => service.GetRecoveryEntries())
-            .Returns(new RecoveryEntriesResult(true, Array.Empty<AutoSaveEntry>()));
+            .Returns(new RecoveryEntriesResult(true, new[] { source }));
         autoSave.Setup(service => service.CompleteRecovery(
                 It.IsAny<IEnumerable<AutoSaveEntry>>(),
                 It.IsAny<IEnumerable<string>>(),
                 true))
+            .Callback(() => operations.Add("retire-recovery-source"))
             .Returns(true);
-        MainWindowLifecycleCoordinator? coordinator = null;
-        coordinator = CreateCoordinator(
+        var coordinator = CreateCoordinator(
             autoSave.Object,
             restoreSessionAsync: () =>
             {
-                operations.Add("startup-complete");
+                operations.Add("restore-session");
                 return Task.CompletedTask;
             },
             recoverTabs: entries =>
             {
                 operations.Add("recover-tabs");
-                return new TabRecoveryResult(true, Array.Empty<string>());
+                return new TabRecoveryResult(
+                    true,
+                    entries.Select(entry => entry.Id).ToArray());
+            },
+            captureRecoverySnapshot: () =>
+            {
+                operations.Add("capture-replacement");
+                return new[] { replacement };
+            },
+            shutdownTerminalAsync: _ =>
+            {
+                operations.Add("shutdown-terminal");
+                return Task.CompletedTask;
             });
 
         var startupTask = coordinator.StartAsync(
@@ -350,28 +371,134 @@ public class MainWindowLifecycleCoordinatorTests
             hasAnotherRunningInstance: false,
             requestRecovery: () =>
             {
+                operations.Add("prompt-close");
                 closeTask = coordinator.CloseAsync(
-                    () => operations.Add("begin-persistence"),
-                    () => operations.Add("persist"),
+                    () => { },
+                    () => operations.Add("persist-session"),
                     TimeSpan.FromSeconds(1));
                 Assert.False(closeTask.IsCompleted);
-                Assert.Empty(operations);
+                Assert.DoesNotContain("persist-session", operations);
                 return true;
             });
-        var startupResult = await startupTask;
-        var closeResult = await closeTask!;
+        var startupResult = await startupTask.WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.NotNull(closeTask);
+        var closeResult = await closeTask.WaitAsync(TimeSpan.FromSeconds(1));
 
         Assert.Equal(MainWindowStartupOutcome.Success, startupResult.Outcome);
         Assert.Equal(MainWindowCloseOutcome.ReadyToClose, closeResult.Outcome);
         Assert.Equal(
             new[]
             {
+                "prompt-close",
                 "recover-tabs",
-                "startup-complete",
-                "begin-persistence",
-                "persist"
+                "capture-replacement",
+                "retire-recovery-source",
+                "restore-session",
+                "persist-session",
+                "shutdown-terminal"
             },
             operations);
+    }
+
+    [Fact]
+    public async Task StartupAndReentrantClose_KeepCallbacksOnDispatcher()
+    {
+        await RunOnStaThreadAsync(async () =>
+        {
+            var dispatcher = Dispatcher.CurrentDispatcher;
+            var autoSave = new Mock<IAutoSaveService>();
+            var source = new AutoSaveEntry("source", "recovered.txt", null, "content", true);
+            Task<MainWindowCloseResult>? closeTask = null;
+            autoSave.Setup(service => service.HasRecoveryFiles()).Returns(true);
+            autoSave.Setup(service => service.GetRecoveryEntries())
+                .Returns(new RecoveryEntriesResult(true, new[] { source }));
+            autoSave.Setup(service => service.CompleteRecovery(
+                    It.IsAny<IEnumerable<AutoSaveEntry>>(),
+                    It.IsAny<IEnumerable<string>>(),
+                    true))
+                .Callback(dispatcher.VerifyAccess)
+                .Returns(true);
+            var coordinator = CreateCoordinator(
+                autoSave.Object,
+                restoreSessionAsync: async () =>
+                {
+                    dispatcher.VerifyAccess();
+                    await Dispatcher.Yield();
+                    dispatcher.VerifyAccess();
+                },
+                recoverTabs: entries =>
+                {
+                    dispatcher.VerifyAccess();
+                    return new TabRecoveryResult(
+                        true,
+                        entries.Select(entry => entry.Id).ToArray());
+                },
+                captureRecoverySnapshot: () =>
+                {
+                    dispatcher.VerifyAccess();
+                    return new[] { source };
+                },
+                shutdownTerminalAsync: _ =>
+                {
+                    dispatcher.VerifyAccess();
+                    return Task.CompletedTask;
+                });
+
+            var startupTask = coordinator.StartAsync(
+                Array.Empty<string>(),
+                hasAnotherRunningInstance: false,
+                requestRecovery: () =>
+                {
+                    dispatcher.VerifyAccess();
+                    closeTask = coordinator.CloseAsync(
+                        dispatcher.VerifyAccess,
+                        dispatcher.VerifyAccess,
+                        TimeSpan.FromSeconds(1));
+                    return true;
+                });
+
+            Assert.Equal(
+                MainWindowStartupOutcome.Success,
+                (await startupTask).Outcome);
+            dispatcher.VerifyAccess();
+            Assert.NotNull(closeTask);
+            Assert.Equal(
+                MainWindowCloseOutcome.ReadyToClose,
+                (await closeTask).Outcome);
+            dispatcher.VerifyAccess();
+        });
+    }
+
+    private static Task RunOnStaThreadAsync(Func<Task> action)
+    {
+        var completion =
+            new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thread = new Thread(() =>
+        {
+            var dispatcher = Dispatcher.CurrentDispatcher;
+            SynchronizationContext.SetSynchronizationContext(
+                new DispatcherSynchronizationContext(dispatcher));
+            _ = dispatcher.BeginInvoke(new Action(async () =>
+            {
+                try
+                {
+                    await action();
+                    completion.TrySetResult();
+                }
+                catch (Exception ex)
+                {
+                    completion.TrySetException(ex);
+                }
+                finally
+                {
+                    dispatcher.BeginInvokeShutdown(DispatcherPriority.Background);
+                }
+            }));
+            Dispatcher.Run();
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        return completion.Task.WaitAsync(TimeSpan.FromSeconds(10));
     }
 
     private static MainWindowLifecycleCoordinator CreateCoordinator(
