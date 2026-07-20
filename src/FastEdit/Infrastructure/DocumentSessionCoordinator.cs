@@ -1,7 +1,7 @@
-using System.Buffers.Binary;
 using System.Diagnostics;
 using System.IO;
 using System.Security.Cryptography;
+using FastEdit.Services;
 using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
 
@@ -11,13 +11,6 @@ public sealed class DocumentSessionCoordinator : IDisposable
 {
     private const int MaxPersistedTabIdentityLength = 128;
     private const int MaxIdentityGenerationAttempts = 32;
-    private const int TextSnapshotHeaderLength = 12;
-    private const int MaxTextSnapshotCharacters = 128 * 1024 * 1024;
-    private const long MaxLegacyTextSnapshotBytes =
-        (long)MaxTextSnapshotCharacters * sizeof(char) * 2;
-    private const string ExactTextSnapshotFormat = "utf16-code-units-v1";
-    private static readonly byte[] TextSnapshotMagic =
-        "FETXT001"u8.ToArray();
     private static readonly StringComparer StorageIdentityComparer =
         StringComparer.OrdinalIgnoreCase;
     private readonly ISettingsService _settingsService;
@@ -700,15 +693,45 @@ public sealed class DocumentSessionCoordinator : IDisposable
                     $"Tab '{tab.FileName}' does not have a unique storage-safe identity.");
             }
 
+            var mutationVersion = tab.UserMutationVersion;
+            var isModified = tab.IsModified;
             entries.Add(new AutoSaveEntry(
-                $"tab-{tab.AutoSaveIdentity}",
-                tab.FileName,
-                string.IsNullOrEmpty(tab.FilePath) ? null : NormalizeFilePath(tab.FilePath),
-                tab.Content ?? string.Empty,
-                string.IsNullOrEmpty(tab.FilePath),
-                tab.CursorOffset,
-                tab.ScrollOffset,
-                tab.AutoSaveIdentity));
+                Id: $"tab-{tab.AutoSaveIdentity}",
+                FileName: tab.FileName,
+                FilePath: string.IsNullOrEmpty(tab.FilePath)
+                    ? null
+                    : NormalizeFilePath(tab.FilePath),
+                Content: tab.Mode == FileOpenMode.Text
+                    ? tab.Content ?? string.Empty
+                    : string.Empty,
+                IsUntitled: string.IsNullOrEmpty(tab.FilePath),
+                CursorOffset: tab.CursorOffset,
+                ScrollOffset: tab.ScrollOffset,
+                TabIdentity: tab.AutoSaveIdentity,
+                Mode: tab.Mode,
+                IsModified: isModified,
+                EncodingCodePage: tab.FileEncoding.CodePage,
+                HasBom: tab.HasBom,
+                HexOffset: tab.HexOffset,
+                BytesPerRow: tab.BytesPerRow,
+                LargeFileTopLine: tab.LargeFileTopLine,
+                ContentFormat: tab.Mode == FileOpenMode.Text
+                    ? LosslessTextSnapshotCodec.Format
+                    : null,
+                ContentLength: tab.Mode == FileOpenMode.Binary
+                    ? tab.ByteBuffer?.Length ?? -1
+                    : -1,
+                WriteContent: tab.Mode == FileOpenMode.Binary
+                    ? tab.WriteBinarySnapshot
+                    : null,
+                AdoptPersistedContent:
+                    tab.Mode == FileOpenMode.Binary &&
+                    tab.RequiresAutoSaveBinaryHandoff
+                        ? path => tab.TryAdoptAutoSaveBinarySnapshot(
+                            path,
+                            mutationVersion,
+                            isModified)
+                        : null));
         }
 
         return entries;
@@ -716,16 +739,53 @@ public sealed class DocumentSessionCoordinator : IDisposable
 
     public EditorTabViewModel CreateRecoveryTab(AutoSaveEntry entry)
     {
-        var tab = _tabFactory.CreateUntitled(entry.Content);
-        if (!string.IsNullOrEmpty(entry.TabIdentity))
-            tab.RestoreAutoSaveIdentity(entry.TabIdentity);
-        tab.FileName = entry.FileName;
-        if (!entry.IsUntitled && !string.IsNullOrEmpty(entry.FilePath))
-            tab.FilePath = entry.FilePath;
-        tab.CursorOffset = entry.CursorOffset;
-        tab.ScrollOffset = entry.ScrollOffset;
-        tab.IsModified = true;
-        return tab;
+        var tab = entry.Mode == FileOpenMode.Text
+            ? _tabFactory.CreateUntitled(entry.Content)
+            : _tabFactory.Create();
+        try
+        {
+            if (entry.Mode == FileOpenMode.Binary)
+            {
+                if (string.IsNullOrEmpty(entry.ContentPath))
+                    throw new InvalidDataException("Binary recovery content is missing.");
+                tab.RestoreAutoSaveBinarySnapshot(
+                    entry.IsUntitled ? string.Empty : entry.FilePath ?? string.Empty,
+                    entry.FileName,
+                    entry.ContentPath,
+                    entry.IsModified,
+                    entry.HexOffset,
+                    entry.BytesPerRow);
+            }
+            else if (entry.Mode == FileOpenMode.Text)
+            {
+                tab.RestoreTextSnapshot(
+                    entry.IsUntitled ? string.Empty : entry.FilePath ?? string.Empty,
+                    entry.FileName,
+                    entry.Content,
+                    entry.IsModified,
+                    entry.EncodingCodePage,
+                    entry.HasBom);
+            }
+            else
+            {
+                throw new InvalidDataException(
+                    "Large-file recovery requires its original source.");
+            }
+
+            if (!string.IsNullOrEmpty(entry.TabIdentity))
+                tab.RestoreAutoSaveIdentity(entry.TabIdentity);
+            tab.CursorOffset = entry.CursorOffset;
+            tab.ScrollOffset = entry.ScrollOffset;
+            tab.HexOffset = entry.HexOffset;
+            tab.BytesPerRow = entry.BytesPerRow;
+            tab.LargeFileTopLine = entry.LargeFileTopLine;
+            return tab;
+        }
+        catch
+        {
+            tab.Dispose();
+            throw;
+        }
     }
 
     public RecoveryBatchPlan PlanRecoveryBatch(
@@ -1123,113 +1183,22 @@ public sealed class DocumentSessionCoordinator : IDisposable
         {
             _fileSystemService.WriteStreamAtomic(
                 snapshotPath,
-                stream => WriteTextSnapshot(stream, tab.Content));
+                stream => LosslessTextSnapshotCodec.Write(stream, tab.Content));
         }
 
         sessionFile.SnapshotGeneration = generation;
         sessionFile.SnapshotFile = snapshotFile;
-        sessionFile.SnapshotFormat = ExactTextSnapshotFormat;
+        sessionFile.SnapshotFormat = LosslessTextSnapshotCodec.Format;
         return snapshotPath;
-    }
-
-    private static void WriteTextSnapshot(Stream stream, string content)
-    {
-        if (content.Length > MaxTextSnapshotCharacters)
-            throw new InvalidDataException("The text snapshot exceeds the supported size.");
-
-        Span<byte> header = stackalloc byte[TextSnapshotHeaderLength];
-        TextSnapshotMagic.CopyTo(header);
-        BinaryPrimitives.WriteInt32LittleEndian(
-            header[TextSnapshotMagic.Length..],
-            content.Length);
-        stream.Write(header);
-        Span<byte> codeUnit = stackalloc byte[2];
-        foreach (var character in content)
-        {
-            BinaryPrimitives.WriteUInt16LittleEndian(codeUnit, character);
-            stream.Write(codeUnit);
-        }
     }
 
     private async Task<string> ReadTextSnapshotAsync(
         string snapshotPath,
-        string? snapshotFormat)
-    {
-        if (string.Equals(
-                snapshotFormat,
-                ExactTextSnapshotFormat,
-                StringComparison.Ordinal))
-        {
-            return ReadFramedTextSnapshot(snapshotPath);
-        }
-
-        if (!string.IsNullOrEmpty(snapshotFormat))
-            throw new InvalidDataException("The text snapshot format is unsupported.");
-        if (_fileSystemService.GetFileSize(snapshotPath) >
-            MaxLegacyTextSnapshotBytes)
-        {
-            throw new InvalidDataException(
-                "The legacy text snapshot exceeds the supported size.");
-        }
-
-        return await _fileSystemService.ReadAllTextAsync(snapshotPath);
-    }
-
-    private string ReadFramedTextSnapshot(string snapshotPath)
-    {
-        using var stream = _fileSystemService.OpenRead(snapshotPath);
-        Span<byte> magic = stackalloc byte[TextSnapshotMagic.Length];
-        var magicLength = ReadUpTo(stream, magic);
-        if (magicLength != TextSnapshotMagic.Length ||
-            !magic.SequenceEqual(TextSnapshotMagic))
-        {
-            throw new InvalidDataException(
-                "The text snapshot frame has an invalid signature.");
-        }
-
-        Span<byte> lengthBytes = stackalloc byte[sizeof(int)];
-        ReadExactly(stream, lengthBytes);
-        var characterCount =
-            BinaryPrimitives.ReadInt32LittleEndian(lengthBytes);
-        if (characterCount < 0 ||
-            characterCount > MaxTextSnapshotCharacters ||
-            stream.Length != TextSnapshotHeaderLength +
-                (long)characterCount * sizeof(char))
-        {
-            throw new InvalidDataException(
-                "The text snapshot frame is invalid.");
-        }
-
-        var characters = new char[characterCount];
-        Span<byte> codeUnit = stackalloc byte[2];
-        for (var index = 0; index < characters.Length; index++)
-        {
-            ReadExactly(stream, codeUnit);
-            characters[index] = (char)
-                BinaryPrimitives.ReadUInt16LittleEndian(codeUnit);
-        }
-
-        return new string(characters);
-    }
-
-    private static int ReadUpTo(Stream stream, Span<byte> buffer)
-    {
-        var totalRead = 0;
-        while (totalRead < buffer.Length)
-        {
-            var read = stream.Read(buffer[totalRead..]);
-            if (read == 0)
-                break;
-            totalRead += read;
-        }
-        return totalRead;
-    }
-
-    private static void ReadExactly(Stream stream, Span<byte> buffer)
-    {
-        if (ReadUpTo(stream, buffer) != buffer.Length)
-            throw new InvalidDataException("The text snapshot frame is truncated.");
-    }
+        string? snapshotFormat) =>
+        await LosslessTextSnapshotCodec.ReadAsync(
+            _fileSystemService,
+            snapshotPath,
+            snapshotFormat);
 
     private string ResolveShutdownSnapshotPath(SessionFile sessionFile)
     {
@@ -1852,6 +1821,7 @@ internal sealed record PersistedTabDescriptor(
     int CursorOffset,
     double ScrollOffset,
     string? BinaryContentHash,
+    long? BinaryContentLength,
     long HexOffset,
     int BytesPerRow,
     long LargeFileTopLine)
@@ -1875,6 +1845,9 @@ internal sealed record PersistedTabDescriptor(
             tab.Mode == FileOpenMode.Binary
                 ? DocumentSessionCoordinator.ComputeTabContentHash(tab)
                 : null,
+            tab.Mode == FileOpenMode.Binary
+                ? tab.ByteBuffer?.Length
+                : null,
             tab.HexOffset,
             tab.BytesPerRow,
             tab.LargeFileTopLine);
@@ -1888,16 +1861,17 @@ internal sealed record PersistedTabDescriptor(
             entry.Content,
             entry.IsUntitled,
             entry.FilePath,
-            FileOpenMode.Text,
-            true,
-            null,
-            null,
+            entry.Mode,
+            entry.IsModified,
+            entry.Mode == FileOpenMode.Text ? entry.EncodingCodePage : null,
+            entry.Mode == FileOpenMode.Text ? entry.HasBom : null,
             entry.CursorOffset,
             entry.ScrollOffset,
-            null,
-            0,
-            16,
-            1);
+            entry.Mode == FileOpenMode.Binary ? entry.ContentHash : null,
+            entry.Mode == FileOpenMode.Binary ? entry.ContentLength : null,
+            entry.HexOffset,
+            entry.BytesPerRow,
+            entry.LargeFileTopLine);
 
     public bool HasEquivalentState(PersistedTabDescriptor other)
     {
@@ -1916,7 +1890,10 @@ internal sealed record PersistedTabDescriptor(
         {
             if (string.IsNullOrEmpty(BinaryContentHash) ||
                 string.IsNullOrEmpty(other.BinaryContentHash) ||
-                HexOffset != other.HexOffset ||
+            !BinaryContentLength.HasValue ||
+            !other.BinaryContentLength.HasValue ||
+            BinaryContentLength != other.BinaryContentLength ||
+            HexOffset != other.HexOffset ||
                 BytesPerRow != other.BytesPerRow ||
                 !string.Equals(
                     BinaryContentHash,

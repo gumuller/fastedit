@@ -1,5 +1,6 @@
 using System.IO;
 using System.IO.Enumeration;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using FastEdit.Services;
@@ -669,7 +670,7 @@ public class AutoSaveServiceTests
         _fileSystem.Setup(f => f.DeleteFile(It.IsAny<string>()))
             .Callback<string>(path =>
             {
-                if (path == activeContentPath && contentDeleteAttempts++ == 0)
+                if (path == activeContentPath && contentDeleteAttempts++ < 2)
                     throw new IOException("content locked");
 
                 existingFiles.Remove(path);
@@ -700,7 +701,7 @@ public class AutoSaveServiceTests
         existingFiles.Should().NotContain(activeContentPath!);
         existingFiles.Should().NotContain(failedGenerationMarkerPath);
         existingFiles.Should().NotContain(cleanupIntentPath!);
-        contentDeleteAttempts.Should().Be(2);
+        contentDeleteAttempts.Should().Be(3);
     }
 
     [Fact]
@@ -846,7 +847,7 @@ public class AutoSaveServiceTests
             .Callback<string, string>((path, content) =>
             {
                 files[path] = content;
-                if (Path.GetFileName(path).StartsWith("manifest-", StringComparison.Ordinal) &&
+                if (Path.GetExtension(path).Equals(".json", StringComparison.OrdinalIgnoreCase) &&
                     path != sourceManifestPath)
                 {
                     activeManifestPaths.Add(path);
@@ -856,11 +857,19 @@ public class AutoSaveServiceTests
         _fileSystem.Setup(f => f.MoveFile(
                 It.IsAny<string>(),
                 It.IsAny<string>(),
-                false))
-            .Callback<string, string, bool>((source, destination, _) =>
+                It.IsAny<bool>()))
+            .Callback<string, string, bool>((source, destination, overwrite) =>
             {
                 if (source == sourceManifestPath)
                     operations.Add("source-manifest-quarantined");
+                else if (overwrite &&
+                    Path.GetExtension(destination).Equals(
+                        ".json",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    activeManifestPaths.Add(destination);
+                    operations.Add("replacement-manifest");
+                }
                 files[destination] = files[source];
                 files.Remove(source);
             });
@@ -1080,6 +1089,357 @@ public class AutoSaveServiceTests
             Times.Never);
     }
 
+    [Theory]
+    [InlineData("relative")]
+    [InlineData("rooted")]
+    public void MaliciousCleanupIntentCannotDeleteOutsideAutoSaveRoot(
+        string scenario)
+    {
+        var workspace = Path.Combine(
+            Path.GetTempPath(),
+            Guid.NewGuid().ToString("N"));
+        var autoSaveRoot = Path.Combine(workspace, "autosave");
+        var outsidePath = Path.Combine(workspace, "victim.txt");
+        Directory.CreateDirectory(autoSaveRoot);
+        File.WriteAllText(outsidePath, "protected");
+        var cleanupGeneration = Guid.NewGuid().ToString("N");
+        var activeGeneration = Guid.NewGuid().ToString("N");
+        var contentFile = scenario == "relative"
+            ? @"..\victim.txt"
+            : outsidePath;
+        var intentPath = Path.Combine(
+            autoSaveRoot,
+            $".cleanup-{cleanupGeneration}.json");
+        File.WriteAllText(
+            intentPath,
+            JsonSerializer.Serialize(new
+            {
+                GenerationId = cleanupGeneration,
+                ContentFiles = new[] { contentFile }
+            }));
+        var settings = new Mock<ISettingsService>();
+        settings.SetupGet(service => service.AutoSaveIntervalSeconds).Returns(30);
+        var service = new AutoSaveService(
+            new FileSystemService(),
+            settings.Object,
+            new InlineDispatcherService(),
+            autoSaveRoot,
+            activeGeneration);
+        try
+        {
+            service.Start();
+            service.Stop();
+
+            File.ReadAllText(outsidePath).Should().Be("protected");
+            File.Exists(intentPath).Should().BeTrue();
+        }
+        finally
+        {
+            service.Stop();
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void FailedPayloadWritePreservesLastPublishedRecoverySnapshot()
+    {
+        var workspace = Path.Combine(
+            Path.GetTempPath(),
+            Guid.NewGuid().ToString("N"));
+        var autoSaveRoot = Path.Combine(workspace, "autosave");
+        var generation = Guid.NewGuid().ToString("N");
+        Directory.CreateDirectory(autoSaveRoot);
+        var settings = new Mock<ISettingsService>();
+        settings.SetupGet(service => service.AutoSaveIntervalSeconds).Returns(30);
+        var service = new AutoSaveService(
+            new FileSystemService(),
+            settings.Object,
+            new InlineDispatcherService(),
+            autoSaveRoot,
+            generation);
+        try
+        {
+            service.SaveNow(new[]
+            {
+                new AutoSaveEntry(
+                    "stable",
+                    "stable.txt",
+                    null,
+                    "last durable content",
+                    true,
+                    ContentFormat: LosslessTextSnapshotCodec.Format)
+            });
+            var beforeFailure = service.GetRecoveryEntries();
+            beforeFailure.Success.Should().BeTrue();
+            beforeFailure.Entries.Should().ContainSingle()
+                .Which.Content.Should().Be("last durable content");
+
+            var failedSave = () => service.SaveNow(new[]
+            {
+                new AutoSaveEntry(
+                    "stable",
+                    "stable.bin",
+                    null,
+                    string.Empty,
+                    true,
+                    Mode: FastEdit.ViewModels.FileOpenMode.Binary,
+                    ContentLength: 4,
+                    WriteContent: stream =>
+                    {
+                        stream.WriteByte(0xFF);
+                        throw new IOException("injected payload failure");
+                    })
+            });
+            failedSave.Should().Throw<IOException>();
+
+            var afterFailure = service.GetRecoveryEntries();
+            afterFailure.Success.Should().BeTrue();
+            afterFailure.Entries.Should().ContainSingle()
+                .Which.Content.Should().Be("last durable content");
+            Directory.GetFiles(autoSaveRoot, $"{generation}-*.txt")
+                .Should().ContainSingle();
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void VerificationFailurePreservesPreviouslyPublishedActiveManifest()
+    {
+        var generation = Guid.NewGuid().ToString("N");
+        var activeManifestPath = Path.Combine(
+            _autoSaveDir,
+            $"manifest-{generation}.json");
+        var files = new Dictionary<string, string>(
+            StringComparer.OrdinalIgnoreCase);
+        _fileSystem.Setup(f => f.CreateDirectory(_autoSaveDir));
+        _fileSystem.Setup(f => f.FileExists(It.IsAny<string>()))
+            .Returns((string path) => files.ContainsKey(path));
+        _fileSystem.Setup(f => f.ReadAllText(It.IsAny<string>()))
+            .Returns((string path) => files[path]);
+        _fileSystem.Setup(f => f.WriteAllTextAtomic(
+                It.IsAny<string>(),
+                It.IsAny<string>()))
+            .Callback<string, string>((path, content) =>
+            {
+                if (path.EndsWith(
+                        ".writing",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    content.TrimStart().StartsWith("[", StringComparison.Ordinal))
+                {
+                    var manifest = JsonNode.Parse(content)!.AsArray();
+                    manifest[0]!["TabIdentity"] = "corrupted";
+                    content = manifest.ToJsonString();
+                }
+                files[path] = content;
+            });
+        _fileSystem.Setup(f => f.MoveFile(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<bool>()))
+            .Callback<string, string, bool>((source, destination, _) =>
+            {
+                files[destination] = files[source];
+                files.Remove(source);
+            });
+        _fileSystem.Setup(f => f.DeleteFile(It.IsAny<string>()))
+            .Callback<string>(path => files.Remove(path));
+        var service = new AutoSaveService(
+            _fileSystem.Object,
+            _settings.Object,
+            _dispatcher,
+            _autoSaveDir,
+            generation);
+        var durableEntry = new AutoSaveEntry(
+            "tab-stable",
+            "durable.txt",
+            null,
+            "durable",
+            true,
+            TabIdentity: "stable");
+        service.SaveNow(new[] { durableEntry });
+        var durableManifest = files[activeManifestPath];
+
+        service.CompleteRecovery(
+                new[] { durableEntry with { Content = "replacement" } },
+                Array.Empty<string>(),
+                allEntriesRecovered: true)
+            .Should().BeFalse();
+
+        files[activeManifestPath].Should().Be(durableManifest);
+        files.Keys.Should().NotContain(path =>
+            path.EndsWith(
+                ".candidate",
+                StringComparison.OrdinalIgnoreCase) ||
+            path.EndsWith(
+                ".writing",
+                StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void CompleteCandidateManifestRecoversBinaryPayloadWithItsFormat()
+    {
+        var workspace = Path.Combine(
+            Path.GetTempPath(),
+            Guid.NewGuid().ToString("N"));
+        var autoSaveRoot = Path.Combine(workspace, "autosave");
+        var crashedGeneration = Guid.NewGuid().ToString("N");
+        var payloadName =
+            $"{crashedGeneration}-{Guid.NewGuid():N}-binary.txt";
+        var payloadPath = Path.Combine(autoSaveRoot, payloadName);
+        var candidatePath = Path.Combine(
+            autoSaveRoot,
+            $"manifest-{crashedGeneration}.candidate");
+        var payload = new byte[] { 0, 1, 2, 255 };
+        Directory.CreateDirectory(autoSaveRoot);
+        File.WriteAllBytes(payloadPath, payload);
+        File.WriteAllText(
+            candidatePath,
+            JsonSerializer.Serialize(new[]
+            {
+                new
+                {
+                    Id = "binary",
+                    TabIdentity = "stable",
+                    FileName = "binary.bin",
+                    FilePath = (string?)null,
+                    ContentFile = payloadName,
+                    IsUntitled = true,
+                    Mode = FastEdit.ViewModels.FileOpenMode.Binary,
+                    IsModified = true,
+                    ContentFormat = "binary-v1",
+                    ContentHash = Convert.ToHexString(
+                        SHA256.HashData(payload)),
+                    ContentLength = payload.LongLength
+                }
+            }));
+        var settings = new Mock<ISettingsService>();
+        settings.SetupGet(service => service.AutoSaveIntervalSeconds).Returns(30);
+        var service = new AutoSaveService(
+            new FileSystemService(),
+            settings.Object,
+            new InlineDispatcherService(),
+            autoSaveRoot,
+            Guid.NewGuid().ToString("N"));
+        try
+        {
+            var recovery = service.GetRecoveryEntries();
+
+            recovery.Success.Should().BeTrue();
+            recovery.Entries.Should().ContainSingle();
+            var entry = recovery.Entries[0];
+            entry.Mode.Should().Be(FastEdit.ViewModels.FileOpenMode.Binary);
+            entry.ContentFormat.Should().Be("binary-v1");
+            entry.ContentPath.Should().Be(payloadPath);
+            entry.Content.Should().BeEmpty();
+        }
+        finally
+        {
+            service.Stop();
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void WritingManifestIsReportedAndPreservedWithoutRecoveringPayload()
+    {
+        var workspace = Path.Combine(
+            Path.GetTempPath(),
+            Guid.NewGuid().ToString("N"));
+        var autoSaveRoot = Path.Combine(workspace, "autosave");
+        var crashedGeneration = Guid.NewGuid().ToString("N");
+        var payloadPath = Path.Combine(
+            autoSaveRoot,
+            $"{crashedGeneration}-{Guid.NewGuid():N}-binary.txt");
+        var writingPath = Path.Combine(
+            autoSaveRoot,
+            $"manifest-{crashedGeneration}.writing");
+        Directory.CreateDirectory(autoSaveRoot);
+        File.WriteAllBytes(payloadPath, new byte[] { 1, 2, 3 });
+        File.WriteAllText(writingPath, """{"State":"Writing"}""");
+        var settings = new Mock<ISettingsService>();
+        settings.SetupGet(service => service.AutoSaveIntervalSeconds).Returns(30);
+        var service = new AutoSaveService(
+            new FileSystemService(),
+            settings.Object,
+            new InlineDispatcherService(),
+            autoSaveRoot,
+            Guid.NewGuid().ToString("N"));
+        try
+        {
+            var recovery = service.GetRecoveryEntries();
+
+            recovery.Success.Should().BeFalse();
+            recovery.Entries.Should().BeEmpty();
+            recovery.ErrorMessage.Should().Contain("not fully verified");
+            File.Exists(writingPath).Should().BeTrue();
+            File.Exists(payloadPath).Should().BeTrue();
+        }
+        finally
+        {
+            service.Stop();
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task CompleteRecoveryReleasesPersistenceLockBeforeUiPayloadAdoption()
+    {
+        var workspace = Path.Combine(
+            Path.GetTempPath(),
+            Guid.NewGuid().ToString("N"));
+        var autoSaveRoot = Path.Combine(workspace, "autosave");
+        Directory.CreateDirectory(autoSaveRoot);
+        var settings = new Mock<ISettingsService>();
+        settings.SetupGet(service => service.AutoSaveIntervalSeconds).Returns(30);
+        using var dispatcher = new BlockingDispatcherService();
+        var service = new AutoSaveService(
+            new FileSystemService(),
+            settings.Object,
+            dispatcher,
+            autoSaveRoot,
+            Guid.NewGuid().ToString("N"));
+        try
+        {
+            var saveTask = Task.Run(() => service.CompleteRecovery(
+                new[]
+                {
+                    new AutoSaveEntry(
+                        "binary",
+                        "binary.bin",
+                        null,
+                        string.Empty,
+                        true,
+                        Mode: FastEdit.ViewModels.FileOpenMode.Binary,
+                        ContentLength: 1,
+                        WriteContent: stream => stream.WriteByte(0x2A),
+                        AdoptPersistedContent: _ => true)
+                },
+                Array.Empty<string>(),
+                allEntriesRecovered: false));
+            dispatcher.WaitUntilEntered();
+
+            var cleanupTask = Task.Run(service.MarkCleanShutdown);
+            var completed = await Task.WhenAny(
+                cleanupTask,
+                Task.Delay(TimeSpan.FromSeconds(2)));
+
+            completed.Should().BeSameAs(cleanupTask);
+            (await cleanupTask).Should().BeFalse();
+            Directory.GetFiles(autoSaveRoot, "*.txt").Should().ContainSingle();
+            dispatcher.Release();
+            (await saveTask).Should().BeTrue();
+        }
+        finally
+        {
+            dispatcher.Release();
+            service.Stop();
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
     [Fact]
     public void CompleteRecovery_PartialRecoveryPersistsReplacementAndResolvesOnlyRecoveredSource()
     {
@@ -1192,7 +1552,8 @@ public class AutoSaveServiceTests
                 if (path != sourceManifestPath &&
                     Path.GetFileName(path).StartsWith(
                         "manifest-",
-                        StringComparison.Ordinal))
+                        StringComparison.Ordinal) &&
+                    content.TrimStart().StartsWith("[", StringComparison.Ordinal))
                 {
                     var manifest = JsonNode.Parse(content)!.AsArray();
                     corruptManifest(manifest[0]!.AsObject());
@@ -1256,5 +1617,42 @@ public class AutoSaveServiceTests
         }
 
         public bool CheckAccess() => true;
+    }
+
+    private sealed class BlockingDispatcherService :
+        IDispatcherService,
+        IDisposable
+    {
+        private readonly ManualResetEventSlim _entered = new();
+        private readonly ManualResetEventSlim _release = new();
+
+        public void Invoke(Action action)
+        {
+            _entered.Set();
+            _release.Wait(TimeSpan.FromSeconds(10));
+            action();
+        }
+
+        public Task InvokeAsync(Action action)
+        {
+            action();
+            return Task.CompletedTask;
+        }
+
+        public Task<T> InvokeAsync<T>(Func<T> func) =>
+            Task.FromResult(func());
+
+        public bool CheckAccess() => false;
+
+        public void WaitUntilEntered() =>
+            _entered.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue();
+
+        public void Release() => _release.Set();
+
+        public void Dispose()
+        {
+            _entered.Dispose();
+            _release.Dispose();
+        }
     }
 }

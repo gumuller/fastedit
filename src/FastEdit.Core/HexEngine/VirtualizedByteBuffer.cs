@@ -1,4 +1,6 @@
 using System.IO.MemoryMappedFiles;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 using FastEdit.Core.Search;
 
 namespace FastEdit.Core.HexEngine;
@@ -6,7 +8,12 @@ namespace FastEdit.Core.HexEngine;
 public class VirtualizedByteBuffer : IDisposable
 {
     private readonly string _filePath;
+    private string _backingPath;
+    private bool _ownsBackingPath;
+    private readonly Action<Stream>? _saveSnapshotWriter;
+    private readonly Action? _beforeAtomicCommit;
     private FileStream _fileStream;
+    private BackingFileIdentity _backingIdentity;
     private MemoryMappedFile? _memoryMappedFile;
     private long _fileLength;
     private bool _useMemoryMapping;
@@ -40,15 +47,20 @@ public class VirtualizedByteBuffer : IDisposable
     public event EventHandler? ModificationsChanged;
 
     public VirtualizedByteBuffer(string filePath)
+        : this(filePath, null)
+    {
+    }
+
+    internal VirtualizedByteBuffer(
+        string filePath,
+        Action<Stream>? saveSnapshotWriter,
+        Action? beforeAtomicCommit = null)
     {
         _filePath = filePath;
-        _fileStream = new FileStream(
-            filePath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read,
-            bufferSize: PageSize,
-            FileOptions.RandomAccess | FileOptions.Asynchronous);
+        _backingPath = filePath;
+        _saveSnapshotWriter = saveSnapshotWriter;
+        _beforeAtomicCommit = beforeAtomicCommit;
+        _fileStream = OpenBackingStream();
 
         _fileLength = _fileStream.Length;
         _pageCache = new LruCache<long, byte[]>(MaxCachedPages);
@@ -65,6 +77,7 @@ public class VirtualizedByteBuffer : IDisposable
                 HandleInheritability.None,
                 leaveOpen: true);
         }
+        _backingIdentity = CaptureBackingIdentity(_fileStream, _backingPath);
     }
 
     public void SetByte(long offset, byte value)
@@ -135,13 +148,10 @@ public class VirtualizedByteBuffer : IDisposable
 
     public void Save()
     {
-        KeyValuePair<long, byte>[] modifications;
         lock (_modificationsLock)
         {
             if (_modifications.Count == 0)
                 return;
-
-            modifications = _modifications.OrderBy(m => m.Key).ToArray();
         }
 
         var activeSearches = BeginSave();
@@ -149,53 +159,54 @@ public class VirtualizedByteBuffer : IDisposable
         {
             Task.WaitAll(activeSearches.Select(search => search.Completion.Task).ToArray());
 
-            // Close current handles before taking the exclusive write handle.
-            _memoryMappedFile?.Dispose();
-            _fileStream.Close();
-
-            try
+            lock (_modificationsLock)
             {
-                using (var writeStream = new FileStream(_filePath, FileMode.Open, FileAccess.Write, FileShare.None))
+                if (_modifications.Count == 0)
+                    return;
+
+                var directory = Path.GetDirectoryName(_filePath) ??
+                    throw new InvalidOperationException(
+                        "The binary file does not have a parent directory.");
+                var tempPath = Path.Combine(
+                    directory,
+                    $".{Path.GetFileName(_filePath)}.{Guid.NewGuid():N}.tmp");
+                try
                 {
-                    foreach (var (offset, value) in modifications)
+                    using (var writeStream = new FileStream(
+                               tempPath,
+                               FileMode.CreateNew,
+                               FileAccess.Write,
+                               FileShare.None))
                     {
-                        writeStream.Position = offset;
-                        writeStream.WriteByte(value);
+                        (_saveSnapshotWriter ?? WriteSnapshot)(writeStream);
+                        writeStream.Flush(flushToDisk: true);
+                    }
+
+                    var expectedBacking = CaptureBackingFingerprint(
+                        _fileStream,
+                        _backingPath);
+                    var replacementIdentity =
+                        CapturePathIdentity(tempPath);
+                    _beforeAtomicCommit?.Invoke();
+                    CommitAtomicReplacement(
+                        tempPath,
+                        expectedBacking,
+                        replacementIdentity);
+                    try
+                    {
+                        _modifications.Clear();
+                        _pageCache.Clear();
+                    }
+                    finally
+                    {
+                        DisposeBackingHandles();
+                        ReopenBackingHandles();
                     }
                 }
-
-                lock (_modificationsLock)
-                    _modifications.Clear();
-                _pageCache.Clear();
-            }
-            finally
-            {
-                // Always reopen the file stream and memory map so the instance remains usable
-                var newStream = new FileStream(
-                    _filePath,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.Read,
-                    bufferSize: PageSize,
-                    FileOptions.RandomAccess | FileOptions.Asynchronous);
-
-                _fileStream = newStream;
-                _fileLength = _fileStream.Length;
-
-                _useMemoryMapping = _fileLength > 1024 * 1024;
-                if (_useMemoryMapping)
+                finally
                 {
-                    _memoryMappedFile = MemoryMappedFile.CreateFromFile(
-                        _fileStream,
-                        mapName: null,
-                        capacity: 0,
-                        MemoryMappedFileAccess.Read,
-                        HandleInheritability.None,
-                        leaveOpen: true);
-                }
-                else
-                {
-                    _memoryMappedFile = null;
+                    if (File.Exists(tempPath))
+                        File.Delete(tempPath);
                 }
             }
         }
@@ -300,6 +311,340 @@ public class VirtualizedByteBuffer : IDisposable
         lock (_searchLifecycleLock)
             _saveInProgress = false;
     }
+
+    private FileStream OpenBackingStream(bool allowDelete = true) =>
+        new(
+            _backingPath,
+            FileMode.Open,
+            FileAccess.Read,
+            allowDelete
+                ? FileShare.Read | FileShare.Delete
+                : FileShare.Read,
+            bufferSize: PageSize,
+            FileOptions.RandomAccess | FileOptions.Asynchronous);
+
+    private void DisposeBackingHandles()
+    {
+        _memoryMappedFile?.Dispose();
+        _memoryMappedFile = null;
+        _fileStream.Dispose();
+    }
+
+    private void ReopenBackingHandles(bool allowDelete = true)
+    {
+        _fileStream = OpenBackingStream(allowDelete);
+        _fileLength = _fileStream.Length;
+        _backingIdentity = CaptureBackingIdentity(_fileStream, _backingPath);
+        _useMemoryMapping = _fileLength > 1024 * 1024;
+        _memoryMappedFile = _useMemoryMapping
+            ? MemoryMappedFile.CreateFromFile(
+                _fileStream,
+                mapName: null,
+                capacity: 0,
+                MemoryMappedFileAccess.Read,
+                HandleInheritability.None,
+                leaveOpen: true)
+            : null;
+    }
+
+    private void CommitAtomicReplacement(
+        string tempPath,
+        BackingFileFingerprint expectedBacking,
+        BackingFileIdentity replacementIdentity)
+    {
+        var backupPath = Path.Combine(
+            Path.GetDirectoryName(_filePath)!,
+            $".{Path.GetFileName(_filePath)}.{Guid.NewGuid():N}.backup");
+        var previousOwnedBackingPath =
+            _ownsBackingPath ? _backingPath : null;
+        var safetySnapshotPath = CreateSafetySnapshot(tempPath);
+        var reopened = false;
+        var handlesDisposed = false;
+        var replacementCommitted = false;
+        var commitSucceeded = false;
+        try
+        {
+            ReplaceFileWithRetries(
+                tempPath,
+                _filePath,
+                backupPath);
+            replacementCommitted = true;
+            DisposeBackingHandles();
+            handlesDisposed = true;
+            _backingPath = _filePath;
+            _ownsBackingPath = false;
+            ReopenBackingHandles(allowDelete: false);
+            reopened = true;
+            if (_backingIdentity != replacementIdentity)
+            {
+                DisposeBackingHandles();
+                reopened = false;
+                handlesDisposed = true;
+                _backingPath = safetySnapshotPath;
+                _ownsBackingPath = true;
+                _pageCache.Clear();
+                ReopenBackingHandles();
+                reopened = true;
+                DeleteOwnedBackingPath(previousOwnedBackingPath);
+                throw new IOException(
+                    "The binary file changed while the save was being committed.");
+            }
+
+            if (!MatchesBackingFingerprint(backupPath, expectedBacking))
+            {
+                DisposeBackingHandles();
+                reopened = false;
+                handlesDisposed = true;
+                var displacedPath = Path.Combine(
+                    Path.GetDirectoryName(_filePath)!,
+                    $".{Path.GetFileName(_filePath)}.{Guid.NewGuid():N}.conflict");
+                ReplaceFileWithRetries(
+                    backupPath,
+                    _filePath,
+                    displacedPath);
+                var displacedIsSnapshot = MatchesBackingIdentity(
+                    displacedPath,
+                    CapturePathIdentity(safetySnapshotPath));
+                _backingPath = safetySnapshotPath;
+                _ownsBackingPath = true;
+                _pageCache.Clear();
+                if (displacedIsSnapshot)
+                    DeleteOwnedBackingPath(displacedPath);
+                ReopenBackingHandles();
+                reopened = true;
+                DeleteOwnedBackingPath(previousOwnedBackingPath);
+                throw new IOException(
+                    "The binary file changed before the save could be committed.");
+            }
+
+            File.Delete(backupPath);
+            DeleteOwnedBackingPath(previousOwnedBackingPath);
+            commitSucceeded = true;
+        }
+        finally
+        {
+            if (!reopened && handlesDisposed)
+                ReopenBackingHandles();
+            if (!replacementCommitted || commitSucceeded)
+                DeleteOwnedBackingPath(safetySnapshotPath);
+        }
+    }
+
+    private BackingFileIdentity CapturePathIdentity(string path)
+    {
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        return CaptureBackingIdentity(stream, path);
+    }
+
+    private static void DeleteOwnedBackingPath(string? path)
+    {
+        if (string.IsNullOrEmpty(path))
+            return;
+        try
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private string CreateSafetySnapshot(string sourcePath)
+    {
+        var path = Path.Combine(
+            Path.GetDirectoryName(_filePath)!,
+            $".{Path.GetFileName(_filePath)}.{Guid.NewGuid():N}.snapshot");
+        try
+        {
+            if (!OperatingSystem.IsWindows() ||
+                !CreateHardLink(path, sourcePath, IntPtr.Zero))
+            {
+                File.Copy(sourcePath, path, overwrite: false);
+            }
+        }
+        catch (Exception ex) when (
+            ex is IOException or
+                UnauthorizedAccessException or
+                PlatformNotSupportedException or
+                NotSupportedException)
+        {
+            File.Copy(sourcePath, path, overwrite: false);
+        }
+        return path;
+    }
+
+    private BackingFileFingerprint CaptureBackingFingerprint(
+        FileStream stream,
+        string path)
+    {
+        var originalPosition = stream.Position;
+        try
+        {
+            stream.Position = 0;
+            return new BackingFileFingerprint(
+                CaptureBackingIdentity(stream, path),
+                stream.Length,
+                Convert.ToHexString(
+                    System.Security.Cryptography.SHA256.HashData(stream)));
+        }
+        finally
+        {
+            stream.Position = originalPosition;
+        }
+    }
+
+    private bool MatchesBackingFingerprint(
+        string path,
+        BackingFileFingerprint expected)
+    {
+        try
+        {
+            using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            return CaptureBackingFingerprint(stream, path) == expected;
+        }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return false;
+        }
+    }
+
+    private static void ReplaceFileWithRetries(
+        string sourcePath,
+        string destinationPath,
+        string backupPath)
+    {
+        const int maxAttempts = 10;
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                File.Replace(
+                    sourcePath,
+                    destinationPath,
+                    backupPath,
+                    ignoreMetadataErrors: true);
+                return;
+            }
+            catch (Exception ex) when (
+                attempt < maxAttempts - 1 &&
+                File.Exists(sourcePath) &&
+                ex is IOException or UnauthorizedAccessException)
+            {
+                Thread.Sleep(TimeSpan.FromMilliseconds(
+                    10 * (attempt + 1)));
+            }
+        }
+    }
+
+    private BackingFileIdentity CaptureBackingIdentity(
+        FileStream stream,
+        string path)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            if (!GetFileInformationByHandle(
+                    stream.SafeFileHandle,
+                    out var information))
+            {
+                throw new IOException(
+                    "The binary backing-file identity could not be read.",
+                    Marshal.GetExceptionForHR(Marshal.GetHRForLastWin32Error()));
+            }
+
+            return new BackingFileIdentity(
+                information.VolumeSerialNumber,
+                information.FileIndexHigh,
+                information.FileIndexLow,
+                0,
+                default);
+        }
+
+        var fileInfo = new FileInfo(path);
+        return new BackingFileIdentity(
+            0,
+            0,
+            0,
+            fileInfo.Length,
+            fileInfo.CreationTimeUtc);
+    }
+
+    private bool MatchesBackingIdentity(
+        string path,
+        BackingFileIdentity expectedIdentity)
+    {
+        try
+        {
+            using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            return CaptureBackingIdentity(stream, path) == expectedIdentity;
+        }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandle(
+        SafeFileHandle fileHandle,
+        out ByHandleFileInformation fileInformation);
+
+    [DllImport(
+        "kernel32.dll",
+        CharSet = CharSet.Unicode,
+        SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateHardLink(
+        string fileName,
+        string existingFileName,
+        IntPtr securityAttributes);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    private readonly record struct BackingFileIdentity(
+        uint VolumeSerialNumber,
+        uint FileIndexHigh,
+        uint FileIndexLow,
+        long Length,
+        DateTime CreationTimeUtc);
+
+    private readonly record struct BackingFileFingerprint(
+        BackingFileIdentity Identity,
+        long Length,
+        string ContentHash);
 
     private BoundedSearchResult<long> Search(
         byte[] pattern,
@@ -494,6 +839,8 @@ public class VirtualizedByteBuffer : IDisposable
         _memoryMappedFile?.Dispose();
         _fileStream.Dispose();
         _pageCache.Clear();
+        if (_ownsBackingPath)
+            DeleteOwnedBackingPath(_backingPath);
 
         GC.SuppressFinalize(this);
     }

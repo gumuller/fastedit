@@ -1,5 +1,6 @@
 using System.IO;
 using System.IO.Enumeration;
+using System.Text;
 using FastEdit.Infrastructure;
 using FastEdit.Services;
 using FastEdit.Services.Interfaces;
@@ -125,20 +126,54 @@ public class RecoveryIdentityPipelineTests
     private static Mock<IFileSystemService> CreateFileSystem(
         IDictionary<string, string> files)
     {
+        var byteFiles = files.ToDictionary(
+            pair => pair.Key,
+            pair => Encoding.UTF8.GetBytes(pair.Value),
+            StringComparer.OrdinalIgnoreCase);
         var fileSystem = new Mock<IFileSystemService>();
         fileSystem.Setup(service => service.DirectoryExists(It.IsAny<string>()))
             .Returns(true);
         fileSystem.Setup(service => service.CreateDirectory(It.IsAny<string>()));
         fileSystem.Setup(service => service.FileExists(It.IsAny<string>()))
-            .Returns((string path) => files.ContainsKey(path));
+            .Returns((string path) =>
+                files.ContainsKey(path) || byteFiles.ContainsKey(path));
         fileSystem.Setup(service => service.ReadAllText(It.IsAny<string>()))
-            .Returns((string path) => files[path]);
+            .Returns((string path) => files.TryGetValue(path, out var content)
+                ? content
+                : Encoding.UTF8.GetString(byteFiles[path]));
+        fileSystem.Setup(service => service.ReadAllTextAsync(It.IsAny<string>()))
+            .Returns((string path) => Task.FromResult(
+                files.TryGetValue(path, out var content)
+                    ? content
+                    : Encoding.UTF8.GetString(byteFiles[path])));
+        fileSystem.Setup(service => service.OpenRead(It.IsAny<string>()))
+            .Returns((string path) => new MemoryStream(byteFiles[path]));
+        fileSystem.Setup(service => service.GetFileSize(It.IsAny<string>()))
+            .Returns((string path) => byteFiles[path].LongLength);
         fileSystem.Setup(service => service.WriteAllTextAtomic(
                 It.IsAny<string>(),
                 It.IsAny<string>()))
-            .Callback<string, string>((path, content) => files[path] = content);
+            .Callback<string, string>((path, content) =>
+            {
+                files[path] = content;
+                byteFiles[path] = Encoding.UTF8.GetBytes(content);
+            });
+        fileSystem.Setup(service => service.WriteStreamAtomic(
+                It.IsAny<string>(),
+                It.IsAny<Action<Stream>>()))
+            .Callback<string, Action<Stream>>((path, write) =>
+            {
+                using var stream = new MemoryStream();
+                write(stream);
+                byteFiles[path] = stream.ToArray();
+                files.Remove(path);
+            });
         fileSystem.Setup(service => service.DeleteFile(It.IsAny<string>()))
-            .Callback<string>(path => files.Remove(path));
+            .Callback<string>(path =>
+            {
+                files.Remove(path);
+                byteFiles.Remove(path);
+            });
         fileSystem.Setup(service => service.MoveFile(
                 It.IsAny<string>(),
                 It.IsAny<string>(),
@@ -147,15 +182,20 @@ public class RecoveryIdentityPipelineTests
             {
                 if (!overwrite && files.ContainsKey(destination))
                     throw new IOException($"Destination already exists: {destination}");
-                files[destination] = files[source];
+                if (files.TryGetValue(source, out var content))
+                    files[destination] = content;
+                if (byteFiles.TryGetValue(source, out var bytes))
+                    byteFiles[destination] = bytes;
                 files.Remove(source);
+                byteFiles.Remove(source);
             });
         fileSystem.Setup(service => service.GetFiles(
                 It.IsAny<string>(),
                 It.IsAny<string>(),
                 It.IsAny<bool>()))
             .Returns((string directory, string pattern, bool _) =>
-                files.Keys
+                files.Keys.Concat(byteFiles.Keys)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
                     .Where(path =>
                         string.Equals(
                             Path.GetDirectoryName(path),

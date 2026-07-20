@@ -1303,6 +1303,217 @@ public class DocumentSessionCoordinatorTests
     }
 
     [Fact]
+    public void CreateAutoSaveEntries_PreservesCleanUntitledStateAndEncoding()
+    {
+        var tab = CreateTab("Untitled-clean", "");
+        tab.RestoreTextSnapshot(
+            string.Empty,
+            "Untitled-clean",
+            "\uFEFFclean\0text",
+            isModified: false,
+            Encoding.Unicode.CodePage,
+            hasBom: true);
+        tab.CursorOffset = 4;
+        tab.ScrollOffset = 2.5;
+        var recoveredTab = new EditorTabViewModel(
+            _fileService.Object,
+            new FileSystemService(),
+            _dialogService.Object);
+        _tabFactory.Setup(factory => factory.CreateUntitled(It.IsAny<string>()))
+            .Returns(recoveredTab);
+
+        var entry = Assert.Single(_sut.CreateAutoSaveEntries(new[] { tab }));
+        var recovered = _sut.CreateRecoveryTab(entry);
+
+        Assert.False(entry.IsModified);
+        Assert.Equal(FileOpenMode.Text, entry.Mode);
+        Assert.Equal(Encoding.Unicode.CodePage, entry.EncodingCodePage);
+        Assert.True(entry.HasBom);
+        Assert.Equal(entry.Content, recovered.Content);
+        Assert.False(recovered.IsModified);
+        Assert.Equal(Encoding.Unicode.CodePage, recovered.FileEncoding.CodePage);
+        Assert.True(recovered.HasBom);
+        recovered.Dispose();
+    }
+
+    [Fact]
+    public void CrashAutoSave_BinaryAndExactTextRoundTripAndCorrelateWithLiveSession()
+    {
+        var workspace = Path.Combine(
+            Path.GetTempPath(),
+            Guid.NewGuid().ToString("N"));
+        var autoSaveRoot = Path.Combine(workspace, "autosave");
+        var binarySource = Path.Combine(workspace, "source.bin");
+        Directory.CreateDirectory(workspace);
+        File.WriteAllBytes(binarySource, new byte[] { 0, 1, 2, 3 });
+        var fileSystem = new FileSystemService();
+        var settings = new Mock<ISettingsService>();
+        settings.SetupGet(service => service.AutoSaveIntervalSeconds).Returns(30);
+        var dispatcher = new Mock<IDispatcherService>();
+        dispatcher.Setup(service => service.Invoke(It.IsAny<Action>()))
+            .Callback<Action>(action => action());
+        var factory = new Mock<IEditorTabFactory>();
+        var coordinator = new DocumentSessionCoordinator(
+            settings.Object,
+            fileSystem,
+            factory.Object,
+            new TestShutdownSessionStore());
+        var binary = new EditorTabViewModel(
+            _fileService.Object,
+            fileSystem,
+            _dialogService.Object);
+        binary.RestoreBinarySnapshot(
+            binarySource,
+            "source.bin",
+            binarySource,
+            isModified: false,
+            hexOffset: 2,
+            bytesPerRow: 8);
+        binary.ByteBuffer!.SetByte(1, 42);
+        binary.ScrollOffset = 3;
+        binary.RestoreAutoSaveIdentity("binary-stable");
+        var exactText = new EditorTabViewModel(
+            _fileService.Object,
+            fileSystem,
+            _dialogService.Object);
+        const string exactContent =
+            "\uFEFFleading\uD800middle\uDC00\0line\r\nend";
+        exactText.RestoreTextSnapshot(
+            @"C:\original-utf16.txt",
+            "original-utf16.txt",
+            exactContent,
+            isModified: true,
+            Encoding.Unicode.CodePage,
+            hasBom: true);
+        exactText.CursorOffset = 7;
+        exactText.ScrollOffset = 4.5;
+        exactText.RestoreAutoSaveIdentity("text-stable");
+        var crashedGeneration = Guid.NewGuid().ToString("N");
+        var replacementGeneration = Guid.NewGuid().ToString("N");
+        var nextGeneration = Guid.NewGuid().ToString("N");
+        var crashedService = new AutoSaveService(
+            fileSystem,
+            settings.Object,
+            dispatcher.Object,
+            autoSaveRoot,
+            crashedGeneration);
+        var replacementService = new AutoSaveService(
+            fileSystem,
+            settings.Object,
+            dispatcher.Object,
+            autoSaveRoot,
+            replacementGeneration);
+        var nextService = new AutoSaveService(
+            fileSystem,
+            settings.Object,
+            dispatcher.Object,
+            autoSaveRoot,
+            nextGeneration);
+        EditorTabViewModel? recoveredBinary = null;
+        EditorTabViewModel? recoveredText = null;
+        EditorTabViewModel? nextBinary = null;
+        EditorTabViewModel? nextText = null;
+        try
+        {
+            crashedService.SaveNow(
+                coordinator.CreateAutoSaveEntries(
+                    new[] { binary, exactText }));
+            var recovery = replacementService.GetRecoveryEntries();
+            Assert.True(recovery.Success);
+            Assert.Equal(2, recovery.Entries.Count);
+            var binaryEntry = Assert.Single(
+                recovery.Entries.Where(
+                    entry => entry.Mode == FileOpenMode.Binary));
+            Assert.Equal("binary-stable", binaryEntry.TabIdentity);
+            Assert.Equal(4, binaryEntry.ContentLength);
+            Assert.False(string.IsNullOrEmpty(binaryEntry.ContentHash));
+            Assert.Equal(2, binaryEntry.HexOffset);
+            Assert.Equal(8, binaryEntry.BytesPerRow);
+            Assert.Equal(3, binaryEntry.ScrollOffset);
+            var textEntry = Assert.Single(
+                recovery.Entries.Where(
+                    entry => entry.Mode == FileOpenMode.Text));
+            Assert.Equal(exactContent.AsSpan().ToArray(), textEntry.Content.AsSpan().ToArray());
+            Assert.Equal(Encoding.Unicode.CodePage, textEntry.EncodingCodePage);
+            Assert.True(textEntry.HasBom);
+
+            recoveredBinary = new EditorTabViewModel(
+                _fileService.Object,
+                fileSystem,
+                _dialogService.Object);
+            recoveredText = new EditorTabViewModel(
+                _fileService.Object,
+                fileSystem,
+                _dialogService.Object);
+            factory.Setup(item => item.Create()).Returns(recoveredBinary);
+            factory.Setup(item => item.CreateUntitled(It.IsAny<string>()))
+                .Returns(recoveredText);
+            var recovered = coordinator.RecoverTabs(recovery.Entries);
+            Assert.True(recovered.Success);
+            Assert.Equal(42, recoveredBinary.ByteBuffer!.GetByte(1));
+            Assert.True(recoveredBinary.IsModified);
+            Assert.Equal(exactContent.AsSpan().ToArray(), recoveredText.Content.AsSpan().ToArray());
+            Assert.Equal(Encoding.Unicode.CodePage, recoveredText.FileEncoding.CodePage);
+            Assert.True(recoveredText.HasBom);
+
+            Assert.True(replacementService.CompleteRecovery(
+                coordinator.CreateAutoSaveEntries(recovered.RecoveredTabs!),
+                recovered.RecoveredEntryIds,
+                allEntriesRecovered: true));
+            Assert.False(Directory.GetFiles(
+                autoSaveRoot,
+                $"{crashedGeneration}-*.txt").Any());
+            Assert.Equal(42, recoveredBinary.ByteBuffer.GetByte(1));
+
+            var nextRecovery = nextService.GetRecoveryEntries();
+            Assert.True(nextRecovery.Success);
+            Assert.Equal(2, nextRecovery.Entries.Count);
+            var duplicatePlan = coordinator.PlanRecoveryBatch(
+                nextRecovery.Entries,
+                recovered.RecoveredTabs!);
+            Assert.Empty(duplicatePlan.Candidates);
+            Assert.Equal(2, duplicatePlan.DuplicateEntryIds.Count);
+
+            nextBinary = new EditorTabViewModel(
+                _fileService.Object,
+                fileSystem,
+                _dialogService.Object);
+            nextText = new EditorTabViewModel(
+                _fileService.Object,
+                fileSystem,
+                _dialogService.Object);
+            var nextFactory = new Mock<IEditorTabFactory>();
+            nextFactory.Setup(item => item.Create()).Returns(nextBinary);
+            nextFactory.Setup(item => item.CreateUntitled(It.IsAny<string>()))
+                .Returns(nextText);
+            var nextCoordinator = new DocumentSessionCoordinator(
+                settings.Object,
+                fileSystem,
+                nextFactory.Object,
+                new TestShutdownSessionStore());
+            var nextRecovered = nextCoordinator.RecoverTabs(nextRecovery.Entries);
+            Assert.True(nextRecovered.Success);
+            Assert.Equal(42, nextBinary.ByteBuffer!.GetByte(1));
+            Assert.Equal(
+                exactContent.AsSpan().ToArray(),
+                nextText.Content.AsSpan().ToArray());
+            nextCoordinator.Dispose();
+        }
+        finally
+        {
+            nextBinary?.Dispose();
+            nextText?.Dispose();
+            recoveredBinary?.Dispose();
+            recoveredText?.Dispose();
+            binary.Dispose();
+            exactText.Dispose();
+            coordinator.Dispose();
+            if (Directory.Exists(workspace))
+                Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
     public void RecoverTabs_PartialCreationReturnsRecoveredTabsAndSourceIds()
     {
         var recovered = CreateTab();
@@ -1328,6 +1539,33 @@ public class DocumentSessionCoordinatorTests
         Assert.Same(recovered, Assert.Single(result.RecoveredTabs!));
         Assert.True(recovered.IsModified);
         Assert.Equal("stable-one", recovered.AutoSaveIdentity);
+    }
+
+    [Fact]
+    public async Task RecoverTabs_FailedLargeFileCandidateDisposesTransientTab()
+    {
+        var path = Path.GetTempFileName();
+        await File.WriteAllTextAsync(path, "one\ntwo\nthree");
+        var transient = new EditorTabViewModel(
+            _fileService.Object,
+            new FileSystemService(),
+            _dialogService.Object);
+        await transient.RestoreLargeTextViewAsync(path, "large.txt", path);
+        _tabFactory.Setup(factory => factory.Create()).Returns(transient);
+        var entry = new AutoSaveEntry(
+            "large",
+            "large.txt",
+            path,
+            string.Empty,
+            false,
+            Mode: FileOpenMode.LargeText);
+
+        var result = _sut.RecoverTabs(new[] { entry });
+
+        Assert.False(result.Success);
+        Assert.Empty(result.RecoveredTabs!);
+        Assert.Null(transient.LargeFileDoc);
+        File.Delete(path);
     }
 
     [Fact]

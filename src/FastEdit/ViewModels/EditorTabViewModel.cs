@@ -1,4 +1,5 @@
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -21,6 +22,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     private readonly IDialogService _dialogService;
     private VirtualizedByteBuffer? _byteBuffer;
     private string? _binaryBackingPath;
+    private bool _binaryBackingRequiresAutoSaveHandoff;
     private LargeFileDocument? _largeFileDoc;
     private bool _disposed;
     private bool _isSettingContentBaseline;
@@ -267,7 +269,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         {
             if (_byteBuffer != null)
             {
-                if (string.Equals(savePath, FilePath, StringComparison.Ordinal))
+                if (AreSameFilePath(savePath, FilePath))
                 {
                     SaveBinaryBuffer();
                 }
@@ -277,6 +279,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
                         savePath,
                         _byteBuffer.WriteSnapshot);
                     ReplaceBinaryBuffer(savePath);
+                    _binaryBackingRequiresAutoSaveHandoff = false;
                 }
             }
             else
@@ -378,20 +381,23 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         _isApplyingBinaryBaseline = true;
         try
         {
-            if (string.Equals(
-                    _binaryBackingPath,
-                    FilePath,
-                    StringComparison.Ordinal))
+            if (AreSameFilePath(_binaryBackingPath, FilePath))
             {
                 _byteBuffer.Save();
             }
             else
             {
+                if (_fileSystemService.FileExists(FilePath))
+                {
+                    throw new IOException(
+                        "The original binary file may have changed since recovery. Use Save As to preserve both versions.");
+                }
                 _fileSystemService.WriteStreamAtomic(
                     FilePath,
                     _byteBuffer.WriteSnapshot);
                 ReplaceBinaryBuffer(FilePath);
             }
+            _binaryBackingRequiresAutoSaveHandoff = false;
         }
         finally
         {
@@ -439,8 +445,27 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
             HexOffset = hexOffset;
             BytesPerRow = bytesPerRow;
             ReplaceBinaryBuffer(snapshotPath);
+            _binaryBackingRequiresAutoSaveHandoff = false;
             FileSize = _byteBuffer!.Length;
             IsModified = isModified;
+        }
+
+        internal void RestoreAutoSaveBinarySnapshot(
+            string filePath,
+            string fileName,
+            string snapshotPath,
+            bool isModified,
+            long hexOffset,
+            int bytesPerRow)
+        {
+            RestoreBinarySnapshot(
+                filePath,
+                fileName,
+                snapshotPath,
+                isModified,
+                hexOffset,
+                bytesPerRow);
+            _binaryBackingRequiresAutoSaveHandoff = true;
         }
 
     internal void WriteBinarySnapshot(Stream destination)
@@ -464,6 +489,34 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         internal VirtualizedByteBuffer PrepareBinarySnapshot(string snapshotPath) =>
             new(snapshotPath);
 
+        internal bool RequiresAutoSaveBinaryHandoff =>
+            _binaryBackingRequiresAutoSaveHandoff;
+
+        internal bool TryAdoptAutoSaveBinarySnapshot(
+            string snapshotPath,
+            long expectedMutationVersion,
+            bool isModified)
+        {
+            if (!_binaryBackingRequiresAutoSaveHandoff)
+                return true;
+            if (UserMutationVersion != expectedMutationVersion)
+                return false;
+
+            var preparedBuffer = PrepareBinarySnapshot(snapshotPath);
+            if (UserMutationVersion != expectedMutationVersion)
+            {
+                preparedBuffer.Dispose();
+                return false;
+            }
+
+            RebaseBinarySnapshot(
+                preparedBuffer,
+                snapshotPath,
+                isModified);
+            _binaryBackingRequiresAutoSaveHandoff = true;
+            return true;
+        }
+
         internal void RebaseBinarySnapshot(
             VirtualizedByteBuffer preparedBuffer,
             string snapshotPath,
@@ -476,6 +529,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
             }
 
             ReplaceBinaryBuffer(preparedBuffer, snapshotPath);
+            _binaryBackingRequiresAutoSaveHandoff = false;
             IsModified = isModified;
         }
 
@@ -544,8 +598,90 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         _byteBuffer?.Dispose();
         _byteBuffer = null;
         _binaryBackingPath = null;
+        _binaryBackingRequiresAutoSaveHandoff = false;
 
         _largeFileDoc?.Dispose();
         _largeFileDoc = null;
+    }
+
+    internal static bool AreSameFilePath(string? firstPath, string? secondPath)
+    {
+        if (string.IsNullOrEmpty(firstPath) || string.IsNullOrEmpty(secondPath))
+            return false;
+
+        var firstFullPath = Path.GetFullPath(firstPath);
+        var secondFullPath = Path.GetFullPath(secondPath);
+        if (string.Equals(
+                firstFullPath,
+                secondFullPath,
+                StringComparison.Ordinal))
+        {
+            return true;
+        }
+        if (!OperatingSystem.IsWindows() ||
+            !string.Equals(
+                firstFullPath,
+                secondFullPath,
+                StringComparison.OrdinalIgnoreCase) ||
+            !File.Exists(firstFullPath) ||
+            !File.Exists(secondFullPath))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var firstHandle = File.OpenHandle(
+                firstFullPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            using var secondHandle = File.OpenHandle(
+                secondFullPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            return GetFileInformationByHandle(
+                       firstHandle,
+                       out var firstInformation) &&
+                   GetFileInformationByHandle(
+                       secondHandle,
+                       out var secondInformation) &&
+                   firstInformation.VolumeSerialNumber ==
+                       secondInformation.VolumeSerialNumber &&
+                   firstInformation.FileIndexHigh ==
+                       secondInformation.FileIndexHigh &&
+                   firstInformation.FileIndexLow ==
+                       secondInformation.FileIndexLow;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandle(
+        Microsoft.Win32.SafeHandles.SafeFileHandle fileHandle,
+        out ByHandleFileInformation fileInformation);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
     }
 }

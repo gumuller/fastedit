@@ -208,6 +208,33 @@ public class EditorTabViewModelTests
     // --- SaveAs ---
 
     [Fact]
+    public void BinaryPathIdentityUsesPlatformCaseSemantics()
+    {
+        var workspace = Path.Combine(
+            Path.GetTempPath(),
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        var lower = Path.Combine(workspace, "file.bin");
+        var upper = Path.Combine(workspace, "FILE.bin");
+        File.WriteAllBytes(lower, new byte[] { 1 });
+        try
+        {
+            Assert.Equal(
+                File.Exists(upper),
+                EditorTabViewModel.AreSameFilePath(lower, upper));
+            if (!File.Exists(upper))
+            {
+                File.WriteAllBytes(upper, new byte[] { 2 });
+                Assert.False(EditorTabViewModel.AreSameFilePath(lower, upper));
+            }
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task SaveAs_TextFile_SavesWithNewName()
     {
         var sut = CreateSut();
@@ -279,6 +306,43 @@ public class EditorTabViewModelTests
         Assert.Equal(new byte[] { 1, 2, 3 }, await File.ReadAllBytesAsync(destinationPath));
         Assert.Equal(destinationPath, sut.FilePath);
         Assert.False(sut.IsModified);
+        sut.Dispose();
+        Directory.Delete(workspace, recursive: true);
+    }
+
+    [Fact]
+    public async Task Save_RecoveredBinaryRefusesToOverwriteUnverifiedExistingSource()
+    {
+        var workspace = Path.Combine(
+            Path.GetTempPath(),
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        var originalPath = Path.Combine(workspace, "original.bin");
+        var snapshotPath = Path.Combine(workspace, "snapshot.bin");
+        await File.WriteAllBytesAsync(originalPath, new byte[] { 9, 9, 9 });
+        await File.WriteAllBytesAsync(snapshotPath, new byte[] { 1, 2, 3 });
+        var sut = new EditorTabViewModel(
+            _fileService.Object,
+            new FileSystemService(),
+            _dialogService.Object);
+        sut.RestoreAutoSaveBinarySnapshot(
+            originalPath,
+            "original.bin",
+            snapshotPath,
+            isModified: true,
+            hexOffset: 0,
+            bytesPerRow: 16);
+
+        await Assert.ThrowsAsync<IOException>(
+            () => sut.SaveCommand.ExecuteAsync(null));
+
+        Assert.Equal(
+            new byte[] { 9, 9, 9 },
+            await File.ReadAllBytesAsync(originalPath));
+        Assert.Equal(
+            new byte[] { 1, 2, 3 },
+            sut.ByteBuffer!.GetBytes(0, 3).ToArray());
+        Assert.True(sut.IsModified);
         sut.Dispose();
         Directory.Delete(workspace, recursive: true);
     }

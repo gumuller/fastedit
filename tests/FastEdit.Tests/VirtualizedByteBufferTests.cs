@@ -120,6 +120,124 @@ public class VirtualizedByteBufferTests : IDisposable
     }
 
     [Fact]
+    public void Save_WriteFailureLeavesOriginalAndPendingEditsIntact()
+    {
+        var original = new byte[] { 0x01, 0x02, 0x03 };
+        var path = CreateTempFile(original);
+        using var buffer = new VirtualizedByteBuffer(
+            path,
+            destination =>
+            {
+                destination.WriteByte(0xFF);
+                Assert.Equal(original, File.ReadAllBytes(path));
+                throw new IOException("injected snapshot failure");
+            });
+        buffer.SetByte(1, 0xAA);
+
+        Assert.Throws<IOException>(() => buffer.Save());
+
+        Assert.Equal(original, File.ReadAllBytes(path));
+        Assert.True(buffer.HasModifications);
+        Assert.Equal(0xAA, buffer.GetByte(1));
+        Assert.Empty(Directory.GetFiles(
+            Path.GetDirectoryName(path)!,
+            $".{Path.GetFileName(path)}.*.tmp"));
+    }
+
+    [Fact]
+    public async Task Save_DoesNotClearEditArrivingDuringAtomicCommit()
+    {
+        var path = CreateTempFile(new byte[] { 0, 1, 2 });
+        using var writerStarted = new ManualResetEventSlim();
+        using var releaseWriter = new ManualResetEventSlim();
+        using var buffer = new VirtualizedByteBuffer(
+            path,
+            destination =>
+            {
+                destination.Write(new byte[] { 0, 42, 2 });
+                writerStarted.Set();
+                releaseWriter.Wait();
+            });
+        buffer.SetByte(1, 42);
+
+        var saveTask = Task.Run(buffer.Save);
+        Assert.True(await Task.Run(
+            () => writerStarted.Wait(TimeSpan.FromSeconds(5))));
+        var laterEdit = Task.Run(() => buffer.SetByte(2, 99));
+        await Task.Delay(50);
+        Assert.False(laterEdit.IsCompleted);
+        releaseWriter.Set();
+        await saveTask;
+        await laterEdit;
+
+        Assert.Equal(new byte[] { 0, 42, 2 }, File.ReadAllBytes(path));
+        Assert.True(buffer.HasModifications);
+        Assert.Equal(99, buffer.GetByte(2));
+    }
+
+    [Fact]
+    public void Save_RefusesToOverwriteConcurrentPathReplacement()
+    {
+        var path = CreateTempFile(new byte[] { 1, 2, 3 });
+        var replacement = CreateTempFile(new byte[] { 9, 9, 9 });
+        using var buffer = new VirtualizedByteBuffer(
+            path,
+            destination => destination.Write(new byte[] { 1, 42, 3 }),
+            () => ReplaceFileWithRetries(replacement, path));
+        buffer.SetByte(1, 42);
+
+        Assert.Throws<IOException>(() => buffer.Save());
+
+        Assert.Equal(new byte[] { 9, 9, 9 }, File.ReadAllBytes(path));
+        Assert.True(buffer.HasModifications);
+        Assert.Equal(42, buffer.GetByte(1));
+    }
+
+    [Fact]
+    public void Save_ConflictRetainsCompleteEditedSnapshotAsBacking()
+    {
+        var original = Enumerable.Repeat((byte)0x11, 2 * 1024 * 1024)
+            .ToArray();
+        var replacementBytes = Enumerable.Repeat((byte)0x99, original.Length)
+            .ToArray();
+        var path = CreateTempFile(original);
+        var replacement = CreateTempFile(replacementBytes);
+        using var buffer = new VirtualizedByteBuffer(
+            path,
+            saveSnapshotWriter: null,
+            beforeAtomicCommit: () =>
+                ReplaceFileWithRetries(replacement, path));
+        buffer.SetByte(original.Length - 1, 0x42);
+
+        Assert.Throws<IOException>(() => buffer.Save());
+
+        Assert.Equal(0x99, File.ReadAllBytes(path)[100_000]);
+        using var snapshot = new MemoryStream();
+        buffer.WriteSnapshot(snapshot);
+        var retained = snapshot.ToArray();
+        Assert.Equal(0x11, retained[100_000]);
+        Assert.Equal(0x42, retained[^1]);
+        Assert.True(buffer.HasModifications);
+    }
+
+    [Fact]
+    public void Save_BlocksInPlaceExternalWritesThroughAtomicReplacement()
+    {
+        var path = CreateTempFile(new byte[] { 1, 2, 3 });
+        using var buffer = new VirtualizedByteBuffer(
+            path,
+            destination => destination.Write(new byte[] { 1, 42, 3 }),
+            () => File.WriteAllBytes(path, new byte[] { 9, 9, 9 }));
+        buffer.SetByte(1, 42);
+
+        Assert.Throws<IOException>(() => buffer.Save());
+
+        Assert.Equal(new byte[] { 1, 2, 3 }, File.ReadAllBytes(path));
+        Assert.True(buffer.HasModifications);
+        Assert.Equal(42, buffer.GetByte(1));
+    }
+
+    [Fact]
     public void GetRows_Returns_Formatted_Rows()
     {
         var data = Enumerable.Range(0, 48).Select(i => (byte)i).ToArray();
@@ -252,5 +370,28 @@ public class VirtualizedByteBufferTests : IDisposable
         using var readStream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
         Assert.Equal(0x7F, readStream.ReadByte());
         Assert.False(buffer.HasModifications);
+    }
+
+    private static void ReplaceFileWithRetries(
+        string sourcePath,
+        string destinationPath)
+    {
+        const int maxAttempts = 10;
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                File.Replace(sourcePath, destinationPath, null);
+                return;
+            }
+            catch (Exception ex) when (
+                attempt < maxAttempts - 1 &&
+                File.Exists(sourcePath) &&
+                ex is IOException or UnauthorizedAccessException)
+            {
+                Thread.Sleep(TimeSpan.FromMilliseconds(
+                    10 * (attempt + 1)));
+            }
+        }
     }
 }
