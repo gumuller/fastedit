@@ -106,6 +106,12 @@ public sealed class MainWindowLifecycleCoordinator
         try
         {
             await _operations.RestoreSessionAsync();
+            if (_operations.HasUnresolvedSessionEntries?.Invoke() == true)
+            {
+                issues.Add(new MainWindowStartupIssue(
+                    MainWindowStartupIssueKind.Startup,
+                    "Some files from the previous session could not be restored and will be retained for the next startup."));
+            }
 
             foreach (var path in startupFiles)
                 await _operations.OpenStartupFileAsync(path);
@@ -267,7 +273,8 @@ public sealed record MainWindowLifecycleOperations(
     Func<string, Task> SetWorkingDirectoryAsync,
     Func<IReadOnlyList<AutoSaveEntry>, TabRecoveryResult> RecoverTabs,
     Func<IReadOnlyList<AutoSaveEntry>> CaptureRecoverySnapshot,
-    Func<CancellationToken, Task> ShutdownTerminalAsync);
+    Func<CancellationToken, Task> ShutdownTerminalAsync,
+    Func<bool>? HasUnresolvedSessionEntries = null);
 
 public enum MainWindowStartupOutcome
 {

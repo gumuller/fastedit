@@ -106,6 +106,24 @@ public class MainWindowLifecycleCoordinatorTests
     }
 
     [Fact]
+    public async Task StartAsync_UnresolvedSessionEntriesAreReportedAsPartialFailure()
+    {
+        var coordinator = CreateCoordinator(
+            Mock.Of<IAutoSaveService>(),
+            hasUnresolvedSessionEntries: () => true);
+
+        var result = await coordinator.StartAsync(
+            Array.Empty<string>(),
+            hasAnotherRunningInstance: false,
+            requestRecovery: () => false);
+
+        Assert.Equal(MainWindowStartupOutcome.PartialFailure, result.Outcome);
+        var issue = Assert.Single(result.Issues);
+        Assert.Equal(MainWindowStartupIssueKind.Startup, issue.Kind);
+        Assert.Contains("could not be restored", issue.Message);
+    }
+
+    [Fact]
     public async Task StartAsync_ContainsFatalStartupFailure()
     {
         var autoSave = new Mock<IAutoSaveService>();
@@ -506,7 +524,8 @@ public class MainWindowLifecycleCoordinatorTests
         Func<string, Task>? setWorkingDirectoryAsync = null,
         Func<IReadOnlyList<AutoSaveEntry>, TabRecoveryResult>? recoverTabs = null,
         Func<IReadOnlyList<AutoSaveEntry>>? captureRecoverySnapshot = null,
-        Func<CancellationToken, Task>? shutdownTerminalAsync = null)
+        Func<CancellationToken, Task>? shutdownTerminalAsync = null,
+        Func<bool>? hasUnresolvedSessionEntries = null)
     {
         return new MainWindowLifecycleCoordinator(
             autoSaveService,
@@ -518,6 +537,7 @@ public class MainWindowLifecycleCoordinatorTests
                 recoverTabs ?? (entries =>
                     new TabRecoveryResult(true, entries.Select(entry => entry.Id).ToArray())),
                 captureRecoverySnapshot ?? (() => Array.Empty<AutoSaveEntry>()),
-                shutdownTerminalAsync ?? (_ => Task.CompletedTask)));
+                shutdownTerminalAsync ?? (_ => Task.CompletedTask),
+                hasUnresolvedSessionEntries));
     }
 }

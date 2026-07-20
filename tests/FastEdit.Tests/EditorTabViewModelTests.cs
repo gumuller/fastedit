@@ -83,6 +83,117 @@ public class EditorTabViewModelTests
         Assert.False(sut.IsModified);
     }
 
+    [Theory]
+    [InlineData(1200, true)]
+    [InlineData(1252, false)]
+    public async Task RestoreTextSnapshot_ExplicitSavePreservesEncodingAndBom(
+        int codePage,
+        bool hasBom)
+    {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        var sut = CreateSut();
+        sut.RestoreTextSnapshot(
+            "restored text",
+            "encoded.txt",
+            @"C:\encoded.txt",
+            codePage,
+            hasBom,
+            isModified: true);
+
+        await sut.SaveCommand.ExecuteAsync(null);
+
+        _fileService.Verify(service => service.WriteFileWithEncodingAsync(
+            @"C:\encoded.txt",
+            "restored text",
+            It.Is<Encoding>(encoding => encoding.CodePage == codePage),
+            hasBom), Times.Once);
+        Assert.False(sut.IsModified);
+    }
+
+    [Fact]
+    public async Task RestoreBinarySnapshot_DoesNotWriteNamedFileUntilExplicitSave()
+    {
+        var path = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllBytes(path, new byte[] { 1, 2, 3 });
+            _fileSystemService
+                .Setup(service => service.WriteAllBytes(path, It.IsAny<byte[]>()))
+                .Callback<string, byte[]>((target, bytes) => File.WriteAllBytes(target, bytes));
+            var sut = CreateSut();
+            sut.RestoreBinarySnapshot(
+                new byte[] { 1, 0xFF, 3 },
+                Path.GetFileName(path),
+                path,
+                isModified: true);
+
+            Assert.Equal(new byte[] { 1, 2, 3 }, File.ReadAllBytes(path));
+
+            await sut.SaveCommand.ExecuteAsync(null);
+
+            Assert.Equal(new byte[] { 1, 0xFF, 3 }, File.ReadAllBytes(path));
+            Assert.False(sut.IsModified);
+            sut.Dispose();
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreUntitledBinarySnapshot_ExplicitSaveUsesSaveAsPath()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.bin");
+        try
+        {
+            _dialogService
+                .Setup(service => service.ShowSaveFileDialog(
+                    It.IsAny<string>(),
+                    "Untitled-1",
+                    null))
+                .Returns(path);
+            _fileSystemService
+                .Setup(service => service.WriteAllBytes(path, It.IsAny<byte[]>()))
+                .Callback<string, byte[]>((target, bytes) => File.WriteAllBytes(target, bytes));
+            var sut = CreateSut();
+            sut.RestoreBinarySnapshot(
+                new byte[] { 7, 8, 9 },
+                "Untitled-1",
+                filePath: null,
+                isModified: true);
+
+            await sut.SaveCommand.ExecuteAsync(null);
+
+            Assert.Equal(path, sut.FilePath);
+            Assert.False(sut.IsModified);
+            Assert.Equal(new byte[] { 7, 8, 9 }, File.ReadAllBytes(path));
+            sut.Dispose();
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreBinarySnapshot_SaveFailureKeepsExactDirtyBuffer()
+    {
+        var sut = CreateSut();
+        sut.RestoreBinarySnapshot(
+            new byte[] { 1, 0xFF, 3 },
+            "binary.bin",
+            Path.GetTempPath(),
+            isModified: true);
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(
+            () => sut.SaveCommand.ExecuteAsync(null));
+
+        Assert.True(sut.IsModified);
+        Assert.Equal(0xFF, sut.ByteBuffer!.GetByte(1));
+        sut.Dispose();
+    }
+
     [Fact]
     public async Task Save_Untitled_ShowsSaveDialog()
     {
@@ -438,12 +549,14 @@ public class EditorTabViewModelTests
             await sut.LoadFileAsync(tempFile);
             Assert.Equal(FileOpenMode.Binary, sut.Mode);
             sut.ByteBuffer!.SetByte(0, 9);
+            var originalBuffer = sut.ByteBuffer;
             var userChangeVersion = sut.ChangeVersion;
 
             await sut.SaveCommand.ExecuteAsync(null);
 
             Assert.False(sut.IsModified);
             Assert.Equal(userChangeVersion, sut.ChangeVersion);
+            Assert.Same(originalBuffer, sut.ByteBuffer);
         }
         finally
         {

@@ -161,7 +161,8 @@ public partial class MainWindow : FluentWindow
                 path => CommandRunner.SetWorkingDirectoryAsync(path),
                 _viewModel.RecoverTabs,
                 _viewModel.GetAutoSaveEntries,
-                CommandRunner.ShutdownAsync));
+                CommandRunner.ShutdownAsync,
+                () => _viewModel.HasUnresolvedSessionEntries));
 
         BuildCommandRegistry();
     }
@@ -302,6 +303,7 @@ public partial class MainWindow : FluentWindow
         // Save cursor/scroll offsets from active editors before session save
         var editorHost = FindActiveEditorHost();
         editorHost?.SaveStateToViewModel();
+        FindActiveHexEditor()?.SaveStateToViewModel();
     }
 
     private void Exit_Click(object sender, RoutedEventArgs e)

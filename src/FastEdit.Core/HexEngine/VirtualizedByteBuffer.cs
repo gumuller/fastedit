@@ -1,4 +1,5 @@
 using System.IO.MemoryMappedFiles;
+using System.Security.Cryptography;
 using FastEdit.Core.Search;
 
 namespace FastEdit.Core.HexEngine;
@@ -6,6 +7,7 @@ namespace FastEdit.Core.HexEngine;
 public class VirtualizedByteBuffer : IDisposable
 {
     private readonly string _filePath;
+    private readonly bool _ownsBackingFile;
     private FileStream _fileStream;
     private MemoryMappedFile? _memoryMappedFile;
     private long _fileLength;
@@ -29,6 +31,7 @@ public class VirtualizedByteBuffer : IDisposable
     public const int DefaultSearchResultLimit = 10_000;
 
     public long Length => _fileLength;
+    public bool IsSnapshotBacked => _ownsBackingFile;
     public bool HasModifications
     {
         get
@@ -40,15 +43,23 @@ public class VirtualizedByteBuffer : IDisposable
     public event EventHandler? ModificationsChanged;
 
     public VirtualizedByteBuffer(string filePath)
+        : this(filePath, ownsBackingFile: false)
+    {
+    }
+
+    private VirtualizedByteBuffer(string filePath, bool ownsBackingFile)
     {
         _filePath = filePath;
+        _ownsBackingFile = ownsBackingFile;
         _fileStream = new FileStream(
             filePath,
             FileMode.Open,
             FileAccess.Read,
             FileShare.Read,
             bufferSize: PageSize,
-            FileOptions.RandomAccess | FileOptions.Asynchronous);
+            FileOptions.RandomAccess |
+            FileOptions.Asynchronous |
+            (ownsBackingFile ? FileOptions.DeleteOnClose : FileOptions.None));
 
         _fileLength = _fileStream.Length;
         _pageCache = new LruCache<long, byte[]>(MaxCachedPages);
@@ -64,6 +75,143 @@ public class VirtualizedByteBuffer : IDisposable
                 MemoryMappedFileAccess.Read,
                 HandleInheritability.None,
                 leaveOpen: true);
+        }
+    }
+
+    public static VirtualizedByteBuffer FromSnapshot(byte[] bytes)
+    {
+        ArgumentNullException.ThrowIfNull(bytes);
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            $"fastedit-binary-{Guid.NewGuid():N}.snapshot");
+        File.WriteAllBytes(path, bytes);
+        try
+        {
+            return new VirtualizedByteBuffer(path, ownsBackingFile: true);
+        }
+        catch
+        {
+            File.Delete(path);
+            throw;
+        }
+    }
+
+    public byte[] CreateSnapshot()
+    {
+        if (_fileLength > int.MaxValue)
+            throw new InvalidOperationException(
+                "Binary session snapshots larger than 2 GB are not supported.");
+
+        var snapshot = new byte[checked((int)_fileLength)];
+        const int chunkSize = 1024 * 1024;
+        for (long offset = 0; offset < _fileLength; offset += chunkSize)
+        {
+            var bytes = GetBytes(offset, (int)Math.Min(chunkSize, _fileLength - offset));
+            bytes.CopyTo(snapshot.AsSpan(checked((int)offset)));
+        }
+
+        lock (_modificationsLock)
+        {
+            foreach (var modification in _modifications)
+                snapshot[checked((int)modification.Key)] = modification.Value;
+        }
+
+        return snapshot;
+    }
+
+    public IReadOnlyList<KeyValuePair<long, byte>> GetModifications()
+    {
+        lock (_modificationsLock)
+            return _modifications.OrderBy(modification => modification.Key).ToArray();
+    }
+
+    public string ComputeBaseSha256()
+    {
+        using var stream = new FileStream(
+            _filePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: PageSize,
+            FileOptions.SequentialScan);
+        return Convert.ToHexString(SHA256.HashData(stream));
+    }
+
+    public bool MatchesBaseIdentity(long expectedLength, string expectedSha256)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedSha256);
+        if (_fileLength != expectedLength)
+            return false;
+
+        lock (_streamLock)
+        {
+            _fileStream.Position = 0;
+            var actualHash = Convert.ToHexString(SHA256.HashData(_fileStream));
+            _fileStream.Position = 0;
+            return string.Equals(actualHash, expectedSha256, StringComparison.Ordinal);
+        }
+    }
+
+    public bool IsBackedBy(string filePath)
+    {
+        return !_ownsBackingFile &&
+            string.Equals(
+                Path.GetFullPath(filePath),
+                Path.GetFullPath(_filePath),
+                StringComparison.OrdinalIgnoreCase);
+    }
+
+    public void SaveTo(string filePath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+        if (IsBackedBy(filePath))
+        {
+            Save();
+            return;
+        }
+
+        var directory = Path.GetDirectoryName(filePath);
+        if (!string.IsNullOrEmpty(directory))
+            Directory.CreateDirectory(directory);
+        var tempPath = Path.Combine(
+            directory ?? string.Empty,
+            $".{Path.GetFileName(filePath)}.{Guid.NewGuid():N}.tmp");
+        var modifications = GetModifications();
+        var buffer = new byte[1024 * 1024];
+        try
+        {
+            using (var output = new FileStream(
+                tempPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                buffer.Length,
+                FileOptions.WriteThrough))
+            {
+                for (long offset = 0; offset < _fileLength;)
+                {
+                    var count = (int)Math.Min(buffer.Length, _fileLength - offset);
+                    var read = RandomAccess.Read(
+                        _fileStream.SafeFileHandle,
+                        buffer.AsSpan(0, count),
+                        offset);
+                    if (read == 0)
+                        throw new EndOfStreamException("The binary source ended before its expected length.");
+
+                    ApplyModifications(buffer, read, offset, modifications);
+                    output.Write(buffer, 0, read);
+                    offset += read;
+                }
+
+                output.Flush(flushToDisk: true);
+            }
+
+            File.Move(tempPath, filePath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+                File.Delete(tempPath);
         }
     }
 
@@ -468,6 +616,21 @@ public class VirtualizedByteBuffer : IDisposable
         _memoryMappedFile?.Dispose();
         _fileStream.Dispose();
         _pageCache.Clear();
+        if (_ownsBackingFile)
+        {
+            try
+            {
+                File.Delete(_filePath);
+            }
+            catch (IOException)
+            {
+                // Process-owned snapshot cleanup is best effort during disposal.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // Process-owned snapshot cleanup is best effort during disposal.
+            }
+        }
 
         GC.SuppressFinalize(this);
     }

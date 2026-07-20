@@ -73,6 +73,36 @@ public class VirtualizedByteBufferTests : IDisposable
     }
 
     [Fact]
+    public void CreateSnapshot_IncludesUnsavedModifiedBytesWithoutWritingSource()
+    {
+        var path = CreateTempFile(new byte[] { 0x10, 0x20, 0x30 });
+        using var buffer = new VirtualizedByteBuffer(path);
+        buffer.SetByte(1, 0xFF);
+
+        var snapshot = buffer.CreateSnapshot();
+
+        Assert.Equal(new byte[] { 0x10, 0xFF, 0x30 }, snapshot);
+        Assert.Equal(new byte[] { 0x10, 0x20, 0x30 }, File.ReadAllBytes(path));
+    }
+
+    [Fact]
+    public void SaveTo_NewPathStreamsModifiedBytesWithoutChangingSource()
+    {
+        var sourcePath = CreateTempFile(new byte[] { 0x10, 0x20, 0x30 });
+        var destinationPath = Path.Combine(
+            Path.GetTempPath(),
+            $"{Guid.NewGuid():N}.bin");
+        _tempFiles.Add(destinationPath);
+        using var buffer = new VirtualizedByteBuffer(sourcePath);
+        buffer.SetByte(1, 0xFF);
+
+        buffer.SaveTo(destinationPath);
+
+        Assert.Equal(new byte[] { 0x10, 0xFF, 0x30 }, File.ReadAllBytes(destinationPath));
+        Assert.Equal(new byte[] { 0x10, 0x20, 0x30 }, File.ReadAllBytes(sourcePath));
+    }
+
+    [Fact]
     public void DiscardModifications_Reverts_Changes()
     {
         var data = new byte[] { 0xAA, 0xBB };

@@ -1442,6 +1442,12 @@ public partial class EditorHost : UserControl
         {
             _currentVm.PropertyChanged += OnViewModelPropertyChanged;
             UpdateEditor(_currentVm);
+            var restoreVm = _currentVm;
+            _ = Dispatcher.BeginInvoke(() =>
+            {
+                if (ReferenceEquals(_currentVm, restoreVm))
+                    RestoreStateFromViewModel();
+            }, System.Windows.Threading.DispatcherPriority.Loaded);
         }
     }
 

@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Security.Cryptography;
 using FastEdit.Helpers;
 using FastEdit.Infrastructure;
 using FastEdit.Services.Interfaces;
@@ -49,6 +50,12 @@ public class MainViewModelTests
             _tabFactory.Object,
             _workspaceService.Object,
             _fileTree);
+    }
+
+    private static string ComputeSha256(string path)
+    {
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexString(SHA256.HashData(stream));
     }
 
     private EditorTabViewModel CreateMockTab(
@@ -585,7 +592,11 @@ public class MainViewModelTests
             Times.Never);
         _fileSystemService.Verify(
             f => f.WriteAllTextAtomic(It.IsAny<string>(), "restore me"),
-            Times.Once);
+            Times.Never);
+        _settingsService.VerifySet(s => s.OpenFiles = It.Is<List<SessionFile>>(files =>
+            files.Count == 1 &&
+            files[0].Content == "restore me" &&
+            !files[0].IsModified));
     }
 
     [Fact]
@@ -637,6 +648,9 @@ public class MainViewModelTests
             tab = CreateMockTab(Path.GetFileName(tempFile), tempFile);
             await tab.LoadFileAsync(tempFile);
             tab.ByteBuffer!.SetByte(7, 0x0B);
+            _fileSystemService
+                .Setup(service => service.WriteAllBytes(tempFile, It.IsAny<byte[]>()))
+                .Callback<string, byte[]>((path, bytes) => File.WriteAllBytes(path, bytes));
             _sut.Tabs.Add(tab);
             _sut.SelectedTab = tab;
             _dialogService.Setup(d => d.ShowMessage(
@@ -673,7 +687,7 @@ public class MainViewModelTests
     }
 
     [Fact]
-    public void SaveSession_UntitledTab_WritesToTempFile()
+    public void SaveSession_UntitledTab_StoresContentInManifest()
     {
         var tab = CreateMockTab("Untitled-1");
         tab.Content = "hello world";
@@ -682,8 +696,10 @@ public class MainViewModelTests
 
         _sut.SaveSession();
 
-        _fileSystemService.Verify(f => f.CreateDirectory(It.IsAny<string>()), Times.Once);
-        _fileSystemService.Verify(f => f.WriteAllTextAtomic(It.IsAny<string>(), "hello world"), Times.Once);
+        _settingsService.VerifySet(service =>
+            service.OpenFiles = It.Is<List<SessionFile>>(files =>
+                files.Count == 1 &&
+                files[0].Content == "hello world"));
     }
 
     [Fact]
@@ -708,11 +724,11 @@ public class MainViewModelTests
                 files.Count == 1 &&
                 files[0].IsUntitled &&
                 files[0].FilePath == "Untitled-1"));
-        _fileSystemService.Verify(
-            service => service.WriteAllTextAtomic(
-                It.IsAny<string>(),
-                "restore me"),
-            Times.Once);
+        _settingsService.VerifySet(service =>
+            service.OpenFiles = It.Is<List<SessionFile>>(files =>
+                files.Count == 1 &&
+                files[0].Content == "restore me" &&
+                files[0].IsModified));
     }
 
     [Fact]
@@ -737,12 +753,8 @@ public class MainViewModelTests
                 files.Count == 1 &&
                 !files[0].IsUntitled &&
                 files[0].FilePath == @"C:\notes.txt" &&
-                !string.IsNullOrEmpty(files[0].TempFilePath)));
-        _fileSystemService.Verify(
-            service => service.WriteAllTextAtomic(
-                It.IsAny<string>(),
-                "unsaved buffer"),
-            Times.Once);
+                files[0].Content == "unsaved buffer" &&
+                files[0].IsModified));
         _fileService.Verify(
             service => service.WriteAllTextAsync(
                 It.IsAny<string>(),
@@ -764,6 +776,174 @@ public class MainViewModelTests
         _fileSystemService.Verify(
             f => f.GetFiles(It.IsAny<string>(), "*.tmp", false),
             Times.Never);
+    }
+
+    [Fact]
+    public async Task SaveSession_DirtyNamedBinaryTab_PersistsValidatedOverlayWithoutWritingNamedFile()
+    {
+        var path = Path.GetTempFileName();
+        try
+        {
+            var original = new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+            File.WriteAllBytes(path, original);
+            var tab = CreateMockTab(Path.GetFileName(path), path);
+            await tab.LoadFileAsync(path);
+            tab.ByteBuffer!.SetByte(7, 0xFF);
+            _sut.Tabs.Add(tab);
+            _sut.SelectedTab = tab;
+
+            _sut.SaveSession();
+
+            _settingsService.VerifySet(service =>
+                service.OpenFiles = It.Is<List<SessionFile>>(files =>
+                    files.Count == 1 &&
+                    files[0].BinaryContentBase64 == null &&
+                    files[0].BinaryBaseLength == original.LongLength &&
+                    files[0].BinaryBaseSha256 ==
+                    ComputeSha256(path) &&
+                    HasSingleBinaryModification(files[0], 7, 0xFF) &&
+                    files[0].IsModified));
+            Assert.Equal(original, File.ReadAllBytes(path));
+            tab.Dispose();
+        }
+
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    private static bool HasSingleBinaryModification(
+        SessionFile sessionFile,
+        long offset,
+        byte value)
+    {
+        return sessionFile.BinaryModifications != null &&
+            sessionFile.BinaryModifications.Count == 1 &&
+            sessionFile.BinaryModifications[0].Offset == offset &&
+            sessionFile.BinaryModifications[0].Value == value;
+    }
+
+    [Fact]
+    public async Task RestoreSession_DirtyNamedBinaryOverlay_RestoresExactBytesWithoutDiskWrite()
+    {
+        var path = Path.GetTempFileName();
+        EditorTabViewModel? tab = null;
+        try
+        {
+            var original = new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+            File.WriteAllBytes(path, original);
+            var sessionFile = new SessionFile
+            {
+                EntryId = "binary",
+                SnapshotVersion = 1,
+                FilePath = path,
+                IsBinaryMode = true,
+                IsModified = true,
+                BinaryBaseLength = original.LongLength,
+                BinaryBaseSha256 = ComputeSha256(path),
+                BinaryModifications =
+                [
+                    new BinaryModification { Offset = 7, Value = 0xFF }
+                ]
+            };
+            _settingsService.Setup(service => service.OpenFiles)
+                .Returns(new List<SessionFile> { sessionFile });
+            _fileSystemService.Setup(service => service.FileExists(path)).Returns(true);
+            _fileSystemService.Setup(service => service.GetFileSize(path)).Returns(original.LongLength);
+            tab = CreateMockTab(Path.GetFileName(path));
+            _tabFactory.Setup(factory => factory.CreateUntitled(null)).Returns(tab);
+
+            await _sut.RestoreSessionAsync();
+
+            Assert.Same(tab, Assert.Single(_sut.Tabs));
+            Assert.Equal(0xFF, tab.ByteBuffer!.GetByte(7));
+            Assert.True(tab.IsModified);
+            Assert.Equal(original, File.ReadAllBytes(path));
+        }
+        finally
+        {
+            tab?.Dispose();
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreSession_ChangedBinaryBase_RetainsEntryAsUnresolved()
+    {
+        var path = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllBytes(path, new byte[] { 1, 2, 3 });
+            var sessionFile = new SessionFile
+            {
+                EntryId = "binary",
+                SnapshotVersion = 1,
+                FilePath = path,
+                IsBinaryMode = true,
+                IsModified = true,
+                BinaryBaseLength = 3,
+                BinaryBaseSha256 = new string('0', 64),
+                BinaryModifications =
+                [
+                    new BinaryModification { Offset = 1, Value = 0xFF }
+                ]
+            };
+            _settingsService.Setup(service => service.OpenFiles)
+                .Returns(new List<SessionFile> { sessionFile });
+            _fileSystemService.Setup(service => service.FileExists(path)).Returns(true);
+            _fileSystemService.Setup(service => service.GetFileSize(path)).Returns(3);
+
+            await _sut.RestoreSessionAsync();
+            _sut.SaveSession();
+
+            Assert.Empty(_sut.Tabs);
+            Assert.True(_sut.HasUnresolvedSessionEntries);
+            _settingsService.VerifySet(service =>
+                service.OpenFiles = It.Is<List<SessionFile>>(files =>
+                    files.Count == 1 &&
+                    ReferenceEquals(files[0], sessionFile)));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task RestoreSession_PartialFailureThenSave_RetainsUnresolvedEntryPayload()
+    {
+        var unresolved = new SessionFile
+        {
+            EntryId = "unresolved",
+            SnapshotVersion = 1,
+            FilePath = @"C:\missing.bin",
+            BinaryContentBase64 = "invalid-base64-payload",
+            IsBinaryMode = true,
+            IsModified = true
+        };
+        var restored = new SessionFile
+        {
+            EntryId = "restored",
+            SnapshotVersion = 1,
+            FilePath = "Untitled-1",
+            IsUntitled = true,
+            Content = "content",
+            IsModified = true
+        };
+        _settingsService.Setup(service => service.OpenFiles)
+            .Returns(new List<SessionFile> { unresolved, restored });
+        var tab = CreateMockTab("Untitled-1");
+        _tabFactory.Setup(factory => factory.CreateUntitled("content")).Returns(tab);
+
+        await _sut.RestoreSessionAsync();
+        _sut.SaveSession();
+
+        _settingsService.VerifySet(service =>
+            service.OpenFiles = It.Is<List<SessionFile>>(files =>
+                files.Any(file =>
+                    file.EntryId == "unresolved" &&
+                    file.BinaryContentBase64 == unresolved.BinaryContentBase64)));
     }
 
     [Fact]
@@ -1280,6 +1460,107 @@ public class MainViewModelTests
         Assert.Empty(_sut.Tabs);
         Assert.Contains("Failed to restore session file", trace.Messages);
         Assert.Contains(filePath, trace.Messages);
+    }
+
+    [Fact]
+    public async Task RestoreSession_SkippedEntryBeforeActive_PreservesSelectionAndState()
+    {
+        var skipped = new SessionFile
+        {
+            EntryId = "skipped",
+            FilePath = @"C:\missing.txt"
+        };
+        var active = new SessionFile
+        {
+            EntryId = "active",
+            SnapshotVersion = 1,
+            FilePath = "Untitled-2",
+            IsUntitled = true,
+            Content = string.Empty,
+            IsModified = false,
+            CursorOffset = 42,
+            ScrollOffset = 17.5,
+            HexOffset = 96,
+            HexScrollOffset = 3,
+            BytesPerRow = 24
+        };
+        _settingsService.Setup(service => service.OpenFiles)
+            .Returns(new List<SessionFile> { skipped, active });
+        _settingsService.Setup(service => service.ActiveSessionEntryId).Returns("active");
+        _fileSystemService.Setup(service => service.FileExists(skipped.FilePath)).Returns(false);
+        var tab = CreateMockTab("Untitled-2", isModified: true);
+        _tabFactory.Setup(factory => factory.CreateUntitled(string.Empty)).Returns(tab);
+
+        await _sut.RestoreSessionAsync();
+
+        Assert.Same(tab, _sut.SelectedTab);
+        Assert.False(tab.IsModified);
+        Assert.Equal(42, tab.CursorOffset);
+        Assert.Equal(17.5, tab.ScrollOffset);
+        Assert.Equal(96, tab.HexOffset);
+        Assert.Equal(3, tab.HexScrollOffset);
+        Assert.Equal(24, tab.BytesPerRow);
+    }
+
+    [Fact]
+    public async Task RestoreSession_FailedActiveEntry_SelectsNextRestoredSource()
+    {
+        var failed = new SessionFile
+        {
+            EntryId = "failed",
+            FilePath = @"C:\missing.txt"
+        };
+        var next = new SessionFile
+        {
+            EntryId = "next",
+            SnapshotVersion = 1,
+            FilePath = "Untitled-2",
+            IsUntitled = true,
+            Content = "next"
+        };
+        _settingsService.Setup(service => service.OpenFiles)
+            .Returns(new List<SessionFile> { failed, next });
+        _settingsService.Setup(service => service.ActiveSessionEntryId).Returns("failed");
+        _fileSystemService.Setup(service => service.FileExists(failed.FilePath)).Returns(false);
+        var nextTab = CreateMockTab("Untitled-2");
+        _tabFactory.Setup(factory => factory.CreateUntitled("next")).Returns(nextTab);
+
+        await _sut.RestoreSessionAsync();
+
+        Assert.Same(nextTab, _sut.SelectedTab);
+    }
+
+    [Fact]
+    public async Task RestoreSession_DuplicateNamedSnapshot_ReusesExistingTabAndMapsActiveEntry()
+    {
+        const string path = @"C:\notes.txt";
+        var first = new SessionFile
+        {
+            EntryId = "first",
+            SnapshotVersion = 1,
+            FilePath = path,
+            Content = "first",
+            IsModified = true
+        };
+        var duplicate = new SessionFile
+        {
+            EntryId = "duplicate",
+            SnapshotVersion = 1,
+            FilePath = path,
+            Content = "duplicate",
+            IsModified = true
+        };
+        _settingsService.Setup(service => service.OpenFiles)
+            .Returns(new List<SessionFile> { first, duplicate });
+        _settingsService.Setup(service => service.ActiveSessionEntryId).Returns("duplicate");
+        var tab = CreateMockTab("notes.txt");
+        _tabFactory.Setup(factory => factory.CreateUntitled("first")).Returns(tab);
+
+        await _sut.RestoreSessionAsync();
+
+        Assert.Same(tab, Assert.Single(_sut.Tabs));
+        Assert.Same(tab, _sut.SelectedTab);
+        _tabFactory.Verify(factory => factory.CreateUntitled("duplicate"), Times.Never);
     }
 
     // --- Toggle commands ---

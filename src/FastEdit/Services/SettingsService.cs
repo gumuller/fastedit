@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using FastEdit.Services.Interfaces;
@@ -16,7 +18,7 @@ public class SettingsService : ISettingsService
 
     private readonly IFileSystemService _fileSystem;
     private readonly string _settingsPath;
-    private readonly string _tempDir;
+    private readonly string _settingsLockName;
     private AppSettings _settings;
 
     public event EventHandler? AutoSaveIntervalChanged;
@@ -37,13 +39,13 @@ public class SettingsService : ISettingsService
         _fileSystem.CreateDirectory(appDataPath);
         _settingsPath = Path.Combine(appDataPath, "settings.json");
 
-        _tempDir = Path.Combine(appDataPath, "Temp");
-        _fileSystem.CreateDirectory(_tempDir);
+        var normalizedSettingsPath = Path.GetFullPath(_settingsPath).ToUpperInvariant();
+        var settingsPathHash = Convert.ToHexString(
+            SHA256.HashData(Encoding.UTF8.GetBytes(normalizedSettingsPath)));
+        _settingsLockName = $@"Local\FastEdit.Settings.{settingsPathHash}";
 
         _settings = LoadSettings();
     }
-
-    public string TempDirectory => _tempDir;
 
     public string ThemeName
     {
@@ -75,6 +77,12 @@ public class SettingsService : ISettingsService
     {
         get => _settings.ActiveTabIndex;
         set => _settings.ActiveTabIndex = value;
+    }
+
+    public string? ActiveSessionEntryId
+    {
+        get => _settings.ActiveSessionEntryId;
+        set => _settings.ActiveSessionEntryId = value;
     }
 
     public List<string> RecentFiles
@@ -236,26 +244,28 @@ public class SettingsService : ISettingsService
     public void Save()
     {
         var json = JsonSerializer.Serialize(_settings, SerializerOptions);
-        _fileSystem.WriteAllTextAtomic(_settingsPath, json);
-    }
-
-    public string GetTempFilePath(string fileName)
-    {
-        return Path.Combine(_tempDir, $"{Guid.NewGuid():N}_{fileName}");
-    }
-
-    public void CleanupTempFiles()
-    {
+        using var publicationLock = new Mutex(false, _settingsLockName);
+        var lockTaken = false;
         try
         {
-            foreach (var file in Directory.GetFiles(_tempDir))
+            try
             {
-                File.Delete(file);
+                lockTaken = publicationLock.WaitOne(TimeSpan.FromSeconds(10));
             }
+            catch (AbandonedMutexException)
+            {
+                lockTaken = true;
+            }
+
+            if (!lockTaken)
+                throw new IOException("Timed out waiting to publish FastEdit settings.");
+
+            _fileSystem.WriteAllTextAtomic(_settingsPath, json);
         }
-        catch
+        finally
         {
-            // Ignore cleanup errors
+            if (lockTaken)
+                publicationLock.ReleaseMutex();
         }
     }
 
@@ -265,6 +275,7 @@ public class SettingsService : ISettingsService
         public string? LastOpenedFolder { get; set; }
         public List<SessionFile> OpenFiles { get; set; } = new();
         public int ActiveTabIndex { get; set; }
+        public string? ActiveSessionEntryId { get; set; }
         public List<string> RecentFiles { get; set; } = new();
         public bool WordWrapEnabled { get; set; }
         public bool ShowWhitespace { get; set; }

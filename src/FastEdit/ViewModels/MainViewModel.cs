@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using FastEdit.Core.HexEngine;
 using FastEdit.Helpers;
 using FastEdit.Infrastructure;
 using FastEdit.Services.Interfaces;
@@ -12,6 +13,8 @@ namespace FastEdit.ViewModels;
 
 public partial class MainViewModel : ObservableObject
 {
+    private const int MaxPersistedBinaryModifications = 1_000_000;
+
     private readonly IFileService _fileService;
     private readonly IThemeService _themeService;
     private readonly ISettingsService _settingsService;
@@ -20,6 +23,10 @@ public partial class MainViewModel : ObservableObject
     private readonly IEditorTabFactory _tabFactory;
     private readonly IWorkspaceService _workspaceService;
     private readonly HashSet<EditorTabViewModel> _shutdownDiscardedTabs = new();
+    private readonly List<SessionFile> _unresolvedSessionFiles = new();
+    private string? _startupActiveSessionEntryId;
+
+    public bool HasUnresolvedSessionEntries => _unresolvedSessionFiles.Count > 0;
     private bool _isInitializing = true;
 
     [ObservableProperty]
@@ -949,39 +956,83 @@ public partial class MainViewModel : ObservableObject
         var openFiles = _settingsService.OpenFiles;
         if (openFiles == null || openFiles.Count == 0) return;
 
+        _unresolvedSessionFiles.Clear();
+        var activeSourceEntry = GetActiveSourceEntry(openFiles);
+        var usedEntryIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var sessionFile in openFiles)
-            await RestoreSessionFileAsync(sessionFile);
+        {
+            if (string.IsNullOrEmpty(sessionFile.EntryId) ||
+                !usedEntryIds.Add(sessionFile.EntryId))
+            {
+                sessionFile.EntryId = Guid.NewGuid().ToString("N");
+                usedEntryIds.Add(sessionFile.EntryId);
+            }
+        }
 
-        SelectRestoredActiveTab();
+        _startupActiveSessionEntryId = activeSourceEntry?.EntryId;
+        var restoredByEntryId = new Dictionary<string, EditorTabViewModel>();
+        foreach (var sessionFile in openFiles)
+        {
+            var restored = await RestoreSessionFileAsync(sessionFile);
+            if (restored == null)
+                _unresolvedSessionFiles.Add(sessionFile);
+            else
+                restoredByEntryId[sessionFile.EntryId] = restored;
+        }
+
+        SelectRestoredActiveTab(openFiles, activeSourceEntry, restoredByEntryId);
     }
 
-    private async Task RestoreSessionFileAsync(SessionFile sessionFile)
+    private async Task<EditorTabViewModel?> RestoreSessionFileAsync(SessionFile sessionFile)
     {
         try
         {
             if (sessionFile.IsUntitled)
-                await RestoreUntitledSessionFileAsync(sessionFile);
-            else
-                await RestoreExistingSessionFileAsync(sessionFile);
+                return await RestoreUntitledSessionFileAsync(sessionFile);
+            return await RestoreExistingSessionFileAsync(sessionFile);
         }
         catch (Exception ex)
         {
             Trace.TraceWarning("Failed to restore session file '{0}': {1}", sessionFile.FilePath, ex.Message);
+            return null;
         }
     }
 
-    private async Task RestoreUntitledSessionFileAsync(SessionFile sessionFile)
+    private async Task<EditorTabViewModel?> RestoreUntitledSessionFileAsync(SessionFile sessionFile)
     {
-        if (sessionFile.IsBinaryMode) return;
-
         var fileName = Path.GetFileName(sessionFile.FilePath);
-        if (Tabs.Any(t => string.IsNullOrEmpty(t.FilePath) && t.FileName == fileName))
-            return;
+        var existing = Tabs.FirstOrDefault(
+            tab => string.IsNullOrEmpty(tab.FilePath) && tab.FileName == fileName);
+        if (existing != null)
+            return existing;
+
+        if (sessionFile.IsBinaryMode)
+        {
+            if (sessionFile.BinaryContentBase64 == null)
+                return null;
+            var tab = _tabFactory.CreateUntitled(null);
+            tab.RestoreBinarySnapshot(
+                Convert.FromBase64String(sessionFile.BinaryContentBase64),
+                fileName,
+                filePath: null,
+                GetRestoredModifiedState(sessionFile, hasSnapshot: true));
+            ApplySessionPosition(tab, sessionFile);
+            Tabs.Add(tab);
+            return tab;
+        }
 
         var content = await GetSessionContentAsync(sessionFile);
-        var tab = _tabFactory.CreateUntitled(content);
-        tab.FileName = fileName;
-        Tabs.Add(tab);
+        var textTab = _tabFactory.CreateUntitled(content);
+        textTab.RestoreTextSnapshot(
+            content,
+            fileName,
+            filePath: null,
+            sessionFile.EncodingCodePage,
+            sessionFile.HasBom,
+            GetRestoredModifiedState(sessionFile, hasSnapshot: true));
+        ApplySessionPosition(textTab, sessionFile);
+        Tabs.Add(textTab);
+        return textTab;
     }
 
     private async Task<string> GetSessionContentAsync(SessionFile sessionFile)
@@ -992,25 +1043,71 @@ public partial class MainViewModel : ObservableObject
         return sessionFile.Content ?? string.Empty;
     }
 
-    private async Task RestoreExistingSessionFileAsync(SessionFile sessionFile)
+    private async Task<EditorTabViewModel?> RestoreExistingSessionFileAsync(SessionFile sessionFile)
     {
-        if (IsFileAlreadyOpen(sessionFile.FilePath))
-            return;
-
         var hasSnapshot = sessionFile.Content != null ||
+            sessionFile.BinaryContentBase64 != null ||
             (!string.IsNullOrEmpty(sessionFile.TempFilePath) &&
              _fileSystemService.FileExists(sessionFile.TempFilePath));
-        var snapshotContent = hasSnapshot && !sessionFile.IsBinaryMode
-            ? await GetSessionContentAsync(sessionFile)
-            : null;
+        var hasBinaryOverlay = sessionFile.BinaryBaseLength.HasValue ||
+            sessionFile.BinaryBaseSha256 != null ||
+            sessionFile.BinaryModifications != null;
+        var existing = FindOpenFile(sessionFile.FilePath);
+        if (existing != null)
+            return existing;
+
         EditorTabViewModel tab;
-        if (hasSnapshot && !sessionFile.IsBinaryMode)
+        if (sessionFile.IsBinaryMode && sessionFile.BinaryContentBase64 != null)
         {
-            tab = _tabFactory.CreateUntitled(snapshotContent);
-            tab.FileName = Path.GetFileName(sessionFile.FilePath);
-            tab.FilePath = sessionFile.FilePath;
-            tab.Content = snapshotContent ?? string.Empty;
-            tab.IsModified = true;
+            tab = _tabFactory.CreateUntitled(null);
+            tab.RestoreBinarySnapshot(
+                Convert.FromBase64String(sessionFile.BinaryContentBase64),
+                Path.GetFileName(sessionFile.FilePath),
+                sessionFile.FilePath,
+                GetRestoredModifiedState(sessionFile, hasSnapshot: true));
+        }
+        else if (sessionFile.IsBinaryMode && hasBinaryOverlay)
+        {
+            if (!sessionFile.BinaryBaseLength.HasValue ||
+                string.IsNullOrEmpty(sessionFile.BinaryBaseSha256) ||
+                sessionFile.BinaryModifications == null ||
+                sessionFile.BinaryModifications.Count > MaxPersistedBinaryModifications)
+            {
+                return null;
+            }
+
+            if (!_fileSystemService.FileExists(sessionFile.FilePath) ||
+                _fileSystemService.GetFileSize(sessionFile.FilePath) != sessionFile.BinaryBaseLength)
+            {
+                return null;
+            }
+
+            if (sessionFile.BinaryModifications.Any(modification =>
+                    modification.Offset < 0 ||
+                    modification.Offset >= sessionFile.BinaryBaseLength))
+            {
+                return null;
+            }
+
+            tab = _tabFactory.CreateUntitled(null);
+            tab.RestoreBinaryOverlay(
+                sessionFile.FilePath,
+                sessionFile.BinaryBaseLength.Value,
+                sessionFile.BinaryBaseSha256,
+                sessionFile.BinaryModifications,
+                GetRestoredModifiedState(sessionFile, hasSnapshot: true));
+        }
+        else if (hasSnapshot && !sessionFile.IsBinaryMode)
+        {
+            var content = await GetSessionContentAsync(sessionFile);
+            tab = _tabFactory.CreateUntitled(content);
+            tab.RestoreTextSnapshot(
+                content,
+                Path.GetFileName(sessionFile.FilePath),
+                sessionFile.FilePath,
+                sessionFile.EncodingCodePage,
+                sessionFile.HasBom,
+                GetRestoredModifiedState(sessionFile, hasSnapshot: true));
         }
         else if (_fileSystemService.FileExists(sessionFile.FilePath))
         {
@@ -1019,69 +1116,94 @@ public partial class MainViewModel : ObservableObject
         }
         else
         {
-            return;
+            return null;
         }
 
+        ApplySessionPosition(tab, sessionFile);
         Tabs.Add(tab);
+        return tab;
     }
 
-    private bool IsFileAlreadyOpen(string filePath)
+    private static bool GetRestoredModifiedState(SessionFile sessionFile, bool hasSnapshot)
+    {
+        // Older manifests did not persist this flag. Their payloads represented unsaved buffers.
+        return sessionFile.SnapshotVersion > 0 ? sessionFile.IsModified : hasSnapshot;
+    }
+
+    private EditorTabViewModel? FindOpenFile(string filePath)
     {
         var normalizedPath = NormalizeFilePath(filePath);
-        return Tabs.Any(t =>
+        return Tabs.FirstOrDefault(t =>
             !string.IsNullOrEmpty(t.FilePath) &&
             HasSameOpenIdentity(t.FilePath, normalizedPath));
     }
 
-    private void SelectRestoredActiveTab()
+    private SessionFile? GetActiveSourceEntry(IReadOnlyList<SessionFile> sourceEntries)
+    {
+        if (sourceEntries.Count == 0)
+            return null;
+
+        var sourceIndex = Math.Clamp(
+            _settingsService.ActiveTabIndex,
+            0,
+            sourceEntries.Count - 1);
+        var indexedEntry = sourceEntries[sourceIndex];
+        var activeEntryId = _settingsService.ActiveSessionEntryId;
+        if (string.IsNullOrEmpty(activeEntryId))
+            return indexedEntry;
+
+        if (indexedEntry.EntryId == activeEntryId)
+            return indexedEntry;
+
+        return sourceEntries.FirstOrDefault(entry => entry.EntryId == activeEntryId) ??
+            indexedEntry;
+    }
+
+    private void SelectRestoredActiveTab(
+        IReadOnlyList<SessionFile> sourceEntries,
+        SessionFile? activeSourceEntry,
+        IReadOnlyDictionary<string, EditorTabViewModel> restoredByEntryId)
     {
         if (Tabs.Count == 0)
             return;
 
-        var index = Math.Clamp(_settingsService.ActiveTabIndex, 0, Tabs.Count - 1);
-        SelectedTab = Tabs[index];
+        if (activeSourceEntry != null &&
+            restoredByEntryId.TryGetValue(activeSourceEntry.EntryId, out var restoredActive))
+        {
+            SelectedTab = restoredActive;
+        }
+        else if (activeSourceEntry != null)
+        {
+            var activeIndex = sourceEntries.ToList().IndexOf(activeSourceEntry);
+            var fallback = sourceEntries
+                .Skip(activeIndex + 1)
+                .Concat(sourceEntries.Take(activeIndex).Reverse())
+                .Select(entry => restoredByEntryId.GetValueOrDefault(entry.EntryId))
+                .FirstOrDefault(tab => tab != null);
+            SelectedTab = fallback ?? SelectedTab ?? Tabs[0];
+        }
+        else if (SelectedTab == null)
+        {
+            SelectedTab = Tabs[0];
+        }
     }
 
-    private void CleanupTempFiles(IReadOnlyCollection<string> preservedPaths)
+    private static void ApplySessionPosition(
+        EditorTabViewModel tab,
+        SessionFile sessionFile)
     {
-        var tempDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "FastEdit", "Temp");
-
-        if (_fileSystemService.DirectoryExists(tempDir))
-        {
-            try
-            {
-                foreach (var file in _fileSystemService.GetFiles(tempDir, "*.tmp"))
-                {
-                    if (preservedPaths.Contains(file, StringComparer.OrdinalIgnoreCase))
-                        continue;
-
-                    try
-                    {
-                        _fileSystemService.DeleteFile(file);
-                    }
-                    catch (Exception ex)
-                    {
-                        Trace.TraceWarning("Failed to delete temp session file '{0}': {1}", file, ex.Message);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Trace.TraceWarning("Failed to clean temp session files: {0}", ex.Message);
-            }
-        }
+        tab.CursorOffset = sessionFile.CursorOffset;
+        tab.ScrollOffset = sessionFile.ScrollOffset;
+        tab.HexOffset = sessionFile.HexOffset;
+        tab.HexScrollOffset = sessionFile.HexScrollOffset;
+        tab.BytesPerRow = sessionFile.BytesPerRow;
     }
 
     public void SaveSession()
     {
         var sessionFiles = new List<SessionFile>();
         var persistedActiveTabIndex = 0;
-        var tempDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "FastEdit", "Temp");
-        _fileSystemService.CreateDirectory(tempDir);
+        string? activeEntryId = null;
 
         foreach (var tab in Tabs)
         {
@@ -1093,44 +1215,71 @@ public partial class MainViewModel : ObservableObject
 
             var sessionFile = new SessionFile
             {
+                EntryId = tab.AutoSaveIdentity,
+                SnapshotVersion = 1,
                 FilePath = string.IsNullOrEmpty(tab.FilePath) ? tab.FileName : tab.FilePath,
                 IsUntitled = string.IsNullOrEmpty(tab.FilePath),
                 IsBinaryMode = tab.Mode == FileOpenMode.Binary,
+                IsModified = tab.IsModified,
+                EncodingCodePage = tab.FileEncoding.CodePage,
+                HasBom = tab.HasBom,
                 CursorOffset = tab.CursorOffset,
-                ScrollOffset = tab.ScrollOffset
+                ScrollOffset = tab.ScrollOffset,
+                HexOffset = tab.HexOffset,
+                HexScrollOffset = tab.HexScrollOffset,
+                BytesPerRow = tab.BytesPerRow
             };
 
-            if (tab.Mode == FileOpenMode.Text &&
-                (sessionFile.IsUntitled || tab.IsModified))
+            if (tab.Mode == FileOpenMode.Binary)
             {
-                var tempPath = Path.Combine(tempDir, $"{Guid.NewGuid():N}_{tab.FileName}.tmp");
-                try
+                var buffer = tab.ByteBuffer ??
+                    throw new InvalidOperationException(
+                        $"Binary tab '{tab.FileName}' has no active byte buffer.");
+                if (!buffer.IsSnapshotBacked && !string.IsNullOrEmpty(tab.FilePath))
                 {
-                    _fileSystemService.WriteAllTextAtomic(tempPath, tab.Content);
-                    sessionFile.TempFilePath = tempPath;
+                    var modifications = buffer.GetModifications();
+                    if (modifications.Count > MaxPersistedBinaryModifications)
+                    {
+                        throw new InvalidOperationException(
+                            $"Binary tab '{tab.FileName}' has too many unsaved byte edits to snapshot safely.");
+                    }
+
+                    sessionFile.BinaryBaseLength = buffer.Length;
+                    sessionFile.BinaryBaseSha256 = buffer.ComputeBaseSha256();
+                    sessionFile.BinaryModifications = modifications
+                        .Select(modification => new BinaryModification
+                        {
+                            Offset = modification.Key,
+                            Value = modification.Value
+                        })
+                        .ToList();
                 }
-                catch (Exception ex)
+                else
                 {
-                    Trace.TraceWarning(
-                        "Failed to write temp session file '{0}'; storing content in settings instead: {1}",
-                        tempPath,
-                        ex.Message);
-                    sessionFile.Content = tab.Content;
+                    sessionFile.BinaryContentBase64 = Convert.ToBase64String(
+                        buffer.CreateSnapshot());
                 }
             }
+            else if (tab.Mode == FileOpenMode.Text)
+                sessionFile.Content = tab.Content;
 
             sessionFiles.Add(sessionFile);
+            if (tab == SelectedTab)
+                activeEntryId = sessionFile.EntryId;
         }
+
+        var currentEntryIds = sessionFiles
+            .Select(file => file.EntryId)
+            .ToHashSet(StringComparer.Ordinal);
+        sessionFiles.AddRange(_unresolvedSessionFiles.Where(
+            file => !currentEntryIds.Contains(file.EntryId)));
 
         _settingsService.OpenFiles = sessionFiles;
         _settingsService.ActiveTabIndex = persistedActiveTabIndex;
+        _settingsService.ActiveSessionEntryId = activeEntryId ??
+            _startupActiveSessionEntryId ??
+            _settingsService.ActiveSessionEntryId;
         _settingsService.Save();
-        CleanupTempFiles(
-            sessionFiles
-                .Select(file => file.TempFilePath)
-                .Where(path => !string.IsNullOrEmpty(path))
-                .Cast<string>()
-                .ToArray());
     }
 
     private async Task UpdateGitBranchAsync(string? filePath)
