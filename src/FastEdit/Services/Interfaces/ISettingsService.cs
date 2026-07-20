@@ -41,6 +41,8 @@ public class SessionFile
     public List<BinaryModification>? BinaryModifications { get; set; }
     public int EncodingCodePage { get; set; } = 65001;
     public bool HasBom { get; set; }
+    public long? TextBaseLength { get; set; }
+    public string? TextBaseSha256 { get; set; }
     public int SnapshotVersion { get; set; }
     public bool IsModified { get; set; }
     public int CursorOffset { get; set; }

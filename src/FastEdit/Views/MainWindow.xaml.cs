@@ -256,7 +256,8 @@ public partial class MainWindow : FluentWindow
         var result = await _lifecycleCoordinator.CloseAsync(
             () => IsEnabled = false,
             PersistSession,
-            TimeSpan.FromSeconds(5));
+            TimeSpan.FromSeconds(5),
+            allowCloseBeforeStartup: !IsLoaded);
 
         switch (result.Outcome)
         {
@@ -300,10 +301,13 @@ public partial class MainWindow : FluentWindow
 
     private void SaveEditorState()
     {
-        // Save cursor/scroll offsets from active editors before session save
-        var editorHost = FindActiveEditorHost();
-        editorHost?.SaveStateToViewModel();
-        FindActiveHexEditor()?.SaveStateToViewModel();
+        CaptureEditorStates(this);
+    }
+
+    internal static void CaptureEditorStates(DependencyObject root)
+    {
+        foreach (var editorHost in FindVisualChildren<EditorHost>(root))
+            editorHost.SaveStateToViewModel();
     }
 
     private void Exit_Click(object sender, RoutedEventArgs e)
@@ -661,6 +665,20 @@ public partial class MainWindow : FluentWindow
             if (found != null) return found;
         }
         return null;
+    }
+
+    private static IEnumerable<T> FindVisualChildren<T>(
+        DependencyObject parent)
+        where T : UIElement
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, i);
+            if (child is T result && result.Visibility == Visibility.Visible)
+                yield return result;
+            foreach (var descendant in FindVisualChildren<T>(child))
+                yield return descendant;
+        }
     }
 
     private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)

@@ -1,5 +1,5 @@
-using System.Windows.Threading;
 using System.Windows;
+using System.Windows.Threading;
 using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
 using FastEdit.Views.Controls;
@@ -12,14 +12,8 @@ public class HexEditorControlTests
     [Fact]
     public async Task RestoredSelectionAndScrollAreAppliedToControlState()
     {
-        await RunOnStaThreadAsync(() =>
+        await WpfTestHost.RunAsync(() =>
         {
-            var application = new Application();
-            application.Resources.MergedDictionaries.Add(new ResourceDictionary
-            {
-                Source = new Uri(
-                    "pack://application:,,,/FastEdit;component/Themes/ThemeResources.xaml")
-            });
             var tab = new EditorTabViewModel(
                 Mock.Of<IFileService>(),
                 Mock.Of<IFileSystemService>(),
@@ -46,33 +40,52 @@ public class HexEditorControlTests
         });
     }
 
-    private static Task RunOnStaThreadAsync(Func<Task> action)
+    [Fact]
+    public async Task UnloadCapturesBinaryStateBeforeReloadRestoresIt()
     {
-        var completion = new TaskCompletionSource(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() =>
+        await WpfTestHost.RunAsync(async () =>
         {
-            var dispatcher = Dispatcher.CurrentDispatcher;
-            dispatcher.BeginInvoke(new Action(async () =>
+            var tab = new EditorTabViewModel(
+                Mock.Of<IFileService>(),
+                Mock.Of<IFileSystemService>(),
+                Mock.Of<IDialogService>());
+            tab.RestoreBinarySnapshot(
+                new byte[] { 1, 2, 3, 4 },
+                "binary.bin",
+                filePath: null,
+                isModified: true);
+            tab.HexOffset = 2;
+            var control = new HexEditorControl { DataContext = tab };
+            var window = new Window
             {
-                try
-                {
-                    await action();
-                    completion.TrySetResult();
-                }
-                catch (Exception ex)
-                {
-                    completion.TrySetException(ex);
-                }
-                finally
-                {
-                    dispatcher.BeginInvokeShutdown(DispatcherPriority.Background);
-                }
-            }));
-            Dispatcher.Run();
+                Content = control,
+                ShowInTaskbar = false,
+                WindowStyle = WindowStyle.None
+            };
+            window.Show();
+            await control.Dispatcher.InvokeAsync(
+                () => { },
+                DispatcherPriority.ApplicationIdle);
+            tab.HexOffset = -1;
+
+            window.Content = null;
+            await control.Dispatcher.InvokeAsync(
+                () => { },
+                DispatcherPriority.ApplicationIdle);
+
+            Assert.Equal(2, tab.HexOffset);
+            window.Content = control;
+            await control.Dispatcher.InvokeAsync(
+                () => { },
+                DispatcherPriority.ApplicationIdle);
+            tab.HexOffset = -1;
+            control.SaveStateToViewModel();
+            Assert.Equal(2, tab.HexOffset);
+
+            control.DataContext = null;
+            window.Close();
+            tab.Dispose();
         });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        return completion.Task.WaitAsync(TimeSpan.FromSeconds(10));
     }
+
 }

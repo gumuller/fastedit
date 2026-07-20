@@ -142,7 +142,8 @@ public sealed class MainWindowLifecycleCoordinator
     public async Task<MainWindowCloseResult> CloseAsync(
         Action beginPersistence,
         Action persistSession,
-        TimeSpan terminalShutdownTimeout)
+        TimeSpan terminalShutdownTimeout,
+        bool allowCloseBeforeStartup = false)
     {
         ArgumentNullException.ThrowIfNull(beginPersistence);
         ArgumentNullException.ThrowIfNull(persistSession);
@@ -155,13 +156,38 @@ public sealed class MainWindowLifecycleCoordinator
         if (previousState == 2)
             return new MainWindowCloseResult(MainWindowCloseOutcome.ReadyToClose);
 
+        var shouldPersistSession = true;
         try
         {
             Task<MainWindowStartupResult>? startupTask;
             lock (_startupLock)
                 startupTask = _startupTask;
-            if (startupTask != null)
-                await startupTask;
+            if (startupTask == null)
+            {
+                if (!allowCloseBeforeStartup)
+                {
+                    Volatile.Write(ref _closeState, 0);
+                    return new MainWindowCloseResult(
+                        MainWindowCloseOutcome.StartupFailed,
+                        new InvalidOperationException(
+                            "FastEdit cannot replace the shutdown session before startup has begun."));
+                }
+
+                shouldPersistSession = false;
+            }
+            else
+            {
+                var startupResult = await startupTask;
+                if (startupResult.Outcome == MainWindowStartupOutcome.Failure)
+                {
+                    throw startupResult.Issues
+                        .Select(issue => issue.Exception)
+                        .FirstOrDefault(exception => exception != null) ??
+                        new InvalidOperationException(
+                            startupResult.Issues.FirstOrDefault()?.Message ??
+                            "FastEdit startup did not complete safely.");
+                }
+            }
         }
         catch (Exception ex)
         {
@@ -173,8 +199,11 @@ public sealed class MainWindowLifecycleCoordinator
 
         try
         {
-            beginPersistence();
-            persistSession();
+            if (shouldPersistSession)
+            {
+                beginPersistence();
+                persistSession();
+            }
         }
         catch (Exception ex)
         {

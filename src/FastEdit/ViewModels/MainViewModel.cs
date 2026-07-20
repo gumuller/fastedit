@@ -1,6 +1,9 @@
+using System.Buffers;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using FastEdit.Core.HexEngine;
@@ -24,6 +27,9 @@ public partial class MainViewModel : ObservableObject
     private readonly IWorkspaceService _workspaceService;
     private readonly HashSet<EditorTabViewModel> _shutdownDiscardedTabs = new();
     private readonly List<SessionFile> _unresolvedSessionFiles = new();
+    private readonly Dictionary<string, EditorTabViewModel> _sessionTabsByEntryId =
+        new(StringComparer.Ordinal);
+    private readonly Dictionary<EditorTabViewModel, string> _sessionEntryIds = new();
     private string? _startupActiveSessionEntryId;
 
     public bool HasUnresolvedSessionEntries => _unresolvedSessionFiles.Count > 0;
@@ -973,11 +979,28 @@ public partial class MainViewModel : ObservableObject
         var restoredByEntryId = new Dictionary<string, EditorTabViewModel>();
         foreach (var sessionFile in openFiles)
         {
-            var restored = await RestoreSessionFileAsync(sessionFile);
+            EditorTabViewModel? restored;
+            if (_sessionTabsByEntryId.TryGetValue(sessionFile.EntryId, out var existing) &&
+                Tabs.Contains(existing) &&
+                await IsLogicalSessionMatchAsync(existing, sessionFile))
+            {
+                restored = existing;
+            }
+            else
+            {
+                if (existing != null)
+                    sessionFile.EntryId = Guid.NewGuid().ToString("N");
+                restored = await RestoreSessionFileAsync(sessionFile);
+            }
+
             if (restored == null)
                 _unresolvedSessionFiles.Add(sessionFile);
             else
+            {
                 restoredByEntryId[sessionFile.EntryId] = restored;
+                _sessionTabsByEntryId[sessionFile.EntryId] = restored;
+                _sessionEntryIds[restored] = sessionFile.EntryId;
+            }
         }
 
         SelectRestoredActiveTab(openFiles, activeSourceEntry, restoredByEntryId);
@@ -1001,11 +1024,6 @@ public partial class MainViewModel : ObservableObject
     private async Task<EditorTabViewModel?> RestoreUntitledSessionFileAsync(SessionFile sessionFile)
     {
         var fileName = Path.GetFileName(sessionFile.FilePath);
-        var existing = Tabs.FirstOrDefault(
-            tab => string.IsNullOrEmpty(tab.FilePath) && tab.FileName == fileName);
-        if (existing != null)
-            return existing;
-
         if (sessionFile.IsBinaryMode)
         {
             if (sessionFile.BinaryContentBase64 == null)
@@ -1052,10 +1070,6 @@ public partial class MainViewModel : ObservableObject
         var hasBinaryOverlay = sessionFile.BinaryBaseLength.HasValue ||
             sessionFile.BinaryBaseSha256 != null ||
             sessionFile.BinaryModifications != null;
-        var existing = FindOpenFile(sessionFile.FilePath);
-        if (existing != null)
-            return existing;
-
         EditorTabViewModel tab;
         if (sessionFile.IsBinaryMode && sessionFile.BinaryContentBase64 != null)
         {
@@ -1100,6 +1114,9 @@ public partial class MainViewModel : ObservableObject
         else if (hasSnapshot && !sessionFile.IsBinaryMode)
         {
             var content = await GetSessionContentAsync(sessionFile);
+            var isModified = GetRestoredModifiedState(sessionFile, hasSnapshot: true);
+            if (!isModified)
+                isModified = !MatchesTextBaseIdentity(sessionFile);
             tab = _tabFactory.CreateUntitled(content);
             tab.RestoreTextSnapshot(
                 content,
@@ -1107,7 +1124,7 @@ public partial class MainViewModel : ObservableObject
                 sessionFile.FilePath,
                 sessionFile.EncodingCodePage,
                 sessionFile.HasBom,
-                GetRestoredModifiedState(sessionFile, hasSnapshot: true));
+                isModified);
         }
         else if (_fileSystemService.FileExists(sessionFile.FilePath))
         {
@@ -1130,12 +1147,100 @@ public partial class MainViewModel : ObservableObject
         return sessionFile.SnapshotVersion > 0 ? sessionFile.IsModified : hasSnapshot;
     }
 
-    private EditorTabViewModel? FindOpenFile(string filePath)
+    private async Task<bool> IsLogicalSessionMatchAsync(
+        EditorTabViewModel tab,
+        SessionFile sessionFile)
     {
-        var normalizedPath = NormalizeFilePath(filePath);
-        return Tabs.FirstOrDefault(t =>
-            !string.IsNullOrEmpty(t.FilePath) &&
-            HasSameOpenIdentity(t.FilePath, normalizedPath));
+        var expectedModified = GetRestoredModifiedState(
+            sessionFile,
+            hasSnapshot: true);
+        if (!sessionFile.IsBinaryMode &&
+            !sessionFile.IsUntitled &&
+            !expectedModified &&
+            !MatchesTextBaseIdentity(sessionFile))
+        {
+            expectedModified = true;
+        }
+
+        var hasSameLocation = sessionFile.IsUntitled
+            ? string.IsNullOrEmpty(tab.FilePath) &&
+              tab.FileName == Path.GetFileName(sessionFile.FilePath)
+            : !string.IsNullOrEmpty(tab.FilePath) &&
+              HasSameOpenIdentity(tab.FilePath, NormalizeFilePath(sessionFile.FilePath));
+        if (!hasSameLocation ||
+            tab.Mode == FileOpenMode.Binary != sessionFile.IsBinaryMode ||
+            tab.IsModified != expectedModified ||
+            tab.CursorOffset != sessionFile.CursorOffset ||
+            tab.ScrollOffset != sessionFile.ScrollOffset ||
+            tab.HexOffset != sessionFile.HexOffset ||
+            tab.HexScrollOffset != sessionFile.HexScrollOffset ||
+            tab.BytesPerRow != sessionFile.BytesPerRow)
+        {
+            return false;
+        }
+
+        if (!sessionFile.IsBinaryMode)
+        {
+            return tab.Content == await GetSessionContentAsync(sessionFile) &&
+                tab.FileEncoding.CodePage == sessionFile.EncodingCodePage &&
+                tab.HasBom == sessionFile.HasBom;
+        }
+
+        if (sessionFile.BinaryContentBase64 != null)
+        {
+            return tab.ByteBuffer != null &&
+                tab.ByteBuffer.CreateSnapshot().AsSpan().SequenceEqual(
+                    Convert.FromBase64String(sessionFile.BinaryContentBase64));
+        }
+
+        if (sessionFile.BinaryModifications == null || tab.ByteBuffer == null)
+            return false;
+        var modifications = tab.ByteBuffer.GetModifications();
+        return sessionFile.BinaryBaseLength == tab.ByteBuffer.Length &&
+            sessionFile.BinaryBaseSha256 == tab.ByteBuffer.ComputeBaseSha256() &&
+            modifications.Count == sessionFile.BinaryModifications.Count &&
+            modifications.Zip(
+                sessionFile.BinaryModifications,
+                (actual, expected) =>
+                    actual.Key == expected.Offset &&
+                    actual.Value == expected.Value)
+                .All(matches => matches);
+    }
+
+    private bool MatchesTextBaseIdentity(SessionFile sessionFile)
+    {
+        if (!sessionFile.TextBaseLength.HasValue ||
+            string.IsNullOrEmpty(sessionFile.TextBaseSha256) ||
+            !_fileSystemService.FileExists(sessionFile.FilePath))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var stream = _fileSystemService.OpenRead(sessionFile.FilePath);
+            if (stream.Length != sessionFile.TextBaseLength.Value ||
+                !string.Equals(
+                    Convert.ToHexString(SHA256.HashData(stream)),
+                    sessionFile.TextBaseSha256,
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            return string.Equals(
+                ComputeTextSnapshotSha256(sessionFile),
+                sessionFile.TextBaseSha256,
+                StringComparison.Ordinal);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     private SessionFile? GetActiveSourceEntry(IReadOnlyList<SessionFile> sourceEntries)
@@ -1215,7 +1320,9 @@ public partial class MainViewModel : ObservableObject
 
             var sessionFile = new SessionFile
             {
-                EntryId = tab.AutoSaveIdentity,
+                EntryId = _sessionEntryIds.GetValueOrDefault(
+                    tab,
+                    tab.AutoSaveIdentity),
                 SnapshotVersion = 1,
                 FilePath = string.IsNullOrEmpty(tab.FilePath) ? tab.FileName : tab.FilePath,
                 IsUntitled = string.IsNullOrEmpty(tab.FilePath),
@@ -1261,7 +1368,10 @@ public partial class MainViewModel : ObservableObject
                 }
             }
             else if (tab.Mode == FileOpenMode.Text)
+            {
                 sessionFile.Content = tab.Content;
+                CaptureTextBaseIdentity(sessionFile, tab.FilePath);
+            }
 
             sessionFiles.Add(sessionFile);
             if (tab == SelectedTab)
@@ -1280,6 +1390,88 @@ public partial class MainViewModel : ObservableObject
             _startupActiveSessionEntryId ??
             _settingsService.ActiveSessionEntryId;
         _settingsService.Save();
+    }
+
+    private void CaptureTextBaseIdentity(SessionFile sessionFile, string filePath)
+    {
+        if (string.IsNullOrEmpty(filePath) ||
+            !_fileSystemService.FileExists(filePath))
+        {
+            if (!string.IsNullOrEmpty(filePath))
+                sessionFile.IsModified = true;
+            return;
+        }
+
+        try
+        {
+            using var stream = _fileSystemService.OpenRead(filePath);
+            sessionFile.TextBaseLength = stream.Length;
+            sessionFile.TextBaseSha256 =
+                Convert.ToHexString(SHA256.HashData(stream));
+            if (!sessionFile.IsModified &&
+                !string.Equals(
+                    ComputeTextSnapshotSha256(sessionFile),
+                    sessionFile.TextBaseSha256,
+                    StringComparison.Ordinal))
+            {
+                sessionFile.IsModified = true;
+            }
+        }
+        catch (IOException ex)
+        {
+            Trace.TraceWarning(
+                "Could not capture text base identity for '{0}': {1}",
+                filePath,
+                ex.Message);
+            sessionFile.IsModified = true;
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            Trace.TraceWarning(
+                "Could not capture text base identity for '{0}': {1}",
+                filePath,
+                ex.Message);
+            sessionFile.IsModified = true;
+        }
+    }
+
+    private static string ComputeTextSnapshotSha256(SessionFile sessionFile)
+    {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        var encoding = Encoding.GetEncoding(sessionFile.EncodingCodePage);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        if (sessionFile.HasBom)
+            hash.AppendData(encoding.GetPreamble());
+
+        const int charBufferSize = 4096;
+        var byteBuffer = ArrayPool<byte>.Shared.Rent(
+            encoding.GetMaxByteCount(charBufferSize));
+        try
+        {
+            var content = sessionFile.Content ?? string.Empty;
+            var encoder = encoding.GetEncoder();
+            var offset = 0;
+            while (offset < content.Length)
+            {
+                var charCount = Math.Min(charBufferSize, content.Length - offset);
+                var flush = offset + charCount == content.Length;
+                encoder.Convert(
+                    content.AsSpan(offset, charCount),
+                    byteBuffer,
+                    flush,
+                    out var charsUsed,
+                    out var bytesUsed,
+                    out _);
+                hash.AppendData(byteBuffer.AsSpan(0, bytesUsed));
+                offset += charsUsed;
+            }
+
+            return Convert.ToHexString(hash.GetHashAndReset());
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(byteBuffer);
+        }
     }
 
     private async Task UpdateGitBranchAsync(string? filePath)

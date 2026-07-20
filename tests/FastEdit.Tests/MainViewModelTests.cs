@@ -947,6 +947,41 @@ public class MainViewModelTests
     }
 
     [Fact]
+    public async Task SaveSession_UnresolvedEntrySurvivesLiveTabWithSameNamedPath()
+    {
+        const string path = @"C:\shared.txt";
+        var unresolved = new SessionFile
+        {
+            EntryId = "unresolved",
+            SnapshotVersion = 1,
+            FilePath = path,
+            BinaryContentBase64 = "invalid-base64-payload",
+            IsBinaryMode = true,
+            IsModified = true
+        };
+        _settingsService.Setup(service => service.OpenFiles)
+            .Returns(new List<SessionFile> { unresolved });
+        await _sut.RestoreSessionAsync();
+        var live = CreateMockTab("shared.txt", path, isModified: true);
+        live.SetContentBaseline("live", isModified: true);
+        _sut.Tabs.Add(live);
+
+        _sut.SaveSession();
+
+        _settingsService.VerifySet(service =>
+            service.OpenFiles = It.Is<List<SessionFile>>(files =>
+                files.Count == 2 &&
+                files.Any(file =>
+                    file.EntryId == "unresolved" &&
+                    file.FilePath == path &&
+                    file.BinaryContentBase64 == "invalid-base64-payload") &&
+                files.Any(file =>
+                    file.EntryId != "unresolved" &&
+                    file.FilePath == path &&
+                    file.Content == "live")));
+    }
+
+    [Fact]
     public async Task SaveSession_ExplicitlyDiscardedUntitledTab_IsExcluded()
     {
         var tab = CreateMockTab("Untitled-1");
@@ -1531,7 +1566,7 @@ public class MainViewModelTests
     }
 
     [Fact]
-    public async Task RestoreSession_DuplicateNamedSnapshot_ReusesExistingTabAndMapsActiveEntry()
+    public async Task RestoreSession_DistinctNamedSnapshotsWithSamePathBothSurvive()
     {
         const string path = @"C:\notes.txt";
         var first = new SessionFile
@@ -1553,14 +1588,274 @@ public class MainViewModelTests
         _settingsService.Setup(service => service.OpenFiles)
             .Returns(new List<SessionFile> { first, duplicate });
         _settingsService.Setup(service => service.ActiveSessionEntryId).Returns("duplicate");
-        var tab = CreateMockTab("notes.txt");
-        _tabFactory.Setup(factory => factory.CreateUntitled("first")).Returns(tab);
+        var firstTab = CreateMockTab("notes.txt");
+        var secondTab = CreateMockTab("notes.txt");
+        _tabFactory.Setup(factory => factory.CreateUntitled("first")).Returns(firstTab);
+        _tabFactory.Setup(factory => factory.CreateUntitled("duplicate")).Returns(secondTab);
+
+        await _sut.RestoreSessionAsync();
+        _sut.SaveSession();
+
+        Assert.Equal(new[] { firstTab, secondTab }, _sut.Tabs);
+        Assert.Same(secondTab, _sut.SelectedTab);
+        _settingsService.VerifySet(service =>
+            service.OpenFiles = It.Is<List<SessionFile>>(files =>
+                files.Count == 2 &&
+                files[0].EntryId == "first" &&
+                files[0].Content == "first" &&
+                files[1].EntryId == "duplicate" &&
+                files[1].Content == "duplicate"));
+    }
+
+    [Fact]
+    public async Task RestoreSession_DistinctSameNameUntitledEntriesBothSurvive()
+    {
+        var first = new SessionFile
+        {
+            EntryId = "first",
+            SnapshotVersion = 1,
+            FilePath = "Untitled-1",
+            IsUntitled = true,
+            Content = "one",
+            IsModified = true
+        };
+        var second = new SessionFile
+        {
+            EntryId = "second",
+            SnapshotVersion = 1,
+            FilePath = "Untitled-1",
+            IsUntitled = true,
+            Content = "two",
+            IsModified = true
+        };
+        _settingsService.Setup(service => service.OpenFiles)
+            .Returns(new List<SessionFile> { first, second });
+        var firstTab = CreateMockTab("Untitled-1");
+        var secondTab = CreateMockTab("Untitled-1");
+        _tabFactory.Setup(factory => factory.CreateUntitled("one")).Returns(firstTab);
+        _tabFactory.Setup(factory => factory.CreateUntitled("two")).Returns(secondTab);
 
         await _sut.RestoreSessionAsync();
 
+        Assert.Equal(new[] { firstTab, secondTab }, _sut.Tabs);
+        Assert.Equal("one", firstTab.Content);
+        Assert.Equal("two", secondTab.Content);
+    }
+
+    [Fact]
+    public async Task RestoreSession_CleanNamedSnapshotWithChangedBaseBecomesModified()
+    {
+        const string path = @"C:\notes.txt";
+        var sessionFile = new SessionFile
+        {
+            EntryId = "clean",
+            SnapshotVersion = 1,
+            FilePath = path,
+            Content = "snapshot",
+            IsModified = false,
+            TextBaseLength = 4,
+            TextBaseSha256 = new string('0', 64)
+        };
+        _settingsService.Setup(service => service.OpenFiles)
+            .Returns(new List<SessionFile> { sessionFile });
+        _fileSystemService.Setup(service => service.FileExists(path)).Returns(true);
+        _fileSystemService.Setup(service => service.OpenRead(path))
+            .Returns(() => new MemoryStream("disk"u8.ToArray()));
+        var tab = CreateMockTab("notes.txt");
+        _tabFactory.Setup(factory => factory.CreateUntitled("snapshot")).Returns(tab);
+
+        await _sut.RestoreSessionAsync();
+
+        Assert.True(Assert.Single(_sut.Tabs).IsModified);
+    }
+
+    [Fact]
+    public async Task RestoreSession_CleanNamedSnapshotWithMatchingBaseRemainsClean()
+    {
+        const string path = @"C:\notes.txt";
+        var diskBytes = "disk"u8.ToArray();
+        var sessionFile = new SessionFile
+        {
+            EntryId = "clean",
+            SnapshotVersion = 1,
+            FilePath = path,
+            Content = "disk",
+            IsModified = false,
+            TextBaseLength = diskBytes.LongLength,
+            TextBaseSha256 = Convert.ToHexString(SHA256.HashData(diskBytes))
+        };
+        _settingsService.Setup(service => service.OpenFiles)
+            .Returns(new List<SessionFile> { sessionFile });
+        _fileSystemService.Setup(service => service.FileExists(path)).Returns(true);
+        _fileSystemService.Setup(service => service.OpenRead(path))
+            .Returns(() => new MemoryStream(diskBytes));
+        var tab = CreateMockTab("notes.txt", isModified: true);
+        _tabFactory.Setup(factory => factory.CreateUntitled("disk")).Returns(tab);
+
+        await _sut.RestoreSessionAsync();
+
+        Assert.False(Assert.Single(_sut.Tabs).IsModified);
+    }
+
+    [Fact]
+    public async Task RestoreSession_CleanNamedSnapshotWithStalePayloadBecomesModified()
+    {
+        const string path = @"C:\notes.txt";
+        var diskBytes = "disk"u8.ToArray();
+        var sessionFile = new SessionFile
+        {
+            EntryId = "clean",
+            SnapshotVersion = 1,
+            FilePath = path,
+            Content = "stale snapshot",
+            IsModified = false,
+            TextBaseLength = diskBytes.LongLength,
+            TextBaseSha256 = Convert.ToHexString(SHA256.HashData(diskBytes))
+        };
+        _settingsService.Setup(service => service.OpenFiles)
+            .Returns(new List<SessionFile> { sessionFile });
+        _fileSystemService.Setup(service => service.FileExists(path)).Returns(true);
+        _fileSystemService.Setup(service => service.OpenRead(path))
+            .Returns(() => new MemoryStream(diskBytes));
+        var tab = CreateMockTab("notes.txt");
+        _tabFactory.Setup(factory => factory.CreateUntitled("stale snapshot"))
+            .Returns(tab);
+
+        await _sut.RestoreSessionAsync();
+
+        Assert.True(Assert.Single(_sut.Tabs).IsModified);
+    }
+
+    [Fact]
+    public async Task RestoreSession_CleanNamedSnapshotWithMissingBaseBecomesModified()
+    {
+        const string path = @"C:\missing-notes.txt";
+        var sessionFile = new SessionFile
+        {
+            EntryId = "clean",
+            SnapshotVersion = 1,
+            FilePath = path,
+            Content = "snapshot",
+            IsModified = false,
+            TextBaseLength = 8,
+            TextBaseSha256 = new string('A', 64)
+        };
+        _settingsService.Setup(service => service.OpenFiles)
+            .Returns(new List<SessionFile> { sessionFile });
+        _fileSystemService.Setup(service => service.FileExists(path)).Returns(false);
+        var tab = CreateMockTab("missing-notes.txt");
+        _tabFactory.Setup(factory => factory.CreateUntitled("snapshot")).Returns(tab);
+
+        await _sut.RestoreSessionAsync();
+
+        Assert.True(Assert.Single(_sut.Tabs).IsModified);
+    }
+
+    [Fact]
+    public async Task RestoreSession_RepeatedStableIdRequiresExactPayloadMatch()
+    {
+        List<SessionFile> source =
+        [
+            new()
+            {
+                EntryId = "stable",
+                SnapshotVersion = 1,
+                FilePath = "Untitled-1",
+                IsUntitled = true,
+                Content = "first",
+                IsModified = true
+            }
+        ];
+        _settingsService.Setup(service => service.OpenFiles).Returns(() => source);
+        var firstTab = CreateMockTab("Untitled-1");
+        var secondTab = CreateMockTab("Untitled-1");
+        _tabFactory.Setup(factory => factory.CreateUntitled("first")).Returns(firstTab);
+        _tabFactory.Setup(factory => factory.CreateUntitled("second")).Returns(secondTab);
+        await _sut.RestoreSessionAsync();
+        source =
+        [
+            new()
+            {
+                EntryId = "stable",
+                SnapshotVersion = 1,
+                FilePath = "Untitled-1",
+                IsUntitled = true,
+                Content = "second",
+                IsModified = true
+            }
+        ];
+
+        await _sut.RestoreSessionAsync();
+
+        Assert.Equal(new[] { firstTab, secondTab }, _sut.Tabs);
+        Assert.NotEqual("stable", source[0].EntryId);
+    }
+
+    [Fact]
+    public async Task RestoreSession_RepeatedExactStableEntryReusesTab()
+    {
+        var sessionFile = new SessionFile
+        {
+            EntryId = "stable",
+            SnapshotVersion = 1,
+            FilePath = "Untitled-1",
+            IsUntitled = true,
+            Content = "same",
+            IsModified = true
+        };
+        _settingsService.Setup(service => service.OpenFiles)
+            .Returns(new List<SessionFile> { sessionFile });
+        var tab = CreateMockTab("Untitled-1");
+        _tabFactory.Setup(factory => factory.CreateUntitled("same")).Returns(tab);
+
+        await _sut.RestoreSessionAsync();
+        await _sut.RestoreSessionAsync();
+
         Assert.Same(tab, Assert.Single(_sut.Tabs));
-        Assert.Same(tab, _sut.SelectedTab);
-        _tabFactory.Verify(factory => factory.CreateUntitled("duplicate"), Times.Never);
+        _tabFactory.Verify(factory => factory.CreateUntitled("same"), Times.Once);
+    }
+
+    [Fact]
+    public void SaveSession_CleanNamedTextCapturesBaseIdentity()
+    {
+        const string path = @"C:\notes.txt";
+        var diskBytes = "disk"u8.ToArray();
+        var tab = CreateMockTab("notes.txt", path);
+        tab.SetContentBaseline("disk", isModified: false);
+        _sut.Tabs.Add(tab);
+        _fileSystemService.Setup(service => service.FileExists(path)).Returns(true);
+        _fileSystemService.Setup(service => service.OpenRead(path))
+            .Returns(() => new MemoryStream(diskBytes));
+
+        _sut.SaveSession();
+
+        _settingsService.VerifySet(service =>
+            service.OpenFiles = It.Is<List<SessionFile>>(files =>
+                files.Count == 1 &&
+                !files[0].IsModified &&
+                files[0].TextBaseLength == diskBytes.LongLength &&
+                files[0].TextBaseSha256 ==
+                Convert.ToHexString(SHA256.HashData(diskBytes))));
+    }
+
+    [Fact]
+    public void SaveSession_CleanNamedTextChangedOnDiskPromotesSnapshotToModified()
+    {
+        const string path = @"C:\notes.txt";
+        var tab = CreateMockTab("notes.txt", path);
+        tab.SetContentBaseline("old content", isModified: false);
+        _sut.Tabs.Add(tab);
+        _fileSystemService.Setup(service => service.FileExists(path)).Returns(true);
+        _fileSystemService.Setup(service => service.OpenRead(path))
+            .Returns(() => new MemoryStream("new content"u8.ToArray()));
+
+        _sut.SaveSession();
+
+        _settingsService.VerifySet(service =>
+            service.OpenFiles = It.Is<List<SessionFile>>(files =>
+                files.Count == 1 &&
+                files[0].Content == "old content" &&
+                files[0].IsModified));
     }
 
     // --- Toggle commands ---

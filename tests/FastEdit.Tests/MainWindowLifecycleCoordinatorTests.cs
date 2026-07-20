@@ -1,3 +1,4 @@
+using System.IO;
 using FastEdit.Infrastructure;
 using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
@@ -200,6 +201,7 @@ public class MainWindowLifecycleCoordinatorTests
                 operations.Add("shutdown-terminal");
                 return Task.CompletedTask;
             });
+        await StartSuccessfullyAsync(coordinator);
 
         var result = await coordinator.CloseAsync(
             () => operations.Add("disable-window"),
@@ -229,6 +231,7 @@ public class MainWindowLifecycleCoordinatorTests
                 shutdown = true;
                 return Task.CompletedTask;
             });
+        await StartSuccessfullyAsync(coordinator);
 
         var result = await coordinator.CloseAsync(
             () => { },
@@ -252,6 +255,7 @@ public class MainWindowLifecycleCoordinatorTests
                 operations.Add("terminal");
                 await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             });
+        await StartSuccessfullyAsync(coordinator);
 
         var result = await coordinator.CloseAsync(
             () => operations.Add("begin-persistence"),
@@ -282,6 +286,7 @@ public class MainWindowLifecycleCoordinatorTests
                 shutdownStarted.TrySetResult();
                 await shutdownRelease.Task;
             });
+        await StartSuccessfullyAsync(coordinator);
 
         var firstClose = coordinator.CloseAsync(
             () => { },
@@ -299,6 +304,68 @@ public class MainWindowLifecycleCoordinatorTests
         Assert.Equal(MainWindowCloseOutcome.InProgress, reentrantClose.Outcome);
         Assert.Equal(MainWindowCloseOutcome.ReadyToClose, completedClose.Outcome);
         Assert.Equal(1, persistenceCount);
+    }
+
+    [Fact]
+    public async Task CloseAsync_WithoutPublishedStartupRejectsPersistence()
+    {
+        var persisted = false;
+        var coordinator = CreateCoordinator(Mock.Of<IAutoSaveService>());
+
+        var result = await coordinator.CloseAsync(
+            () => { },
+            () => persisted = true,
+            TimeSpan.FromSeconds(1));
+
+        Assert.Equal(MainWindowCloseOutcome.StartupFailed, result.Outcome);
+        Assert.IsType<InvalidOperationException>(result.Error);
+        Assert.False(persisted);
+        Assert.False(coordinator.IsCloseComplete);
+    }
+
+    [Fact]
+    public async Task CloseAsync_PreLoadedOsCloseSkipsPersistenceExplicitly()
+    {
+        var operations = new List<string>();
+        var coordinator = CreateCoordinator(
+            Mock.Of<IAutoSaveService>(),
+            shutdownTerminalAsync: _ =>
+            {
+                operations.Add("shutdown-terminal");
+                return Task.CompletedTask;
+            });
+
+        var result = await coordinator.CloseAsync(
+            () => operations.Add("disable-window"),
+            () => operations.Add("persist"),
+            TimeSpan.FromSeconds(1),
+            allowCloseBeforeStartup: true);
+
+        Assert.Equal(MainWindowCloseOutcome.ReadyToClose, result.Outcome);
+        Assert.Equal(new[] { "shutdown-terminal" }, operations);
+    }
+
+    [Fact]
+    public async Task CloseAsync_FailedStartupNeverPublishesReplacementSession()
+    {
+        var persisted = false;
+        var coordinator = CreateCoordinator(
+            Mock.Of<IAutoSaveService>(),
+            restoreSessionAsync: () => throw new IOException("restore failed"));
+        var startup = await coordinator.StartAsync(
+            Array.Empty<string>(),
+            hasAnotherRunningInstance: false,
+            requestRecovery: () => false);
+
+        var close = await coordinator.CloseAsync(
+            () => { },
+            () => persisted = true,
+            TimeSpan.FromSeconds(1));
+
+        Assert.Equal(MainWindowStartupOutcome.Failure, startup.Outcome);
+        Assert.Equal(MainWindowCloseOutcome.StartupFailed, close.Outcome);
+        Assert.IsType<IOException>(close.Error);
+        Assert.False(persisted);
     }
 
     [Fact]
@@ -539,5 +606,15 @@ public class MainWindowLifecycleCoordinatorTests
                 captureRecoverySnapshot ?? (() => Array.Empty<AutoSaveEntry>()),
                 shutdownTerminalAsync ?? (_ => Task.CompletedTask),
                 hasUnresolvedSessionEntries));
+    }
+
+    private static async Task StartSuccessfullyAsync(
+        MainWindowLifecycleCoordinator coordinator)
+    {
+        var result = await coordinator.StartAsync(
+            Array.Empty<string>(),
+            hasAnotherRunningInstance: false,
+            requestRecovery: () => false);
+        Assert.NotEqual(MainWindowStartupOutcome.Failure, result.Outcome);
     }
 }

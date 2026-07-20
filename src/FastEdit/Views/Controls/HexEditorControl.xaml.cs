@@ -74,6 +74,7 @@ public partial class HexEditorControl : UserControl
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
+        SaveStateToViewModel();
         CancelSearch();
         SubscribeToByteBuffer(null);
         if (_viewModel != null)

@@ -539,6 +539,64 @@ public class EditorTabViewModelTests
     }
 
     [Fact]
+    public async Task ToggleMode_BinaryToTextPublishesModeAfterContentIsReady()
+    {
+        var sut = CreateSut();
+        sut.FilePath = @"C:\test.txt";
+        sut.FileSize = 10;
+        sut.Mode = FileOpenMode.Binary;
+        var readCompletion = new TaskCompletionSource<FileReadResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        _fileService.Setup(service => service.ReadFileWithEncodingAsync(sut.FilePath))
+            .Returns(readCompletion.Task);
+        string? contentAtModeChange = null;
+        sut.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(EditorTabViewModel.Mode))
+                contentAtModeChange = sut.Content;
+        };
+
+        var toggle = sut.ToggleModeCommand.ExecuteAsync(null);
+        Assert.Equal(FileOpenMode.Binary, sut.Mode);
+        readCompletion.SetResult(
+            new FileReadResult("ready", Encoding.UTF8, false));
+        await toggle;
+
+        Assert.Equal(FileOpenMode.Text, sut.Mode);
+        Assert.Equal("ready", contentAtModeChange);
+    }
+
+    [Fact]
+    public async Task ToggleMode_TextToBinaryPublishesModeAfterBufferIsReady()
+    {
+        var path = Path.GetTempFileName();
+        try
+        {
+            await File.WriteAllBytesAsync(path, new byte[] { 1, 2, 3 });
+            var sut = CreateSut();
+            sut.FilePath = path;
+            sut.FileSize = 3;
+            sut.Mode = FileOpenMode.Text;
+            var bufferWasReady = false;
+            sut.PropertyChanged += (_, args) =>
+            {
+                if (args.PropertyName == nameof(EditorTabViewModel.Mode))
+                    bufferWasReady = sut.ByteBuffer != null;
+            };
+
+            await sut.ToggleModeCommand.ExecuteAsync(null);
+
+            Assert.Equal(FileOpenMode.Binary, sut.Mode);
+            Assert.True(bufferWasReady);
+            sut.Dispose();
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
     public async Task Save_BinaryFile_DoesNotIncrementUserChangeVersionWhenClearingModifications()
     {
         var sut = CreateSut();

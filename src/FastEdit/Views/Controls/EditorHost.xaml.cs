@@ -61,6 +61,8 @@ public partial class EditorHost : UserControl
     private CancellationTokenSource? _externalReloadCts;
     private int _externalChangeActive;
     private bool _isRuntimeAttached;
+    private long _dataContextGeneration;
+    private long _restoredStateGeneration = -1;
 
     private static readonly IReadOnlyDictionary<MacroAction, Action<EditorHost, MacroStep, ITextToolsService?>> MacroStepHandlers =
         new Dictionary<MacroAction, Action<EditorHost, MacroStep, ITextToolsService?>>
@@ -279,11 +281,24 @@ public partial class EditorHost : UserControl
         if (_currentVm != null)
         {
             UpdateEditor(_currentVm);
+            if (_restoredStateGeneration != _dataContextGeneration)
+            {
+                QueueStateRestore(
+                    _currentVm,
+                    _dataContextGeneration);
+            }
         }
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
+        if (_restoredStateGeneration == _dataContextGeneration)
+        {
+            SaveStateToViewModelCore(_currentVm);
+            if (HexEditor.Visibility == Visibility.Visible)
+                HexEditor.SaveStateToViewModel();
+        }
+        _dataContextGeneration++;
         if (!_isRuntimeAttached)
             return;
         _isRuntimeAttached = false;
@@ -1430,9 +1445,17 @@ public partial class EditorHost : UserControl
 
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
+        var outgoingGeneration = _dataContextGeneration;
+        var generation = ++_dataContextGeneration;
         CancelExternalReload();
         if (e.OldValue is EditorTabViewModel oldVm)
         {
+            if (_restoredStateGeneration == outgoingGeneration)
+            {
+                SaveStateToViewModelCore(oldVm);
+                if (HexEditor.Visibility == Visibility.Visible)
+                    HexEditor.SaveStateToViewModel();
+            }
             oldVm.PropertyChanged -= OnViewModelPropertyChanged;
         }
 
@@ -1442,13 +1465,23 @@ public partial class EditorHost : UserControl
         {
             _currentVm.PropertyChanged += OnViewModelPropertyChanged;
             UpdateEditor(_currentVm);
-            var restoreVm = _currentVm;
-            _ = Dispatcher.BeginInvoke(() =>
-            {
-                if (ReferenceEquals(_currentVm, restoreVm))
-                    RestoreStateFromViewModel();
-            }, System.Windows.Threading.DispatcherPriority.Loaded);
+            QueueStateRestore(_currentVm, generation);
         }
+    }
+
+    private void QueueStateRestore(
+        EditorTabViewModel restoreVm,
+        long generation)
+    {
+        _ = Dispatcher.BeginInvoke(() =>
+        {
+            if (_dataContextGeneration == generation &&
+                ReferenceEquals(_currentVm, restoreVm))
+            {
+                RestoreStateFromViewModel();
+                _restoredStateGeneration = generation;
+            }
+        }, System.Windows.Threading.DispatcherPriority.Loaded);
     }
 
     private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
@@ -1464,7 +1497,24 @@ public partial class EditorHost : UserControl
         }
         else if (e.PropertyName == nameof(EditorTabViewModel.Mode))
         {
+            if (_restoredStateGeneration == _dataContextGeneration)
+            {
+                SaveStateToViewModelCore(vm);
+                if (HexEditor.Visibility == Visibility.Visible)
+                    HexEditor.SaveStateToViewModel();
+            }
+
+            var generation = ++_dataContextGeneration;
             UpdateEditor(vm);
+            if (IsTextMode(vm))
+            {
+                QueueStateRestore(vm, generation);
+            }
+            else
+            {
+                HexEditor.RestoreStateFromViewModel();
+                _restoredStateGeneration = generation;
+            }
         }
     }
 
@@ -1795,23 +1845,33 @@ public partial class EditorHost : UserControl
     // --- Session State Save ---
     public void SaveStateToViewModel()
     {
-        if (_currentVm == null) return;
-        _currentVm.CursorOffset = TextEditor.CaretOffset;
-        _currentVm.ScrollOffset = TextEditor.VerticalOffset;
+        if (_restoredStateGeneration == _dataContextGeneration)
+        {
+            SaveStateToViewModelCore(_currentVm);
+            if (HexEditor.Visibility == Visibility.Visible)
+                HexEditor.SaveStateToViewModel();
+        }
+    }
+
+    private void SaveStateToViewModelCore(EditorTabViewModel? viewModel)
+    {
+        if (viewModel == null || TextEditor.Visibility != Visibility.Visible)
+            return;
+
+        viewModel.CursorOffset = TextEditor.CaretOffset;
+        viewModel.ScrollOffset = TextEditor.VerticalOffset;
     }
 
     public void RestoreStateFromViewModel()
     {
         if (_currentVm == null) return;
 
-        if (_currentVm.CursorOffset > 0 && _currentVm.CursorOffset <= TextEditor.Document.TextLength)
-        {
-            TextEditor.CaretOffset = _currentVm.CursorOffset;
-        }
-        if (_currentVm.ScrollOffset > 0)
-        {
-            TextEditor.ScrollToVerticalOffset(_currentVm.ScrollOffset);
-        }
+        TextEditor.CaretOffset = Math.Clamp(
+            _currentVm.CursorOffset,
+            0,
+            TextEditor.Document.TextLength);
+        TextEditor.ScrollToVerticalOffset(
+            Math.Max(0, _currentVm.ScrollOffset));
     }
 
     private static IHighlightingDefinition? GetHighlightingForLanguage(string language)

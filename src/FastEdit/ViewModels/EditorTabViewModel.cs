@@ -369,41 +369,47 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
 
         if (Mode == FileOpenMode.Binary)
         {
-            // Binary → Text: dispose buffer, reload as text
-            _byteBuffer?.Dispose();
-            _byteBuffer = null;
-
-            _largeFileDoc?.Dispose();
-            _largeFileDoc = null;
-
-            Mode = FileOpenModeRouter.SelectTextMode(FileSize);
-            if (Mode == FileOpenMode.LargeText)
+            var textMode = FileOpenModeRouter.SelectTextMode(FileSize);
+            if (textMode == FileOpenMode.LargeText)
             {
-                _largeFileDoc = new LargeFileDocument(FilePath);
-                Encoding = _largeFileDoc.EncodingDisplayName;
+                var largeFileDocument = new LargeFileDocument(FilePath);
+                await largeFileDocument.BuildIndexAsync(null, CancellationToken.None);
+                _byteBuffer?.Dispose();
+                _byteBuffer = null;
+                OnPropertyChanged(nameof(ByteBuffer));
+                _largeFileDoc?.Dispose();
+                _largeFileDoc = largeFileDocument;
+                Encoding = largeFileDocument.EncodingDisplayName;
                 SyntaxLanguage = string.Empty;
-                await _largeFileDoc.BuildIndexAsync(null, CancellationToken.None);
+                Mode = textMode;
                 return;
             }
 
             var result = await _fileService.ReadFileWithEncodingAsync(FilePath);
+            _byteBuffer?.Dispose();
+            _byteBuffer = null;
+            OnPropertyChanged(nameof(ByteBuffer));
+            _largeFileDoc?.Dispose();
+            _largeFileDoc = null;
             SetContentBaseline(result.Content, isModified: false);
             _fileEncoding = result.Encoding;
             _hasBom = result.HasBom;
             Encoding = GetEncodingDisplayName(result.Encoding, result.HasBom);
             SyntaxLanguage = SyntaxLanguageResolver.Resolve(FilePath);
+            Mode = textMode;
         }
         else if (Mode == FileOpenMode.Text || Mode == FileOpenMode.LargeText)
         {
-            // Text → Binary: create byte buffer
+            var byteBuffer = new VirtualizedByteBuffer(FilePath);
+            byteBuffer.ModificationsChanged += OnByteBufferModificationsChanged;
             _largeFileDoc?.Dispose();
             _largeFileDoc = null;
+            _byteBuffer = byteBuffer;
+            OnPropertyChanged(nameof(ByteBuffer));
             Mode = FileOpenMode.Binary;
             SetContentBaseline(string.Empty, isModified: false);
             Encoding = "Binary";
             SyntaxLanguage = string.Empty;
-            _byteBuffer = new VirtualizedByteBuffer(FilePath);
-            _byteBuffer.ModificationsChanged += OnByteBufferModificationsChanged;
         }
     }
 
