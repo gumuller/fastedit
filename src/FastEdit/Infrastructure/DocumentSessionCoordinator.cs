@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Security.Cryptography;
 using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
 
@@ -22,11 +23,14 @@ public sealed class DocumentSessionCoordinator : IDisposable
     private readonly string _shutdownOwner;
     private readonly HashSet<EditorTabViewModel> _shutdownDiscardedTabs = new();
     private readonly List<SessionFile> _unresolvedShutdownEntries = new();
+    private readonly List<SessionFile> _pendingShutdownEntries = new();
     private readonly HashSet<string> _replacedShutdownOwners =
         new(StringComparer.Ordinal);
     private readonly Dictionary<string, Stream> _shutdownGenerationLeases =
         new(StorageIdentityComparer);
     private readonly List<SessionFile> _retirementCandidates = new();
+    private bool _shutdownRestoreStarted;
+    private bool _shutdownRestoreFailed;
 
     public DocumentSessionCoordinator(
         ISettingsService settingsService,
@@ -220,6 +224,12 @@ public sealed class DocumentSessionCoordinator : IDisposable
 
     public void CancelShutdownPreparation() => _shutdownDiscardedTabs.Clear();
 
+    public ShutdownRestoreStatus ShutdownRestoreStatus =>
+        new(
+            _pendingShutdownEntries.Count,
+            _unresolvedShutdownEntries.Count,
+            _shutdownRestoreFailed);
+
     public async Task<UnsavedChangesPreparationResult> PrepareUnsavedChangesAsync(
         IReadOnlyList<EditorTabViewModel> tabs,
         IReadOnlyList<EditorTabViewModel> unsavedTabs,
@@ -270,9 +280,21 @@ public sealed class DocumentSessionCoordinator : IDisposable
     public async Task<RestoredDocumentSession> RestoreShutdownSessionAsync()
     {
         var restoredCandidates = new List<RestoredTabCandidate>();
+        _shutdownRestoreStarted = true;
+        _shutdownRestoreFailed = false;
         _unresolvedShutdownEntries.Clear();
-        var persistedSession = _shutdownSessionStore.ReadShutdownSession(
-            AcquireShutdownGenerationLeases);
+        _pendingShutdownEntries.Clear();
+        ShutdownSessionState persistedSession;
+        try
+        {
+            persistedSession = _shutdownSessionStore.ReadShutdownSession(
+                AcquireShutdownGenerationLeases);
+        }
+        catch
+        {
+            _shutdownRestoreFailed = true;
+            throw;
+        }
         var openFiles = persistedSession.Files;
         var activeTabIndex = -1;
         for (var index = 0; index < openFiles.Count; index++)
@@ -306,6 +328,7 @@ public sealed class DocumentSessionCoordinator : IDisposable
                             index,
                             sessionFile.TabIdentity,
                             CloneSessionFile(sessionFile)));
+                    TrackPendingShutdownEntry(sessionFile);
                 }
                 else
                     TrackUnresolvedShutdownEntry(sessionFile);
@@ -403,6 +426,10 @@ public sealed class DocumentSessionCoordinator : IDisposable
                 {
                     TrackUnresolvedShutdownEntry(candidate.SourceEntry);
                 }
+                else if (liveTabs.Contains(candidate.Tab))
+                {
+                    TrackConsumedShutdownEntry(candidate.SourceEntry);
+                }
                 foreach (var remaining in candidates.Skip(index + 1))
                 {
                     if (remaining.SourceEntry != null)
@@ -463,8 +490,23 @@ public sealed class DocumentSessionCoordinator : IDisposable
             var leaseMarkerPath = GetShutdownLeaseMarkerPath(generation);
             _fileSystemService.WriteStreamAtomic(leaseMarkerPath, _ => { });
             createdSnapshotPaths.Add(leaseMarkerPath);
-            var previousSession = _shutdownSessionStore.ReadShutdownSession();
+            var carryForwardDurableSession =
+                !_shutdownRestoreStarted || _shutdownRestoreFailed;
+            var previousSession = _shutdownSessionStore.ReadShutdownSession(
+                carryForwardDurableSession
+                    ? AcquireShutdownGenerationLeases
+                    : null);
             var sessionFiles = _unresolvedShutdownEntries
+                .Concat(_pendingShutdownEntries)
+                .Concat(
+                    carryForwardDurableSession
+                        ? previousSession.Files
+                        : Array.Empty<SessionFile>())
+                .DistinctBy(file => (
+                    file.SnapshotGeneration,
+                    file.SnapshotFile,
+                    file.TabIdentity,
+                    file.FilePath))
                 .Select(CloneSessionFile)
                 .ToList();
             var persistedActiveTabIndex = sessionFiles.Count == 0
@@ -595,10 +637,19 @@ public sealed class DocumentSessionCoordinator : IDisposable
                 throw new InvalidOperationException(
                     "The shutdown session was published, but binary snapshot handoff failed.");
             }
+            if (ownedGenerationFiles.Count == 0)
+            {
+                DeleteUnpublishedShutdownGeneration(
+                    generationDirectory,
+                    createdSnapshotPaths);
+            }
             _unresolvedShutdownEntries.Clear();
+            _pendingShutdownEntries.Clear();
             _replacedShutdownOwners.Clear();
             if (binaryHandoffCompleted)
                 _retirementCandidates.Clear();
+            _shutdownRestoreStarted = true;
+            _shutdownRestoreFailed = false;
         }
         catch
         {
@@ -742,13 +793,14 @@ public sealed class DocumentSessionCoordinator : IDisposable
             var snapshotTab = _tabFactory.Create();
             try
             {
+                var isModified = HasNamedSnapshotBaseDrift(sessionFile);
                 if (GetSessionMode(sessionFile) == FileOpenMode.Binary)
                 {
                     snapshotTab.RestoreBinarySnapshot(
                         sessionFile.IsUntitled ? string.Empty : sessionFile.FilePath,
                         GetSessionFileName(sessionFile),
                         snapshotPath,
-                        sessionFile.IsModified,
+                        isModified,
                         sessionFile.HexOffset,
                         sessionFile.BytesPerRow);
                 }
@@ -759,7 +811,7 @@ public sealed class DocumentSessionCoordinator : IDisposable
                         sessionFile.IsUntitled ? string.Empty : sessionFile.FilePath,
                         GetSessionFileName(sessionFile),
                         content,
-                        sessionFile.IsModified,
+                        isModified,
                         sessionFile.EncodingCodePage,
                         sessionFile.HasBom);
                 }
@@ -799,6 +851,14 @@ public sealed class DocumentSessionCoordinator : IDisposable
             return null;
         if (!_fileSystemService.FileExists(sessionFile.FilePath))
             return null;
+        if (!string.IsNullOrEmpty(sessionFile.BaseContentHash) &&
+            !string.Equals(
+                sessionFile.BaseContentHash,
+                ComputeFileContentHash(sessionFile.FilePath),
+                StringComparison.Ordinal))
+        {
+            return null;
+        }
 
         var tab = _tabFactory.Create();
         try
@@ -964,8 +1024,9 @@ public sealed class DocumentSessionCoordinator : IDisposable
             "FastEdit",
             "ShutdownSessions");
 
-    private SessionFile CreateShutdownSessionFile(EditorTabViewModel tab) =>
-        new()
+    private SessionFile CreateShutdownSessionFile(EditorTabViewModel tab)
+    {
+        var sessionFile = new SessionFile
         {
             FilePath = string.IsNullOrEmpty(tab.FilePath)
                 ? tab.FileName
@@ -984,11 +1045,39 @@ public sealed class DocumentSessionCoordinator : IDisposable
             HexOffset = tab.HexOffset,
             BytesPerRow = tab.BytesPerRow
         };
+        if (!sessionFile.IsUntitled && !sessionFile.IsModified)
+        {
+            if (_fileSystemService.FileExists(tab.FilePath))
+            {
+                var sourceHash = ComputeFileContentHash(tab.FilePath);
+                if (sessionFile.Mode == FileOpenMode.LargeText)
+                {
+                    sessionFile.BaseContentHash = sourceHash;
+                }
+                else if (string.Equals(
+                        sourceHash,
+                        ComputeTabContentHash(tab),
+                        StringComparison.Ordinal))
+                {
+                    sessionFile.BaseContentHash = sourceHash;
+                }
+                else
+                {
+                    sessionFile.IsModified = true;
+                }
+            }
+            else
+                sessionFile.IsModified = true;
+        }
+
+        return sessionFile;
+    }
 
     private static bool RequiresShutdownSnapshot(SessionFile sessionFile) =>
-        sessionFile.IsUntitled ||
-        sessionFile.IsModified ||
-        sessionFile.Mode is FileOpenMode.Text or FileOpenMode.Binary;
+        sessionFile.Mode != FileOpenMode.LargeText &&
+        (sessionFile.IsUntitled ||
+         sessionFile.IsModified ||
+         sessionFile.Mode is FileOpenMode.Text or FileOpenMode.Binary);
 
     private string PersistShutdownSnapshot(
         EditorTabViewModel tab,
@@ -1248,6 +1337,7 @@ public sealed class DocumentSessionCoordinator : IDisposable
 
     private void TrackUnresolvedShutdownEntry(SessionFile sessionFile)
     {
+        RemovePendingShutdownEntry(sessionFile);
         if (_unresolvedShutdownEntries.Any(existing =>
                 string.Equals(
                     existing.SnapshotGeneration,
@@ -1269,6 +1359,45 @@ public sealed class DocumentSessionCoordinator : IDisposable
         TrackReplacedShutdownOwner(sessionFile);
     }
 
+    private void TrackPendingShutdownEntry(SessionFile sessionFile)
+    {
+        if (_pendingShutdownEntries.Any(existing =>
+                IsSameShutdownSource(existing, sessionFile)))
+        {
+            return;
+        }
+
+        _pendingShutdownEntries.Add(CloneSessionFile(sessionFile));
+    }
+
+    private void RemovePendingShutdownEntry(SessionFile? sessionFile)
+    {
+        if (sessionFile == null)
+            return;
+        _pendingShutdownEntries.RemoveAll(existing =>
+            IsSameShutdownSource(existing, sessionFile));
+    }
+
+    private static bool IsSameShutdownSource(
+        SessionFile first,
+        SessionFile second) =>
+        string.Equals(
+            first.SnapshotGeneration,
+            second.SnapshotGeneration,
+            StringComparison.Ordinal) &&
+        string.Equals(
+            first.SnapshotFile,
+            second.SnapshotFile,
+            StringComparison.Ordinal) &&
+        string.Equals(
+            first.TabIdentity,
+            second.TabIdentity,
+            StringComparison.Ordinal) &&
+        string.Equals(
+            first.FilePath,
+            second.FilePath,
+            StringComparison.Ordinal);
+
     private void TrackReplacedShutdownOwner(SessionFile? sessionFile)
     {
         if (!string.IsNullOrWhiteSpace(sessionFile?.SnapshotOwner))
@@ -1277,8 +1406,10 @@ public sealed class DocumentSessionCoordinator : IDisposable
 
     private void TrackConsumedShutdownEntry(SessionFile? sessionFile)
     {
+        RemovePendingShutdownEntry(sessionFile);
         TrackReplacedShutdownOwner(sessionFile);
-        if (!HasValidPersistedIdentity(sessionFile?.SnapshotGeneration) ||
+        if (sessionFile == null ||
+            !HasValidPersistedIdentity(sessionFile.SnapshotGeneration) ||
             string.IsNullOrEmpty(sessionFile.SnapshotFile) ||
             _retirementCandidates.Any(existing =>
                 string.Equals(
@@ -1298,6 +1429,50 @@ public sealed class DocumentSessionCoordinator : IDisposable
 
     private static FileOpenMode GetSessionMode(SessionFile sessionFile) =>
         sessionFile.IsBinaryMode ? FileOpenMode.Binary : sessionFile.Mode;
+
+    private bool HasNamedSnapshotBaseDrift(SessionFile sessionFile)
+    {
+        if (sessionFile.IsUntitled || sessionFile.IsModified)
+            return sessionFile.IsModified;
+        if (string.IsNullOrWhiteSpace(sessionFile.BaseContentHash) ||
+            !_fileSystemService.FileExists(sessionFile.FilePath))
+        {
+            return true;
+        }
+
+        return !string.Equals(
+            sessionFile.BaseContentHash,
+            ComputeFileContentHash(sessionFile.FilePath),
+            StringComparison.Ordinal);
+    }
+
+    private string ComputeFileContentHash(string filePath)
+    {
+        using var stream = _fileSystemService.OpenRead(filePath);
+        return Convert.ToHexString(SHA256.HashData(stream));
+    }
+
+    private static string ComputeTabContentHash(EditorTabViewModel tab)
+    {
+        if (tab.Mode == FileOpenMode.Binary)
+        {
+            using var hash = SHA256.Create();
+            using var hashingStream = new CryptoStream(
+                Stream.Null,
+                hash,
+                CryptoStreamMode.Write);
+            tab.WriteBinarySnapshot(hashingStream);
+            hashingStream.FlushFinalBlock();
+            return Convert.ToHexString(hash.Hash!);
+        }
+
+        using var incrementalHash =
+            IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        if (tab.HasBom)
+            incrementalHash.AppendData(tab.FileEncoding.GetPreamble());
+        incrementalHash.AppendData(tab.FileEncoding.GetBytes(tab.Content));
+        return Convert.ToHexString(incrementalHash.GetHashAndReset());
+    }
 
     private static string GetSessionFileName(SessionFile sessionFile) =>
         !string.IsNullOrEmpty(sessionFile.FileName)
@@ -1322,6 +1497,7 @@ public sealed class DocumentSessionCoordinator : IDisposable
             SnapshotOwner = file.SnapshotOwner,
             SnapshotGenerationFiles =
                 file.SnapshotGenerationFiles?.ToList() ?? new List<string>(),
+            BaseContentHash = file.BaseContentHash,
             EncodingCodePage = file.EncodingCodePage,
             HasBom = file.HasBom,
             CursorOffset = file.CursorOffset,
@@ -1445,6 +1621,15 @@ public sealed record RestoredSessionAdoptionResult(
     IReadOnlyList<EditorTabViewModel> DiscardedDuplicateTabs,
     EditorTabViewModel? SelectedTab);
 
+public sealed record ShutdownRestoreStatus(
+    int PendingEntryCount,
+    int UnresolvedEntryCount,
+    bool RestoreFailed)
+{
+    public bool RequiresCarryForward =>
+        RestoreFailed || PendingEntryCount > 0 || UnresolvedEntryCount > 0;
+}
+
 public sealed record TabRecoveryResult(
     bool Success,
     IReadOnlyList<string> RecoveredEntryIds,
@@ -1567,22 +1752,13 @@ internal sealed record PersistedTabOwner(
         if (!Descriptor.HasEquivalentState(candidate))
             return false;
 
-        var identitiesMatch =
+        return
             DocumentSessionCoordinator.HasValidPersistedIdentity(
                 candidate.PersistedIdentity) &&
             string.Equals(
                 ProofIdentity,
                 candidate.PersistedIdentity,
                 StringComparison.Ordinal);
-        var savedPathsMatch =
-            !Descriptor.IsUntitled &&
-            !candidate.IsUntitled &&
-            !string.IsNullOrEmpty(Descriptor.FilePath) &&
-            !string.IsNullOrEmpty(candidate.FilePath) &&
-            DocumentSessionCoordinator.HasSameOpenIdentity(
-                Descriptor.FilePath,
-                candidate.FilePath);
-        return identitiesMatch || savedPathsMatch;
     }
 }
 

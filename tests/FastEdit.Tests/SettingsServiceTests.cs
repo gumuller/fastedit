@@ -78,9 +78,20 @@ public class SettingsServiceTests
                         IsUntitled = true,
                         SnapshotGeneration = "generation",
                         SnapshotFile = "tab-owned.txt"
+                    },
+                    new SessionFile
+                    {
+                        FilePath = "Untitled-2",
+                        FileName = "Untitled-2",
+                        TabIdentity = "owned-2",
+                        SnapshotOwner = "publisher",
+                        IsUntitled = true,
+                        IsActive = true,
+                        SnapshotGeneration = "generation",
+                        SnapshotFile = "tab-owned-2.txt"
                     }
                 },
-                0);
+                1);
 
             publisher.PublishShutdownSession(session);
             staleWriter.ThemeName = "Light";
@@ -88,8 +99,11 @@ public class SettingsServiceTests
             var reader = new SettingsService(fileSystem, appDataPath);
             var persisted = reader.ReadShutdownSession();
             Assert.Equal("Light", reader.ThemeName);
-            Assert.Equal("owned", Assert.Single(persisted.Files).TabIdentity);
+            Assert.Equal(2, persisted.Files.Count);
+            Assert.Equal("owned", persisted.Files[0].TabIdentity);
             Assert.Equal("generation", persisted.Files[0].SnapshotGeneration);
+            Assert.Equal("owned-2", persisted.Files[1].TabIdentity);
+            Assert.Equal(1, persisted.ActiveTabIndex);
         }
         finally
         {

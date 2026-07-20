@@ -44,6 +44,7 @@ public class SessionFile
     public string? SnapshotFile { get; set; }
     public string? SnapshotOwner { get; set; }
     public List<string> SnapshotGenerationFiles { get; set; } = new();
+    public string? BaseContentHash { get; set; }
     public int EncodingCodePage { get; set; } = System.Text.Encoding.UTF8.CodePage;
     public bool HasBom { get; set; }
     public int CursorOffset { get; set; }

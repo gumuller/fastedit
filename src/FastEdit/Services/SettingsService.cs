@@ -356,6 +356,7 @@ public class SettingsService : ISettingsService, IShutdownSessionStore
             SnapshotOwner = file.SnapshotOwner,
             SnapshotGenerationFiles =
                 file.SnapshotGenerationFiles?.ToList() ?? new List<string>(),
+            BaseContentHash = file.BaseContentHash,
             EncodingCodePage = file.EncodingCodePage,
             HasBom = file.HasBom,
             CursorOffset = file.CursorOffset,

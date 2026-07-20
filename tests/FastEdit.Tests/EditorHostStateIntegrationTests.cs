@@ -46,6 +46,15 @@ public class EditorHostStateIntegrationTests
 
             Assert.Equal(12, editor.CaretOffset);
             Assert.Equal(50, editor.VerticalOffset, precision: 3);
+            Assert.Equal(liveCaretOffset, first.CursorOffset);
+            Assert.Equal(tailOffset, first.ScrollOffset, precision: 3);
+
+            host.DataContext = first;
+            host.UpdateLayout();
+            await Dispatcher.Yield(DispatcherPriority.Loaded);
+
+            Assert.Equal(liveCaretOffset, editor.CaretOffset);
+            Assert.Equal(tailOffset, editor.VerticalOffset, precision: 3);
         });
     }
 

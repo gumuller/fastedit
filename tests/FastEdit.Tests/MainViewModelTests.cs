@@ -1268,7 +1268,7 @@ public class MainViewModelTests
     }
 
     [Fact]
-    public async Task RestoreSession_PathOpenedWhileLaterTabLoads_DiscardsStagedDuplicate()
+    public async Task RestoreSession_SamePathWithoutStableIdentityRetainsStagedPayload()
     {
         var firstPath = Path.GetTempFileName();
         var secondPath = Path.GetTempFileName();
@@ -1312,13 +1312,13 @@ public class MainViewModelTests
             await restoreTask;
 
             Assert.Equal(
-                1,
+                2,
                 _sut.Tabs.Count(tab =>
                     !string.IsNullOrEmpty(tab.FilePath) &&
                     MainViewModel.HasSameOpenIdentity(tab.FilePath, firstPath)));
-            Assert.DoesNotContain(stagedFirst, _sut.Tabs);
-            Assert.Empty(stagedFirst.Content);
-            Assert.Same(liveFirst, _sut.SelectedTab);
+            Assert.Contains(stagedFirst, _sut.Tabs);
+            Assert.Equal("staged", stagedFirst.Content);
+            Assert.Same(stagedFirst, _sut.SelectedTab);
         }
         finally
         {
