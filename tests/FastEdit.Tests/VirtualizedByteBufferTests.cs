@@ -194,7 +194,7 @@ public class VirtualizedByteBufferTests : IDisposable
     }
 
     [Fact]
-    public void Save_ConflictRetainsCompleteEditedSnapshotAsBacking()
+    public async Task Save_ConflictRetainsSearchableSnapshotAndDiscardBaseline()
     {
         var original = Enumerable.Repeat((byte)0x11, 2 * 1024 * 1024)
             .ToArray();
@@ -218,6 +218,22 @@ public class VirtualizedByteBufferTests : IDisposable
         Assert.Equal(0x11, retained[100_000]);
         Assert.Equal(0x42, retained[^1]);
         Assert.True(buffer.HasModifications);
+
+        var search = await buffer.SearchAsync(
+            new byte[] { 0x11, 0x11, 0x11 },
+            maxResults: 1,
+            progress: null,
+            CancellationToken.None);
+        Assert.Equal(0, Assert.Single(search.Results));
+
+        buffer.DiscardModifications();
+        Assert.False(buffer.HasModifications);
+        using var discarded = new MemoryStream();
+        buffer.WriteSnapshot(discarded);
+        var clean = discarded.ToArray();
+        Assert.Equal(0x11, clean[100_000]);
+        Assert.Equal(0x11, clean[^1]);
+        Assert.Equal(0x99, File.ReadAllBytes(path)[100_000]);
     }
 
     [Fact]

@@ -10,6 +10,7 @@ public class VirtualizedByteBuffer : IDisposable
     private readonly string _filePath;
     private string _backingPath;
     private bool _ownsBackingPath;
+    private string? _discardBackingPath;
     private readonly Action<Stream>? _saveSnapshotWriter;
     private readonly Action? _beforeAtomicCommit;
     private FileStream _fileStream;
@@ -187,6 +188,8 @@ public class VirtualizedByteBuffer : IDisposable
                         _backingPath);
                     var replacementIdentity =
                         CapturePathIdentity(tempPath);
+                    _discardBackingPath ??=
+                        CreateSafetySnapshot(_backingPath);
                     _beforeAtomicCommit?.Invoke();
                     CommitAtomicReplacement(
                         tempPath,
@@ -221,7 +224,20 @@ public class VirtualizedByteBuffer : IDisposable
     public void DiscardModifications()
     {
         lock (_modificationsLock)
+        {
+            if (!string.IsNullOrEmpty(_discardBackingPath))
+            {
+                var editedBackingPath =
+                    _ownsBackingPath ? _backingPath : null;
+                DisposeBackingHandles();
+                _backingPath = _discardBackingPath;
+                _ownsBackingPath = true;
+                _discardBackingPath = null;
+                ReopenBackingHandles();
+                DeleteOwnedBackingPath(editedBackingPath);
+            }
             _modifications.Clear();
+        }
         _pageCache.Clear();
         ModificationsChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -419,6 +435,8 @@ public class VirtualizedByteBuffer : IDisposable
 
             File.Delete(backupPath);
             DeleteOwnedBackingPath(previousOwnedBackingPath);
+            DeleteOwnedBackingPath(_discardBackingPath);
+            _discardBackingPath = null;
             commitSucceeded = true;
         }
         finally
@@ -665,7 +683,7 @@ public class VirtualizedByteBuffer : IDisposable
         var buffer = new byte[checked(SearchChunkSize + overlap)];
         long position = 0;
         using var searchStream = new FileStream(
-            _filePath,
+            _backingPath,
             FileMode.Open,
             FileAccess.Read,
             FileShare.ReadWrite | FileShare.Delete,
@@ -841,6 +859,13 @@ public class VirtualizedByteBuffer : IDisposable
         _pageCache.Clear();
         if (_ownsBackingPath)
             DeleteOwnedBackingPath(_backingPath);
+        if (!string.Equals(
+                _discardBackingPath,
+                _backingPath,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            DeleteOwnedBackingPath(_discardBackingPath);
+        }
 
         GC.SuppressFinalize(this);
     }
