@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text;
+using FastEdit.Services;
 using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
 using Moq;
@@ -207,6 +208,33 @@ public class EditorTabViewModelTests
     // --- SaveAs ---
 
     [Fact]
+    public void BinaryPathIdentityUsesPlatformCaseSemantics()
+    {
+        var workspace = Path.Combine(
+            Path.GetTempPath(),
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        var lower = Path.Combine(workspace, "file.bin");
+        var upper = Path.Combine(workspace, "FILE.bin");
+        File.WriteAllBytes(lower, new byte[] { 1 });
+        try
+        {
+            Assert.Equal(
+                File.Exists(upper),
+                EditorTabViewModel.AreSameFilePath(lower, upper));
+            if (!File.Exists(upper))
+            {
+                File.WriteAllBytes(upper, new byte[] { 2 });
+                Assert.False(EditorTabViewModel.AreSameFilePath(lower, upper));
+            }
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task SaveAs_TextFile_SavesWithNewName()
     {
         var sut = CreateSut();
@@ -240,6 +268,83 @@ public class EditorTabViewModelTests
 
         _fileService.Verify(f => f.WriteFileWithEncodingAsync(
             It.IsAny<string>(), It.IsAny<string>(), It.IsAny<Encoding>(), It.IsAny<bool>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task SaveAs_RestoredBinaryWritesDestinationWithoutOverwritingOriginal()
+    {
+        var workspace = Path.Combine(
+            Path.GetTempPath(),
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        var originalPath = Path.Combine(workspace, "original.bin");
+        var snapshotPath = Path.Combine(workspace, "snapshot.bin");
+        var destinationPath = Path.Combine(workspace, "saved-as.bin");
+        await File.WriteAllBytesAsync(originalPath, new byte[] { 9, 9, 9 });
+        await File.WriteAllBytesAsync(snapshotPath, new byte[] { 1, 2, 3 });
+        var fileSystem = new FileSystemService();
+        var sut = new EditorTabViewModel(
+            _fileService.Object,
+            fileSystem,
+            _dialogService.Object);
+        sut.RestoreBinarySnapshot(
+            originalPath,
+            "original.bin",
+            snapshotPath,
+            isModified: true,
+            hexOffset: 0,
+            bytesPerRow: 16);
+        _dialogService.Setup(dialog => dialog.ShowSaveFileDialog(
+                It.IsAny<string>(),
+                "original.bin",
+                null))
+            .Returns(destinationPath);
+
+        await sut.SaveAsCommand.ExecuteAsync(null);
+
+        Assert.Equal(new byte[] { 9, 9, 9 }, await File.ReadAllBytesAsync(originalPath));
+        Assert.Equal(new byte[] { 1, 2, 3 }, await File.ReadAllBytesAsync(destinationPath));
+        Assert.Equal(destinationPath, sut.FilePath);
+        Assert.False(sut.IsModified);
+        sut.Dispose();
+        Directory.Delete(workspace, recursive: true);
+    }
+
+    [Fact]
+    public async Task Save_RecoveredBinaryRefusesToOverwriteUnverifiedExistingSource()
+    {
+        var workspace = Path.Combine(
+            Path.GetTempPath(),
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        var originalPath = Path.Combine(workspace, "original.bin");
+        var snapshotPath = Path.Combine(workspace, "snapshot.bin");
+        await File.WriteAllBytesAsync(originalPath, new byte[] { 9, 9, 9 });
+        await File.WriteAllBytesAsync(snapshotPath, new byte[] { 1, 2, 3 });
+        var sut = new EditorTabViewModel(
+            _fileService.Object,
+            new FileSystemService(),
+            _dialogService.Object);
+        sut.RestoreAutoSaveBinarySnapshot(
+            originalPath,
+            "original.bin",
+            snapshotPath,
+            isModified: true,
+            hexOffset: 0,
+            bytesPerRow: 16);
+
+        await Assert.ThrowsAsync<IOException>(
+            () => sut.SaveCommand.ExecuteAsync(null));
+
+        Assert.Equal(
+            new byte[] { 9, 9, 9 },
+            await File.ReadAllBytesAsync(originalPath));
+        Assert.Equal(
+            new byte[] { 1, 2, 3 },
+            sut.ByteBuffer!.GetBytes(0, 3).ToArray());
+        Assert.True(sut.IsModified);
+        sut.Dispose();
+        Directory.Delete(workspace, recursive: true);
     }
 
     // --- GetSyntaxLanguage ---
@@ -425,6 +530,34 @@ public class EditorTabViewModelTests
         Assert.Equal(FileOpenMode.Text, sut.Mode);
         Assert.Equal("text", sut.Content);
         Assert.False(sut.IsModified);
+    }
+
+    [Fact]
+    public async Task ToggleMode_TextToBinaryThenSaveUsesOriginalBackingFile()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            $"{Guid.NewGuid():N}.txt");
+        await File.WriteAllBytesAsync(path, new byte[] { 1, 2, 3 });
+        var sut = new EditorTabViewModel(
+            _fileService.Object,
+            new FileSystemService(),
+            _dialogService.Object)
+        {
+            FilePath = path,
+            FileName = Path.GetFileName(path),
+            Mode = FileOpenMode.Text,
+            IsModified = false
+        };
+
+        await sut.ToggleModeCommand.ExecuteAsync(null);
+        sut.ByteBuffer!.SetByte(1, 42);
+        await sut.SaveCommand.ExecuteAsync(null);
+
+        Assert.Equal(new byte[] { 1, 42, 3 }, await File.ReadAllBytesAsync(path));
+        Assert.False(sut.IsModified);
+        sut.Dispose();
+        File.Delete(path);
     }
 
     [Fact]

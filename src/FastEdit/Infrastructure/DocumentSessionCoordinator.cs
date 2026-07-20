@@ -1,22 +1,39 @@
 using System.Diagnostics;
 using System.IO;
+using System.Security.Cryptography;
+using FastEdit.Services;
 using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
 
 namespace FastEdit.Infrastructure;
 
-public sealed class DocumentSessionCoordinator
+public sealed class DocumentSessionCoordinator : IDisposable
 {
     private const int MaxPersistedTabIdentityLength = 128;
     private const int MaxIdentityGenerationAttempts = 32;
     private static readonly StringComparer StorageIdentityComparer =
         StringComparer.OrdinalIgnoreCase;
     private readonly ISettingsService _settingsService;
+    private readonly IShutdownSessionStore _shutdownSessionStore;
     private readonly IFileSystemService _fileSystemService;
     private readonly IEditorTabFactory _tabFactory;
     private readonly Func<string> _tabIdentityGenerator;
     private readonly Func<string> _fallbackTabIdentityGenerator;
+    private readonly Func<string> _shutdownGenerationGenerator;
+    private readonly string _shutdownSnapshotRoot;
+    private readonly string _shutdownOwner;
     private readonly HashSet<EditorTabViewModel> _shutdownDiscardedTabs = new();
+    private readonly List<SessionFile> _unresolvedShutdownEntries = new();
+    private readonly List<SessionFile> _pendingShutdownEntries = new();
+    private readonly HashSet<string> _replacedShutdownOwners =
+        new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Stream> _shutdownGenerationLeases =
+        new(StorageIdentityComparer);
+    private readonly HashSet<string> _snapshotlessRetirementCandidates =
+        new(StorageIdentityComparer);
+    private readonly List<SessionFile> _retirementCandidates = new();
+    private bool _shutdownRestoreStarted;
+    private bool _shutdownRestoreFailed;
 
     public DocumentSessionCoordinator(
         ISettingsService settingsService,
@@ -26,8 +43,28 @@ public sealed class DocumentSessionCoordinator
             settingsService,
             fileSystemService,
             tabFactory,
+            new LegacyShutdownSessionStore(settingsService),
             () => Guid.NewGuid().ToString("N"),
-            () => Guid.NewGuid().ToString("N"))
+            () => Guid.NewGuid().ToString("N"),
+            () => Guid.NewGuid().ToString("N"),
+            GetDefaultShutdownSnapshotRoot())
+    {
+    }
+
+    public DocumentSessionCoordinator(
+        ISettingsService settingsService,
+        IFileSystemService fileSystemService,
+        IEditorTabFactory tabFactory,
+        IShutdownSessionStore shutdownSessionStore)
+        : this(
+            settingsService,
+            fileSystemService,
+            tabFactory,
+            shutdownSessionStore,
+            () => Guid.NewGuid().ToString("N"),
+            () => Guid.NewGuid().ToString("N"),
+            () => Guid.NewGuid().ToString("N"),
+            GetDefaultShutdownSnapshotRoot())
     {
     }
 
@@ -37,13 +74,43 @@ public sealed class DocumentSessionCoordinator
         IEditorTabFactory tabFactory,
         Func<string> tabIdentityGenerator,
         Func<string>? fallbackTabIdentityGenerator = null)
+        : this(
+            settingsService,
+            fileSystemService,
+            tabFactory,
+            new LegacyShutdownSessionStore(settingsService),
+            tabIdentityGenerator,
+            fallbackTabIdentityGenerator,
+            () => Guid.NewGuid().ToString("N"),
+            GetDefaultShutdownSnapshotRoot())
+    {
+    }
+
+    internal DocumentSessionCoordinator(
+        ISettingsService settingsService,
+        IFileSystemService fileSystemService,
+        IEditorTabFactory tabFactory,
+        IShutdownSessionStore shutdownSessionStore,
+        Func<string> tabIdentityGenerator,
+        Func<string>? fallbackTabIdentityGenerator,
+        Func<string> shutdownGenerationGenerator,
+        string shutdownSnapshotRoot,
+        Func<string>? shutdownOwnerGenerator = null)
     {
         _settingsService = settingsService;
+        _shutdownSessionStore = shutdownSessionStore;
         _fileSystemService = fileSystemService;
         _tabFactory = tabFactory;
         _tabIdentityGenerator = tabIdentityGenerator;
         _fallbackTabIdentityGenerator = fallbackTabIdentityGenerator ??
             (() => Guid.NewGuid().ToString("N"));
+        _shutdownGenerationGenerator = shutdownGenerationGenerator;
+        _shutdownSnapshotRoot = shutdownSnapshotRoot;
+        _shutdownOwner = (shutdownOwnerGenerator ??
+            (() => Guid.NewGuid().ToString("N")))();
+        if (!HasValidPersistedIdentity(_shutdownOwner))
+            throw new InvalidOperationException(
+                "The shutdown snapshot owner is not storage-safe.");
     }
 
     public SessionData CreateNamedSession(
@@ -60,7 +127,10 @@ public sealed class DocumentSessionCoordinator
                 IsUntitled = string.IsNullOrEmpty(tab.FilePath),
                 Content = string.IsNullOrEmpty(tab.FilePath) ? tab.Content : null,
                 CursorOffset = tab.CursorOffset,
-                ScrollOffset = tab.ScrollOffset
+                ScrollOffset = tab.ScrollOffset,
+                HexOffset = tab.HexOffset,
+                BytesPerRow = tab.BytesPerRow,
+                LargeFileTopLine = tab.LargeFileTopLine
             });
         }
 
@@ -106,6 +176,9 @@ public sealed class DocumentSessionCoordinator
 
                 tab.CursorOffset = entry.CursorOffset;
                 tab.ScrollOffset = entry.ScrollOffset;
+                tab.HexOffset = entry.HexOffset;
+                tab.BytesPerRow = entry.BytesPerRow;
+                tab.LargeFileTopLine = entry.LargeFileTopLine;
             }
 
             var descriptors = stagedTabs
@@ -160,6 +233,12 @@ public sealed class DocumentSessionCoordinator
 
     public void CancelShutdownPreparation() => _shutdownDiscardedTabs.Clear();
 
+    public ShutdownRestoreStatus ShutdownRestoreStatus =>
+        new(
+            _pendingShutdownEntries.Count,
+            _unresolvedShutdownEntries.Count,
+            _shutdownRestoreFailed);
+
     public async Task<UnsavedChangesPreparationResult> PrepareUnsavedChangesAsync(
         IReadOnlyList<EditorTabViewModel> tabs,
         IReadOnlyList<EditorTabViewModel> unsavedTabs,
@@ -173,7 +252,7 @@ public sealed class DocumentSessionCoordinator
         {
             if (recordShutdownDiscards)
             {
-                foreach (var tab in unsavedTabs.Where(tab => string.IsNullOrEmpty(tab.FilePath)))
+                foreach (var tab in unsavedTabs)
                     _shutdownDiscardedTabs.Add(tab);
             }
 
@@ -210,11 +289,37 @@ public sealed class DocumentSessionCoordinator
     public async Task<RestoredDocumentSession> RestoreShutdownSessionAsync()
     {
         var restoredCandidates = new List<RestoredTabCandidate>();
-        var openFiles = _settingsService.OpenFiles;
+        _shutdownRestoreStarted = true;
+        _shutdownRestoreFailed = false;
+        _unresolvedShutdownEntries.Clear();
+        _pendingShutdownEntries.Clear();
+        ShutdownSessionState persistedSession;
+        try
+        {
+            persistedSession = _shutdownSessionStore.ReadShutdownSession(
+                AcquireShutdownGenerationLeases);
+        }
+        catch
+        {
+            _shutdownRestoreFailed = true;
+            throw;
+        }
+        var openFiles = persistedSession.Files;
+        var activeTabIndex = -1;
+        for (var index = 0; index < openFiles.Count; index++)
+        {
+            if (openFiles[index].IsActive)
+            {
+                activeTabIndex = index;
+                break;
+            }
+        }
+        if (activeTabIndex < 0)
+            activeTabIndex = persistedSession.ActiveTabIndex;
         if (openFiles == null || openFiles.Count == 0)
             return new RestoredDocumentSession(
                 restoredCandidates,
-                _settingsService.ActiveTabIndex);
+                activeTabIndex);
 
         for (var index = 0; index < openFiles.Count; index++)
         {
@@ -226,12 +331,23 @@ public sealed class DocumentSessionCoordinator
                 {
                     tab.CursorOffset = sessionFile.CursorOffset;
                     tab.ScrollOffset = sessionFile.ScrollOffset;
+                    tab.HexOffset = sessionFile.HexOffset;
+                    tab.BytesPerRow = sessionFile.BytesPerRow;
+                    tab.LargeFileTopLine = sessionFile.LargeFileTopLine;
                     restoredCandidates.Add(
-                        new RestoredTabCandidate(tab, index, sessionFile.TabIdentity));
+                        new RestoredTabCandidate(
+                            tab,
+                            index,
+                            sessionFile.TabIdentity,
+                            CloneSessionFile(sessionFile)));
+                    TrackPendingShutdownEntry(sessionFile);
                 }
+                else
+                    TrackUnresolvedShutdownEntry(sessionFile);
             }
             catch (Exception ex)
             {
+                TrackUnresolvedShutdownEntry(sessionFile);
                 Trace.TraceWarning(
                     "Failed to restore session file '{0}': {1}",
                     sessionFile.FilePath,
@@ -241,7 +357,7 @@ public sealed class DocumentSessionCoordinator
 
         return new RestoredDocumentSession(
             restoredCandidates,
-            _settingsService.ActiveTabIndex);
+            activeTabIndex);
     }
 
     public RestoredSessionAdoptionResult AdoptRestoredTabs(
@@ -264,6 +380,11 @@ public sealed class DocumentSessionCoordinator
         catch
         {
             foreach (var candidate in candidates)
+            {
+                if (candidate.SourceEntry != null)
+                    TrackUnresolvedShutdownEntry(candidate.SourceEntry);
+            }
+            foreach (var candidate in candidates)
                 candidate.Tab.Dispose();
             throw;
         }
@@ -273,6 +394,7 @@ public sealed class DocumentSessionCoordinator
             duplicate => duplicate.Descriptor.SourceIndex);
         var adoptedTabs = new List<EditorTabViewModel>(candidates.Count);
         var discardedDuplicates = new List<EditorTabViewModel>();
+        var ownersBySessionIndex = new Dictionary<int, EditorTabViewModel>();
         EditorTabViewModel? selectedTab = null;
 
         for (var index = 0; index < candidates.Count; index++)
@@ -282,11 +404,12 @@ public sealed class DocumentSessionCoordinator
             {
                 candidate.Tab.Dispose();
                 discardedDuplicates.Add(candidate.Tab);
+                TrackConsumedShutdownEntry(candidate.SourceEntry);
+                var duplicateOwner = duplicate.Owner.LiveTab ??
+                    candidates[duplicate.Owner.PlannedSourceIndex!.Value].Tab;
+                ownersBySessionIndex[candidate.SessionIndex] = duplicateOwner;
                 if (candidate.SessionIndex == restoredSession.ActiveTabIndex)
-                {
-                    selectedTab = duplicate.Owner.LiveTab ??
-                        candidates[duplicate.Owner.PlannedSourceIndex!.Value].Tab;
-                }
+                    selectedTab = duplicateOwner;
                 continue;
             }
 
@@ -303,11 +426,27 @@ public sealed class DocumentSessionCoordinator
             {
                 adoptTab(candidate.Tab);
                 adoptedTabs.Add(candidate.Tab);
+                TrackConsumedShutdownEntry(candidate.SourceEntry);
+                ownersBySessionIndex[candidate.SessionIndex] = candidate.Tab;
                 if (candidate.SessionIndex == restoredSession.ActiveTabIndex)
                     selectedTab = candidate.Tab;
             }
             catch
             {
+                if (!liveTabs.Contains(candidate.Tab) &&
+                    candidate.SourceEntry != null)
+                {
+                    TrackUnresolvedShutdownEntry(candidate.SourceEntry);
+                }
+                else if (liveTabs.Contains(candidate.Tab))
+                {
+                    TrackConsumedShutdownEntry(candidate.SourceEntry);
+                }
+                foreach (var remaining in candidates.Skip(index + 1))
+                {
+                    if (remaining.SourceEntry != null)
+                        TrackUnresolvedShutdownEntry(remaining.SourceEntry);
+                }
                 if (!liveTabs.Contains(candidate.Tab))
                     candidate.Tab.Dispose();
                 foreach (var remaining in candidates.Skip(index + 1))
@@ -316,7 +455,16 @@ public sealed class DocumentSessionCoordinator
             }
         }
 
-        if (selectedTab == null && liveTabs.Count > 0)
+        if (selectedTab == null && ownersBySessionIndex.Count > 0)
+        {
+            selectedTab = ownersBySessionIndex
+                .OrderBy(item => Math.Abs(
+                    (long)item.Key - restoredSession.ActiveTabIndex))
+                .ThenBy(item => item.Key)
+                .First()
+                .Value;
+        }
+        else if (selectedTab == null && liveTabs.Count > 0)
         {
             selectedTab = liveTabs[
                 Math.Clamp(restoredSession.ActiveTabIndex, 0, liveTabs.Count - 1)];
@@ -332,46 +480,200 @@ public sealed class DocumentSessionCoordinator
         IReadOnlyList<EditorTabViewModel> tabs,
         EditorTabViewModel? selectedTab)
     {
-        var sessionFiles = new List<SessionFile>();
-        var persistedActiveTabIndex = 0;
-        var tempDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "FastEdit", "Temp");
-        _fileSystemService.CreateDirectory(tempDir);
-
-        foreach (var tab in tabs)
+        var mutationSnapshot = CaptureWorkspace(tabs);
+        var generation = _shutdownGenerationGenerator();
+        if (!HasValidPersistedIdentity(generation))
         {
-            if (_shutdownDiscardedTabs.Contains(tab) && string.IsNullOrEmpty(tab.FilePath))
-                continue;
-
-            if (tab == selectedTab)
-                persistedActiveTabIndex = sessionFiles.Count;
-
-            var sessionFile = new SessionFile
-            {
-                FilePath = string.IsNullOrEmpty(tab.FilePath) ? tab.FileName : tab.FilePath,
-                TabIdentity = tab.AutoSaveIdentity,
-                IsUntitled = string.IsNullOrEmpty(tab.FilePath),
-                IsBinaryMode = tab.Mode == FileOpenMode.Binary,
-                CursorOffset = tab.CursorOffset,
-                ScrollOffset = tab.ScrollOffset
-            };
-
-            if (sessionFile.IsUntitled && tab.Mode == FileOpenMode.Text)
-                PersistUntitledContent(tab, sessionFile, tempDir);
-
-            sessionFiles.Add(sessionFile);
+            throw new InvalidOperationException(
+                "The shutdown snapshot generation is not storage-safe.");
         }
 
-        _settingsService.OpenFiles = sessionFiles;
-        _settingsService.ActiveTabIndex = persistedActiveTabIndex;
-        _settingsService.Save();
-        CleanupTempFiles(
-            sessionFiles
-                .Select(file => file.TempFilePath)
-                .Where(path => !string.IsNullOrEmpty(path))
+        var generationDirectory = GetShutdownGenerationDirectory(generation);
+        var createdSnapshotPaths = new List<string>();
+        var binaryRebases = new List<PreparedBinaryRebase>();
+        var discardedBinaryTabs = new List<EditorTabViewModel>();
+        var published = false;
+        var binaryHandoffCompleted = false;
+        try
+        {
+            _fileSystemService.CreateDirectory(generationDirectory);
+            RejectReparsePoint(_shutdownSnapshotRoot);
+            RejectReparsePoint(generationDirectory);
+            var leaseMarkerPath = GetShutdownLeaseMarkerPath(generation);
+            _fileSystemService.WriteStreamAtomic(leaseMarkerPath, _ => { });
+            createdSnapshotPaths.Add(leaseMarkerPath);
+            var carryForwardDurableSession =
+                !_shutdownRestoreStarted || _shutdownRestoreFailed;
+            var previousSession = _shutdownSessionStore.ReadShutdownSession(
+                carryForwardDurableSession
+                    ? AcquireShutdownGenerationLeases
+                    : null);
+            var sessionFiles = _unresolvedShutdownEntries
+                .Concat(_pendingShutdownEntries)
+                .Concat(
+                    carryForwardDurableSession
+                        ? previousSession.Files
+                        : Array.Empty<SessionFile>())
+                .DistinctBy(file => (
+                    file.SnapshotGeneration,
+                    file.SnapshotFile,
+                    file.TabIdentity,
+                    file.FilePath))
+                .Select(CloneSessionFile)
+                .ToList();
+            var persistedActiveTabIndex = sessionFiles.Count == 0
+                ? 0
+                : Math.Clamp(
+                    previousSession.ActiveTabIndex,
+                    0,
+                    sessionFiles.Count - 1);
+            var usedIdentities = new HashSet<string>(StorageIdentityComparer);
+            if (selectedTab != null)
+            {
+                foreach (var carriedEntry in sessionFiles)
+                    carriedEntry.IsActive = false;
+            }
+
+            foreach (var tab in tabs)
+            {
+                var explicitlyDiscarded = _shutdownDiscardedTabs.Contains(tab);
+                if (explicitlyDiscarded && string.IsNullOrEmpty(tab.FilePath))
+                    continue;
+
+                if (tab == selectedTab)
+                    persistedActiveTabIndex = sessionFiles.Count;
+
+                if (!HasValidPersistedIdentity(tab.AutoSaveIdentity) ||
+                    !usedIdentities.Add(tab.AutoSaveIdentity))
+                {
+                    throw new InvalidOperationException(
+                        $"Tab '{tab.FileName}' does not have a unique storage-safe identity.");
+                }
+
+                var sessionFile = CreateShutdownSessionFile(tab);
+                if (explicitlyDiscarded)
+                {
+                    sessionFile.IsModified = false;
+                    if (sessionFile.Mode == FileOpenMode.Binary)
+                        discardedBinaryTabs.Add(tab);
+                }
+                sessionFile.IsActive = tab == selectedTab;
+                if (!explicitlyDiscarded &&
+                    RequiresShutdownSnapshot(sessionFile))
+                {
+                    var snapshotPath = PersistShutdownSnapshot(
+                        tab,
+                        sessionFile,
+                        generation,
+                        generationDirectory);
+                    createdSnapshotPaths.Add(snapshotPath);
+                    if (sessionFile.Mode == FileOpenMode.Binary)
+                    {
+                        binaryRebases.Add(new PreparedBinaryRebase(
+                            tab,
+                            snapshotPath,
+                            sessionFile.IsModified,
+                            tab.PrepareBinarySnapshot(snapshotPath)));
+                    }
+                }
+
+                sessionFiles.Add(sessionFile);
+            }
+
+            var activeEntryIndex = sessionFiles.FindIndex(file => file.IsActive);
+            if (activeEntryIndex >= 0)
+                persistedActiveTabIndex = activeEntryIndex;
+            var ownedGenerationFiles = sessionFiles
+                .Where(file => string.Equals(
+                    file.SnapshotGeneration,
+                    generation,
+                    StringComparison.Ordinal))
+                .Select(file => file.SnapshotFile)
+                .Where(file => !string.IsNullOrEmpty(file))
                 .Cast<string>()
-                .ToArray());
+                .ToList();
+            foreach (var sessionFile in sessionFiles.Where(file =>
+                         string.Equals(
+                             file.SnapshotGeneration,
+                             generation,
+                             StringComparison.Ordinal)))
+            {
+                sessionFile.SnapshotGenerationFiles = ownedGenerationFiles.ToList();
+            }
+
+            if (mutationSnapshot.HasChanged(tabs))
+            {
+                throw new InvalidOperationException(
+                    "Files changed while the shutdown snapshot was being persisted.");
+            }
+
+            var publishedSession = new ShutdownSessionState(
+                sessionFiles,
+                persistedActiveTabIndex,
+                _replacedShutdownOwners
+                    .Append(_shutdownOwner)
+                    .ToArray());
+            _shutdownSessionStore.PublishShutdownSession(
+                publishedSession,
+                publication =>
+                {
+                    try
+                    {
+                        foreach (var rebase in binaryRebases)
+                        {
+                            rebase.Tab.RebaseBinarySnapshot(
+                                rebase.PreparedBuffer,
+                                rebase.Path,
+                                rebase.IsModified);
+                            rebase.MarkAdopted();
+                        }
+                        foreach (var discardedBinaryTab in discardedBinaryTabs)
+                            discardedBinaryTab.ReleaseBinarySnapshotForShutdown();
+                        binaryHandoffCompleted = true;
+                        RetireUnreferencedShutdownGenerations(
+                            publication.PreviousSession.Files
+                                .Concat(_retirementCandidates)
+                                .ToArray(),
+                            publication.PublishedSession.Files);
+                        RetireSnapshotlessShutdownGeneration(
+                            generation,
+                            publication.PublishedSession.Files);
+                    }
+                    catch (Exception ex)
+                    {
+                        Trace.TraceWarning(
+                            "Failed to complete shutdown snapshot handoff or retirement: {0}",
+                            ex.Message);
+                    }
+                });
+            published = true;
+            if (!binaryHandoffCompleted)
+            {
+                throw new InvalidOperationException(
+                    "The shutdown session was published, but binary snapshot handoff failed.");
+            }
+            if (ownedGenerationFiles.Count == 0)
+            {
+                DeleteUnpublishedShutdownGeneration(
+                    generationDirectory,
+                    createdSnapshotPaths);
+            }
+            _unresolvedShutdownEntries.Clear();
+            _pendingShutdownEntries.Clear();
+            _replacedShutdownOwners.Clear();
+            _shutdownRestoreStarted = true;
+            _shutdownRestoreFailed = false;
+        }
+        catch
+        {
+            foreach (var rebase in binaryRebases)
+                rebase.Dispose();
+            if (!published)
+                DeleteUnpublishedShutdownGeneration(
+                    generationDirectory,
+                    createdSnapshotPaths);
+            throw;
+        }
     }
 
     public IReadOnlyList<AutoSaveEntry> CreateAutoSaveEntries(
@@ -391,15 +693,45 @@ public sealed class DocumentSessionCoordinator
                     $"Tab '{tab.FileName}' does not have a unique storage-safe identity.");
             }
 
+            var mutationVersion = tab.UserMutationVersion;
+            var isModified = tab.IsModified;
             entries.Add(new AutoSaveEntry(
-                $"tab-{tab.AutoSaveIdentity}",
-                tab.FileName,
-                string.IsNullOrEmpty(tab.FilePath) ? null : NormalizeFilePath(tab.FilePath),
-                tab.Content ?? string.Empty,
-                string.IsNullOrEmpty(tab.FilePath),
-                tab.CursorOffset,
-                tab.ScrollOffset,
-                tab.AutoSaveIdentity));
+                Id: $"tab-{tab.AutoSaveIdentity}",
+                FileName: tab.FileName,
+                FilePath: string.IsNullOrEmpty(tab.FilePath)
+                    ? null
+                    : NormalizeFilePath(tab.FilePath),
+                Content: tab.Mode == FileOpenMode.Text
+                    ? tab.Content ?? string.Empty
+                    : string.Empty,
+                IsUntitled: string.IsNullOrEmpty(tab.FilePath),
+                CursorOffset: tab.CursorOffset,
+                ScrollOffset: tab.ScrollOffset,
+                TabIdentity: tab.AutoSaveIdentity,
+                Mode: tab.Mode,
+                IsModified: isModified,
+                EncodingCodePage: tab.FileEncoding.CodePage,
+                HasBom: tab.HasBom,
+                HexOffset: tab.HexOffset,
+                BytesPerRow: tab.BytesPerRow,
+                LargeFileTopLine: tab.LargeFileTopLine,
+                ContentFormat: tab.Mode == FileOpenMode.Text
+                    ? LosslessTextSnapshotCodec.Format
+                    : null,
+                ContentLength: tab.Mode == FileOpenMode.Binary
+                    ? tab.ByteBuffer?.Length ?? -1
+                    : -1,
+                WriteContent: tab.Mode == FileOpenMode.Binary
+                    ? tab.WriteBinarySnapshot
+                    : null,
+                AdoptPersistedContent:
+                    tab.Mode == FileOpenMode.Binary &&
+                    tab.RequiresAutoSaveBinaryHandoff
+                        ? path => tab.TryAdoptAutoSaveBinarySnapshot(
+                            path,
+                            mutationVersion,
+                            isModified)
+                        : null));
         }
 
         return entries;
@@ -407,16 +739,53 @@ public sealed class DocumentSessionCoordinator
 
     public EditorTabViewModel CreateRecoveryTab(AutoSaveEntry entry)
     {
-        var tab = _tabFactory.CreateUntitled(entry.Content);
-        if (!string.IsNullOrEmpty(entry.TabIdentity))
-            tab.RestoreAutoSaveIdentity(entry.TabIdentity);
-        tab.FileName = entry.FileName;
-        if (!entry.IsUntitled && !string.IsNullOrEmpty(entry.FilePath))
-            tab.FilePath = entry.FilePath;
-        tab.CursorOffset = entry.CursorOffset;
-        tab.ScrollOffset = entry.ScrollOffset;
-        tab.IsModified = true;
-        return tab;
+        var tab = entry.Mode == FileOpenMode.Text
+            ? _tabFactory.CreateUntitled(entry.Content)
+            : _tabFactory.Create();
+        try
+        {
+            if (entry.Mode == FileOpenMode.Binary)
+            {
+                if (string.IsNullOrEmpty(entry.ContentPath))
+                    throw new InvalidDataException("Binary recovery content is missing.");
+                tab.RestoreAutoSaveBinarySnapshot(
+                    entry.IsUntitled ? string.Empty : entry.FilePath ?? string.Empty,
+                    entry.FileName,
+                    entry.ContentPath,
+                    entry.IsModified,
+                    entry.HexOffset,
+                    entry.BytesPerRow);
+            }
+            else if (entry.Mode == FileOpenMode.Text)
+            {
+                tab.RestoreTextSnapshot(
+                    entry.IsUntitled ? string.Empty : entry.FilePath ?? string.Empty,
+                    entry.FileName,
+                    entry.Content,
+                    entry.IsModified,
+                    entry.EncodingCodePage,
+                    entry.HasBom);
+            }
+            else
+            {
+                throw new InvalidDataException(
+                    "Large-file recovery requires its original source.");
+            }
+
+            if (!string.IsNullOrEmpty(entry.TabIdentity))
+                tab.RestoreAutoSaveIdentity(entry.TabIdentity);
+            tab.CursorOffset = entry.CursorOffset;
+            tab.ScrollOffset = entry.ScrollOffset;
+            tab.HexOffset = entry.HexOffset;
+            tab.BytesPerRow = entry.BytesPerRow;
+            tab.LargeFileTopLine = entry.LargeFileTopLine;
+            return tab;
+        }
+        catch
+        {
+            tab.Dispose();
+            throw;
+        }
     }
 
     public RecoveryBatchPlan PlanRecoveryBatch(
@@ -497,9 +866,52 @@ public sealed class DocumentSessionCoordinator
     private async Task<EditorTabViewModel?> RestoreSessionFileAsync(
         SessionFile sessionFile)
     {
+        if (!string.IsNullOrEmpty(sessionFile.SnapshotGeneration) ||
+            !string.IsNullOrEmpty(sessionFile.SnapshotFile))
+        {
+            var snapshotPath = ResolveShutdownSnapshotPath(sessionFile);
+            var snapshotTab = _tabFactory.Create();
+            try
+            {
+                var isModified = HasNamedSnapshotBaseDrift(sessionFile);
+                if (GetSessionMode(sessionFile) == FileOpenMode.Binary)
+                {
+                    snapshotTab.RestoreBinarySnapshot(
+                        sessionFile.IsUntitled ? string.Empty : sessionFile.FilePath,
+                        GetSessionFileName(sessionFile),
+                        snapshotPath,
+                        isModified,
+                        sessionFile.HexOffset,
+                        sessionFile.BytesPerRow);
+                }
+                else
+                {
+                    var content = await ReadTextSnapshotAsync(
+                        snapshotPath,
+                        sessionFile.SnapshotFormat);
+                    snapshotTab.RestoreTextSnapshot(
+                        sessionFile.IsUntitled ? string.Empty : sessionFile.FilePath,
+                        GetSessionFileName(sessionFile),
+                        content,
+                        isModified,
+                        sessionFile.EncodingCodePage,
+                        sessionFile.HasBom);
+                }
+
+                if (!string.IsNullOrEmpty(sessionFile.TabIdentity))
+                    snapshotTab.RestoreAutoSaveIdentity(sessionFile.TabIdentity);
+                return snapshotTab;
+            }
+            catch
+            {
+                snapshotTab.Dispose();
+                throw;
+            }
+        }
+
         if (sessionFile.IsUntitled)
         {
-            if (sessionFile.IsBinaryMode)
+            if (GetSessionMode(sessionFile) == FileOpenMode.Binary)
                 return null;
 
             var content = sessionFile.Content ?? string.Empty;
@@ -510,17 +922,32 @@ public sealed class DocumentSessionCoordinator
             }
 
             var untitledTab = _tabFactory.CreateUntitled(content);
-            untitledTab.FileName = Path.GetFileName(sessionFile.FilePath);
+            untitledTab.FileName = GetSessionFileName(sessionFile);
+            untitledTab.SetContentBaseline(content, sessionFile.IsModified);
+            if (!string.IsNullOrEmpty(sessionFile.TabIdentity))
+                untitledTab.RestoreAutoSaveIdentity(sessionFile.TabIdentity);
             return untitledTab;
         }
 
+        if (sessionFile.IsModified)
+            return null;
         if (!_fileSystemService.FileExists(sessionFile.FilePath))
             return null;
+        if (!string.IsNullOrEmpty(sessionFile.BaseContentHash) &&
+            !string.Equals(
+                sessionFile.BaseContentHash,
+                ComputeFileContentHash(sessionFile.FilePath),
+                StringComparison.Ordinal))
+        {
+            return null;
+        }
 
         var tab = _tabFactory.Create();
         try
         {
             await tab.LoadFileAsync(sessionFile.FilePath);
+            if (!string.IsNullOrEmpty(sessionFile.TabIdentity))
+                tab.RestoreAutoSaveIdentity(sessionFile.TabIdentity);
             return tab;
         }
         catch
@@ -673,56 +1100,582 @@ public sealed class DocumentSessionCoordinator
         !identity.Contains(Path.DirectorySeparatorChar) &&
         !identity.Contains(Path.AltDirectorySeparatorChar);
 
-    private void PersistUntitledContent(
+    private static string GetDefaultShutdownSnapshotRoot() =>
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "FastEdit",
+            "ShutdownSessions");
+
+    private SessionFile CreateShutdownSessionFile(EditorTabViewModel tab)
+    {
+        var sessionFile = new SessionFile
+        {
+            FilePath = string.IsNullOrEmpty(tab.FilePath)
+                ? tab.FileName
+                : tab.FilePath,
+            FileName = tab.FileName,
+            TabIdentity = tab.AutoSaveIdentity,
+            SnapshotOwner = _shutdownOwner,
+            IsUntitled = string.IsNullOrEmpty(tab.FilePath),
+            IsBinaryMode = tab.Mode == FileOpenMode.Binary,
+            Mode = tab.Mode,
+            IsModified = tab.IsModified,
+            EncodingCodePage = tab.FileEncoding.CodePage,
+            HasBom = tab.HasBom,
+            CursorOffset = tab.CursorOffset,
+            ScrollOffset = tab.ScrollOffset,
+            HexOffset = tab.HexOffset,
+            BytesPerRow = tab.BytesPerRow,
+            LargeFileTopLine = tab.LargeFileTopLine
+        };
+        if (!sessionFile.IsUntitled && !sessionFile.IsModified)
+        {
+            if (_fileSystemService.FileExists(tab.FilePath))
+            {
+                var sourceHash = ComputeFileContentHash(tab.FilePath);
+                if (sessionFile.Mode == FileOpenMode.LargeText)
+                {
+                    sessionFile.BaseContentHash = sourceHash;
+                }
+                else if (string.Equals(
+                        sourceHash,
+                        ComputeTabContentHash(tab),
+                        StringComparison.Ordinal))
+                {
+                    sessionFile.BaseContentHash = sourceHash;
+                }
+                else
+                {
+                    sessionFile.IsModified = true;
+                }
+            }
+            else
+                sessionFile.IsModified = true;
+        }
+
+        return sessionFile;
+    }
+
+    private static bool RequiresShutdownSnapshot(SessionFile sessionFile) =>
+        sessionFile.Mode != FileOpenMode.LargeText &&
+        (sessionFile.IsUntitled ||
+         sessionFile.IsModified ||
+         sessionFile.Mode is FileOpenMode.Text or FileOpenMode.Binary);
+
+    private string PersistShutdownSnapshot(
         EditorTabViewModel tab,
         SessionFile sessionFile,
-        string tempDir)
+        string generation,
+        string generationDirectory)
     {
-        var tempPath = Path.Combine(tempDir, $"{Guid.NewGuid():N}_{tab.FileName}.tmp");
+        var extension = sessionFile.Mode == FileOpenMode.Binary
+            ? ".bin"
+            : ".txt";
+        var snapshotFile = $"tab-{tab.AutoSaveIdentity}{extension}";
+        var snapshotPath = Path.Combine(generationDirectory, snapshotFile);
+        if (sessionFile.Mode == FileOpenMode.Binary)
+        {
+            _fileSystemService.WriteStreamAtomic(
+                snapshotPath,
+                tab.WriteBinarySnapshot);
+        }
+        else
+        {
+            _fileSystemService.WriteStreamAtomic(
+                snapshotPath,
+                stream => LosslessTextSnapshotCodec.Write(stream, tab.Content));
+        }
+
+        sessionFile.SnapshotGeneration = generation;
+        sessionFile.SnapshotFile = snapshotFile;
+        sessionFile.SnapshotFormat = LosslessTextSnapshotCodec.Format;
+        return snapshotPath;
+    }
+
+    private async Task<string> ReadTextSnapshotAsync(
+        string snapshotPath,
+        string? snapshotFormat) =>
+        await LosslessTextSnapshotCodec.ReadAsync(
+            _fileSystemService,
+            snapshotPath,
+            snapshotFormat);
+
+    private string ResolveShutdownSnapshotPath(SessionFile sessionFile)
+    {
+        var generation = sessionFile.SnapshotGeneration;
+        var snapshotFile = sessionFile.SnapshotFile;
+        if (!HasValidPersistedIdentity(generation) ||
+            string.IsNullOrWhiteSpace(snapshotFile) ||
+            Path.IsPathRooted(snapshotFile) ||
+            !string.Equals(
+                Path.GetFileName(snapshotFile),
+                snapshotFile,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("The shutdown snapshot reference is invalid.");
+        }
+
+        var expectedExtension = GetSessionMode(sessionFile) == FileOpenMode.Binary
+            ? ".bin"
+            : ".txt";
+        var expectedFile = $"tab-{sessionFile.TabIdentity}{expectedExtension}";
+        if (!HasValidPersistedIdentity(sessionFile.TabIdentity) ||
+            !string.Equals(snapshotFile, expectedFile, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("The shutdown snapshot filename is invalid.");
+        }
+
+        return ResolveOwnedShutdownSnapshotPath(generation!, snapshotFile);
+    }
+
+    private string ResolveOwnedShutdownSnapshotPath(
+        string generation,
+        string snapshotFile)
+    {
+        if (!HasValidPersistedIdentity(generation) ||
+            string.IsNullOrWhiteSpace(snapshotFile) ||
+            Path.IsPathRooted(snapshotFile) ||
+            !string.Equals(
+                Path.GetFileName(snapshotFile),
+                snapshotFile,
+                StringComparison.Ordinal) ||
+            !snapshotFile.StartsWith("tab-", StringComparison.Ordinal) ||
+            !(snapshotFile.EndsWith(".txt", StringComparison.Ordinal) ||
+              snapshotFile.EndsWith(".bin", StringComparison.Ordinal)))
+        {
+            throw new InvalidDataException("The owned shutdown snapshot reference is invalid.");
+        }
+
+        var generationDirectory = GetShutdownGenerationDirectory(generation);
+        var snapshotPath = Path.GetFullPath(Path.Combine(
+            generationDirectory,
+            snapshotFile));
+        var rootPrefix = Path.GetFullPath(_shutdownSnapshotRoot)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+            Path.DirectorySeparatorChar;
+        if (!snapshotPath.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase) ||
+            !_fileSystemService.FileExists(snapshotPath))
+        {
+            throw new InvalidDataException("The shutdown snapshot is unavailable.");
+        }
+
+        RejectReparsePoint(_shutdownSnapshotRoot);
+        RejectReparsePoint(generationDirectory);
+        RejectReparsePoint(snapshotPath);
+        return snapshotPath;
+    }
+
+    private string GetShutdownGenerationDirectory(string generation)
+    {
+        var root = Path.GetFullPath(_shutdownSnapshotRoot);
+        var generationDirectory = Path.GetFullPath(Path.Combine(root, generation));
+        var rootPrefix = root.TrimEnd(
+            Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (!generationDirectory.StartsWith(
+                rootPrefix,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException("The shutdown snapshot generation is invalid.");
+        }
+
+        return generationDirectory;
+    }
+
+    private string GetShutdownLeaseMarkerPath(string generation) =>
+        Path.Combine(GetShutdownGenerationDirectory(generation), ".lease");
+
+    private void AcquireShutdownGenerationLeases(ShutdownSessionState session)
+    {
+        foreach (var generation in session.Files
+                     .Select(file => file.SnapshotGeneration)
+                     .Where(HasValidPersistedIdentity)
+                     .Cast<string>()
+                     .Distinct(StorageIdentityComparer))
+        {
+            if (_shutdownGenerationLeases.ContainsKey(generation))
+                continue;
+
+            var generationDirectory = GetShutdownGenerationDirectory(generation);
+            var markerPath = GetShutdownLeaseMarkerPath(generation);
+            if (!_fileSystemService.FileExists(markerPath))
+                continue;
+
+            RejectReparsePoint(_shutdownSnapshotRoot);
+            RejectReparsePoint(generationDirectory);
+            RejectReparsePoint(markerPath);
+            _shutdownGenerationLeases.Add(
+                generation,
+                _fileSystemService.OpenFile(
+                    markerPath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read));
+        }
+    }
+
+    private void RejectReparsePoint(string path)
+    {
+        if ((_fileSystemService.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidDataException("Shutdown snapshots cannot use reparse points.");
+    }
+
+    private void RetireUnreferencedShutdownGenerations(
+        IReadOnlyList<SessionFile> previousFiles,
+        IReadOnlyList<SessionFile> publishedFiles)
+    {
+        var failedRetirements = new List<SessionFile>();
+        var retainedGenerations = publishedFiles
+            .Select(file => file.SnapshotGeneration)
+            .Where(HasValidPersistedIdentity)
+            .ToHashSet(StorageIdentityComparer);
+        foreach (var generationGroup in previousFiles
+                     .Where(file => HasValidPersistedIdentity(file.SnapshotGeneration))
+                     .GroupBy(file => file.SnapshotGeneration!, StorageIdentityComparer))
+        {
+            if (retainedGenerations.Contains(generationGroup.Key))
+                continue;
+
+            try
+            {
+                if (_shutdownGenerationLeases.Remove(
+                        generationGroup.Key,
+                        out var ownedLease))
+                {
+                    ownedLease.Dispose();
+                }
+
+                var leaseMarkerPath =
+                    GetShutdownLeaseMarkerPath(generationGroup.Key);
+                if (!_fileSystemService.FileExists(leaseMarkerPath))
+                    continue;
+                using (var exclusiveLease = _fileSystemService.OpenFile(
+                           leaseMarkerPath,
+                           FileMode.Open,
+                           FileAccess.ReadWrite,
+                           FileShare.None))
+                {
+                var ownedFiles = generationGroup
+                    .SelectMany(file =>
+                        file.SnapshotGenerationFiles ?? new List<string>())
+                    .Concat(generationGroup
+                        .Select(file => file.SnapshotFile)
+                        .Where(file => !string.IsNullOrEmpty(file))
+                        .Cast<string>())
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray();
+                var resolvedPaths = ownedFiles
+                    .Select(file => ResolveOwnedShutdownSnapshotPath(
+                        generationGroup.Key,
+                        file))
+                    .ToArray();
+                foreach (var path in resolvedPaths)
+                    _fileSystemService.DeleteFile(path);
+                }
+
+                _fileSystemService.DeleteFile(leaseMarkerPath);
+
+                var generationDirectory =
+                    GetShutdownGenerationDirectory(generationGroup.Key);
+                if (_fileSystemService.GetFiles(generationDirectory, "*").Length == 0 &&
+                    _fileSystemService.GetDirectories(generationDirectory).Length == 0)
+                {
+                    _fileSystemService.DeleteDirectory(generationDirectory);
+                }
+            }
+
+            catch (Exception ex)
+            {
+                failedRetirements.AddRange(
+                    generationGroup.Select(CloneSessionFile));
+                Trace.TraceWarning(
+                    "Failed to retire shutdown snapshot generation '{0}': {1}",
+                    generationGroup.Key,
+                    ex.Message);
+            }
+        }
+        _retirementCandidates.Clear();
+        _retirementCandidates.AddRange(failedRetirements);
+    }
+
+    private void RetireSnapshotlessShutdownGeneration(
+        string generation,
+        IReadOnlyList<SessionFile> publishedFiles)
+    {
+        if (!publishedFiles.Any(file => string.Equals(
+                file.SnapshotGeneration,
+                generation,
+                StringComparison.OrdinalIgnoreCase)))
+        {
+            _snapshotlessRetirementCandidates.Add(generation);
+        }
+        foreach (var candidate in _snapshotlessRetirementCandidates.ToArray())
+        {
+            if (publishedFiles.Any(file => string.Equals(
+                    file.SnapshotGeneration,
+                    candidate,
+                    StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            if (TryRetireSnapshotlessShutdownGeneration(candidate))
+                _snapshotlessRetirementCandidates.Remove(candidate);
+        }
+    }
+
+    private bool TryRetireSnapshotlessShutdownGeneration(string generation)
+    {
         try
         {
-            _fileSystemService.WriteAllTextAtomic(tempPath, tab.Content);
-            sessionFile.TempFilePath = tempPath;
+            var leaseMarkerPath = GetShutdownLeaseMarkerPath(generation);
+            if (!_fileSystemService.FileExists(leaseMarkerPath))
+                return true;
+            using (var exclusiveLease = _fileSystemService.OpenFile(
+                       leaseMarkerPath,
+                       FileMode.Open,
+                       FileAccess.ReadWrite,
+                       FileShare.None))
+            {
+            }
+            var generationDirectory = GetShutdownGenerationDirectory(generation);
+            var remainingFiles = _fileSystemService
+                .GetFiles(generationDirectory, "*")
+                .Where(path => !HasSameOpenIdentity(path, leaseMarkerPath))
+                .ToArray();
+            if (remainingFiles.Length != 0 ||
+                _fileSystemService.GetDirectories(generationDirectory).Length != 0)
+                return false;
+
+            _fileSystemService.DeleteFile(leaseMarkerPath);
+            _fileSystemService.DeleteDirectory(generationDirectory);
+            return true;
         }
         catch (Exception ex)
         {
             Trace.TraceWarning(
-                "Failed to write temp session file '{0}'; storing content in settings instead: {1}",
-                tempPath,
+                "Failed to retire snapshotless shutdown generation '{0}': {1}",
+                generation,
                 ex.Message);
-            sessionFile.Content = tab.Content;
+            return false;
         }
     }
 
-    private void CleanupTempFiles(IReadOnlyCollection<string> preservedPaths)
+    private void DeleteUnpublishedShutdownGeneration(
+        string generationDirectory,
+        IReadOnlyList<string> createdSnapshotPaths)
     {
-        var tempDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "FastEdit", "Temp");
-        if (!_fileSystemService.DirectoryExists(tempDir))
-            return;
+        foreach (var path in createdSnapshotPaths)
+        {
+            try
+            {
+                _fileSystemService.DeleteFile(path);
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning(
+                    "Failed to delete unpublished shutdown snapshot '{0}': {1}",
+                    path,
+                    ex.Message);
+            }
+        }
 
         try
         {
-            foreach (var file in _fileSystemService.GetFiles(tempDir, "*.tmp"))
+            if (_fileSystemService.DirectoryExists(generationDirectory) &&
+                _fileSystemService.GetFiles(generationDirectory, "*").Length == 0 &&
+                _fileSystemService.GetDirectories(generationDirectory).Length == 0)
             {
-                if (preservedPaths.Contains(file, StringComparer.OrdinalIgnoreCase))
-                    continue;
-
-                try
-                {
-                    _fileSystemService.DeleteFile(file);
-                }
-                catch (Exception ex)
-                {
-                    Trace.TraceWarning("Failed to delete temp session file '{0}': {1}", file, ex.Message);
-                }
+                _fileSystemService.DeleteDirectory(generationDirectory);
             }
         }
         catch (Exception ex)
         {
-            Trace.TraceWarning("Failed to clean temp session files: {0}", ex.Message);
+            Trace.TraceWarning(
+                "Failed to delete unpublished shutdown generation '{0}': {1}",
+                generationDirectory,
+                ex.Message);
         }
+    }
+
+    private void TrackUnresolvedShutdownEntry(SessionFile sessionFile)
+    {
+        RemovePendingShutdownEntry(sessionFile);
+        if (_unresolvedShutdownEntries.Any(existing =>
+                string.Equals(
+                    existing.SnapshotGeneration,
+                    sessionFile.SnapshotGeneration,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    existing.SnapshotFile,
+                    sessionFile.SnapshotFile,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    existing.TabIdentity,
+                    sessionFile.TabIdentity,
+                    StringComparison.Ordinal)))
+        {
+            return;
+        }
+
+        _unresolvedShutdownEntries.Add(CloneSessionFile(sessionFile));
+        TrackReplacedShutdownOwner(sessionFile);
+    }
+
+    private void TrackPendingShutdownEntry(SessionFile sessionFile)
+    {
+        if (_pendingShutdownEntries.Any(existing =>
+                IsSameShutdownSource(existing, sessionFile)))
+        {
+            return;
+        }
+
+        _pendingShutdownEntries.Add(CloneSessionFile(sessionFile));
+    }
+
+    private void RemovePendingShutdownEntry(SessionFile? sessionFile)
+    {
+        if (sessionFile == null)
+            return;
+        _pendingShutdownEntries.RemoveAll(existing =>
+            IsSameShutdownSource(existing, sessionFile));
+    }
+
+    private static bool IsSameShutdownSource(
+        SessionFile first,
+        SessionFile second) =>
+        string.Equals(
+            first.SnapshotGeneration,
+            second.SnapshotGeneration,
+            StringComparison.Ordinal) &&
+        string.Equals(
+            first.SnapshotFile,
+            second.SnapshotFile,
+            StringComparison.Ordinal) &&
+        string.Equals(
+            first.TabIdentity,
+            second.TabIdentity,
+            StringComparison.Ordinal) &&
+        string.Equals(
+            first.FilePath,
+            second.FilePath,
+            StringComparison.Ordinal);
+
+    private void TrackReplacedShutdownOwner(SessionFile? sessionFile)
+    {
+        if (!string.IsNullOrWhiteSpace(sessionFile?.SnapshotOwner))
+            _replacedShutdownOwners.Add(sessionFile.SnapshotOwner);
+    }
+
+    private void TrackConsumedShutdownEntry(SessionFile? sessionFile)
+    {
+        RemovePendingShutdownEntry(sessionFile);
+        TrackReplacedShutdownOwner(sessionFile);
+        if (sessionFile == null ||
+            !HasValidPersistedIdentity(sessionFile.SnapshotGeneration) ||
+            string.IsNullOrEmpty(sessionFile.SnapshotFile) ||
+            _retirementCandidates.Any(existing =>
+                string.Equals(
+                    existing.SnapshotGeneration,
+                    sessionFile.SnapshotGeneration,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    existing.SnapshotFile,
+                    sessionFile.SnapshotFile,
+                    StringComparison.Ordinal)))
+        {
+            return;
+        }
+
+        _retirementCandidates.Add(CloneSessionFile(sessionFile));
+    }
+
+    private static FileOpenMode GetSessionMode(SessionFile sessionFile) =>
+        sessionFile.IsBinaryMode ? FileOpenMode.Binary : sessionFile.Mode;
+
+    private bool HasNamedSnapshotBaseDrift(SessionFile sessionFile)
+    {
+        if (sessionFile.IsUntitled || sessionFile.IsModified)
+            return sessionFile.IsModified;
+        if (string.IsNullOrWhiteSpace(sessionFile.BaseContentHash) ||
+            !_fileSystemService.FileExists(sessionFile.FilePath))
+        {
+            return true;
+        }
+
+        return !string.Equals(
+            sessionFile.BaseContentHash,
+            ComputeFileContentHash(sessionFile.FilePath),
+            StringComparison.Ordinal);
+    }
+
+    private string ComputeFileContentHash(string filePath)
+    {
+        using var stream = _fileSystemService.OpenRead(filePath);
+        return Convert.ToHexString(SHA256.HashData(stream));
+    }
+
+    internal static string ComputeTabContentHash(EditorTabViewModel tab)
+    {
+        if (tab.Mode == FileOpenMode.Binary)
+        {
+            using var hash = SHA256.Create();
+            using var hashingStream = new CryptoStream(
+                Stream.Null,
+                hash,
+                CryptoStreamMode.Write);
+            tab.WriteBinarySnapshot(hashingStream);
+            hashingStream.FlushFinalBlock();
+            return Convert.ToHexString(hash.Hash!);
+        }
+
+        using var incrementalHash =
+            IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        if (tab.HasBom)
+            incrementalHash.AppendData(tab.FileEncoding.GetPreamble());
+        incrementalHash.AppendData(tab.FileEncoding.GetBytes(tab.Content));
+        return Convert.ToHexString(incrementalHash.GetHashAndReset());
+    }
+
+    private static string GetSessionFileName(SessionFile sessionFile) =>
+        !string.IsNullOrEmpty(sessionFile.FileName)
+            ? sessionFile.FileName
+            : Path.GetFileName(sessionFile.FilePath);
+
+    private static SessionFile CloneSessionFile(SessionFile file) =>
+        new()
+        {
+            FilePath = file.FilePath,
+            FileName = file.FileName,
+            TabIdentity = file.TabIdentity,
+            IsUntitled = file.IsUntitled,
+            IsBinaryMode = file.IsBinaryMode,
+            Mode = file.Mode,
+            IsModified = file.IsModified,
+            IsActive = file.IsActive,
+            TempFilePath = file.TempFilePath,
+            Content = file.Content,
+            SnapshotGeneration = file.SnapshotGeneration,
+            SnapshotFile = file.SnapshotFile,
+            SnapshotFormat = file.SnapshotFormat,
+            SnapshotOwner = file.SnapshotOwner,
+            SnapshotGenerationFiles =
+                file.SnapshotGenerationFiles?.ToList() ?? new List<string>(),
+            BaseContentHash = file.BaseContentHash,
+            EncodingCodePage = file.EncodingCodePage,
+            HasBom = file.HasBom,
+            CursorOffset = file.CursorOffset,
+            ScrollOffset = file.ScrollOffset,
+            HexOffset = file.HexOffset,
+            BytesPerRow = file.BytesPerRow,
+            LargeFileTopLine = file.LargeFileTopLine
+        };
+
+    public void Dispose()
+    {
+        foreach (var lease in _shutdownGenerationLeases.Values)
+            lease.Dispose();
+        _shutdownGenerationLeases.Clear();
     }
 }
 
@@ -825,12 +1778,22 @@ public sealed class RestoredDocumentSession : IDisposable
 public sealed record RestoredTabCandidate(
     EditorTabViewModel Tab,
     int SessionIndex,
-    string? TabIdentity = null);
+    string? TabIdentity = null,
+    SessionFile? SourceEntry = null);
 
 public sealed record RestoredSessionAdoptionResult(
     IReadOnlyList<EditorTabViewModel> AdoptedTabs,
     IReadOnlyList<EditorTabViewModel> DiscardedDuplicateTabs,
     EditorTabViewModel? SelectedTab);
+
+public sealed record ShutdownRestoreStatus(
+    int PendingEntryCount,
+    int UnresolvedEntryCount,
+    bool RestoreFailed)
+{
+    public bool RequiresCarryForward =>
+        RestoreFailed || PendingEntryCount > 0 || UnresolvedEntryCount > 0;
+}
 
 public sealed record TabRecoveryResult(
     bool Success,
@@ -851,8 +1814,17 @@ internal sealed record PersistedTabDescriptor(
     string Content,
     bool IsUntitled,
     string? FilePath,
+    FileOpenMode Mode,
+    bool IsModified,
+    int? EncodingCodePage,
+    bool? HasBom,
     int CursorOffset,
-    double ScrollOffset)
+    double ScrollOffset,
+    string? BinaryContentHash,
+    long? BinaryContentLength,
+    long HexOffset,
+    int BytesPerRow,
+    long LargeFileTopLine)
 {
     public static PersistedTabDescriptor FromTab(
         int sourceIndex,
@@ -864,8 +1836,21 @@ internal sealed record PersistedTabDescriptor(
             tab.Content,
             string.IsNullOrEmpty(tab.FilePath),
             string.IsNullOrEmpty(tab.FilePath) ? null : tab.FilePath,
+            tab.Mode,
+            tab.IsModified,
+            tab.Mode == FileOpenMode.Text ? tab.FileEncoding.CodePage : null,
+            tab.Mode == FileOpenMode.Text ? tab.HasBom : null,
             tab.CursorOffset,
-            tab.ScrollOffset);
+            tab.ScrollOffset,
+            tab.Mode == FileOpenMode.Binary
+                ? DocumentSessionCoordinator.ComputeTabContentHash(tab)
+                : null,
+            tab.Mode == FileOpenMode.Binary
+                ? tab.ByteBuffer?.Length
+                : null,
+            tab.HexOffset,
+            tab.BytesPerRow,
+            tab.LargeFileTopLine);
 
     public static PersistedTabDescriptor FromRecoveryEntry(
         int sourceIndex,
@@ -876,15 +1861,57 @@ internal sealed record PersistedTabDescriptor(
             entry.Content,
             entry.IsUntitled,
             entry.FilePath,
+            entry.Mode,
+            entry.IsModified,
+            entry.Mode == FileOpenMode.Text ? entry.EncodingCodePage : null,
+            entry.Mode == FileOpenMode.Text ? entry.HasBom : null,
             entry.CursorOffset,
-            entry.ScrollOffset);
+            entry.ScrollOffset,
+            entry.Mode == FileOpenMode.Binary ? entry.ContentHash : null,
+            entry.Mode == FileOpenMode.Binary ? entry.ContentLength : null,
+            entry.HexOffset,
+            entry.BytesPerRow,
+            entry.LargeFileTopLine);
 
     public bool HasEquivalentState(PersistedTabDescriptor other)
     {
         if (IsUntitled != other.IsUntitled ||
+            Mode != other.Mode ||
+            IsModified != other.IsModified ||
             !string.Equals(Content, other.Content, StringComparison.Ordinal) ||
             CursorOffset != other.CursorOffset ||
-            ScrollOffset != other.ScrollOffset)
+            ScrollOffset != other.ScrollOffset ||
+            LargeFileTopLine != other.LargeFileTopLine)
+        {
+            return false;
+        }
+
+        if (Mode == FileOpenMode.Binary)
+        {
+            if (string.IsNullOrEmpty(BinaryContentHash) ||
+                string.IsNullOrEmpty(other.BinaryContentHash) ||
+            !BinaryContentLength.HasValue ||
+            !other.BinaryContentLength.HasValue ||
+            BinaryContentLength != other.BinaryContentLength ||
+            HexOffset != other.HexOffset ||
+                BytesPerRow != other.BytesPerRow ||
+                !string.Equals(
+                    BinaryContentHash,
+                    other.BinaryContentHash,
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+        if (EncodingCodePage.HasValue &&
+            other.EncodingCodePage.HasValue &&
+            EncodingCodePage != other.EncodingCodePage)
+        {
+            return false;
+        }
+        if (HasBom.HasValue &&
+            other.HasBom.HasValue &&
+            HasBom != other.HasBom)
         {
             return false;
         }
@@ -925,22 +1952,13 @@ internal sealed record PersistedTabOwner(
         if (!Descriptor.HasEquivalentState(candidate))
             return false;
 
-        var identitiesMatch =
+        return
             DocumentSessionCoordinator.HasValidPersistedIdentity(
                 candidate.PersistedIdentity) &&
             string.Equals(
                 ProofIdentity,
                 candidate.PersistedIdentity,
                 StringComparison.Ordinal);
-        var savedPathsMatch =
-            !Descriptor.IsUntitled &&
-            !candidate.IsUntitled &&
-            !string.IsNullOrEmpty(Descriptor.FilePath) &&
-            !string.IsNullOrEmpty(candidate.FilePath) &&
-            DocumentSessionCoordinator.HasSameOpenIdentity(
-                Descriptor.FilePath,
-                candidate.FilePath);
-        return identitiesMatch || savedPathsMatch;
     }
 }
 
@@ -955,3 +1973,69 @@ internal sealed record PlannedPersistedTab(
 internal sealed record DuplicatePersistedTab(
     PersistedTabDescriptor Descriptor,
     PersistedTabOwner Owner);
+
+internal sealed class LegacyShutdownSessionStore : IShutdownSessionStore
+{
+    private readonly ISettingsService _settingsService;
+
+    public LegacyShutdownSessionStore(ISettingsService settingsService)
+    {
+        _settingsService = settingsService;
+    }
+
+    public ShutdownSessionState ReadShutdownSession(
+        Action<ShutdownSessionState>? whileLocked = null)
+    {
+        if (_settingsService is IShutdownSessionStore shutdownSessionStore)
+            return shutdownSessionStore.ReadShutdownSession(whileLocked);
+
+        throw new InvalidOperationException(
+            "Shutdown session restoration requires an atomic session store.");
+    }
+
+    public ShutdownSessionPublication PublishShutdownSession(
+        ShutdownSessionState session,
+        Action<ShutdownSessionPublication>? whileLocked = null)
+    {
+        if (_settingsService is not IShutdownSessionStore shutdownSessionStore)
+        {
+            throw new InvalidOperationException(
+                "Shutdown session publication requires an atomic session store.");
+        }
+
+        return shutdownSessionStore.PublishShutdownSession(session, whileLocked);
+    }
+}
+
+internal sealed class PreparedBinaryRebase : IDisposable
+{
+    private bool _adopted;
+
+    public PreparedBinaryRebase(
+        EditorTabViewModel tab,
+        string path,
+        bool isModified,
+        FastEdit.Core.HexEngine.VirtualizedByteBuffer preparedBuffer)
+    {
+        Tab = tab;
+        Path = path;
+        IsModified = isModified;
+        PreparedBuffer = preparedBuffer;
+    }
+
+    public EditorTabViewModel Tab { get; }
+
+    public string Path { get; }
+
+    public bool IsModified { get; }
+
+    public FastEdit.Core.HexEngine.VirtualizedByteBuffer PreparedBuffer { get; }
+
+    public void MarkAdopted() => _adopted = true;
+
+    public void Dispose()
+    {
+        if (!_adopted)
+            PreparedBuffer.Dispose();
+    }
+}

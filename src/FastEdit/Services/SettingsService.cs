@@ -1,12 +1,14 @@
 using System.Diagnostics;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using FastEdit.Services.Interfaces;
 
 namespace FastEdit.Services;
 
-public class SettingsService : ISettingsService
+public class SettingsService : ISettingsService, IShutdownSessionStore
 {
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
@@ -17,6 +19,7 @@ public class SettingsService : ISettingsService
     private readonly IFileSystemService _fileSystem;
     private readonly string _settingsPath;
     private readonly string _tempDir;
+    private readonly string _settingsMutexName;
     private AppSettings _settings;
 
     public event EventHandler? AutoSaveIntervalChanged;
@@ -36,6 +39,7 @@ public class SettingsService : ISettingsService
 
         _fileSystem.CreateDirectory(appDataPath);
         _settingsPath = Path.Combine(appDataPath, "settings.json");
+        _settingsMutexName = CreateSettingsMutexName(_settingsPath);
 
         _tempDir = Path.Combine(appDataPath, "Temp");
         _fileSystem.CreateDirectory(_tempDir);
@@ -235,8 +239,173 @@ public class SettingsService : ISettingsService
 
     public void Save()
     {
-        var json = JsonSerializer.Serialize(_settings, SerializerOptions);
+        WithSettingsLock(() =>
+        {
+            if (_fileSystem.FileExists(_settingsPath))
+            {
+                var latest = LoadSettingsStrict();
+                _settings.OpenFiles = latest.OpenFiles;
+                _settings.ActiveTabIndex = latest.ActiveTabIndex;
+            }
+
+            SaveSettings(_settings);
+        });
+    }
+
+    public ShutdownSessionState ReadShutdownSession(
+        Action<ShutdownSessionState>? whileLocked = null) =>
+        WithSettingsLock(() =>
+        {
+            var latest = LoadSettingsStrict();
+            _settings.OpenFiles = latest.OpenFiles;
+            _settings.ActiveTabIndex = latest.ActiveTabIndex;
+            var session = CreateShutdownSessionState(latest);
+            whileLocked?.Invoke(session);
+            return session;
+        });
+
+    public ShutdownSessionPublication PublishShutdownSession(
+        ShutdownSessionState session,
+        Action<ShutdownSessionPublication>? whileLocked = null)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        return WithSettingsLock(() =>
+        {
+            var latest = LoadSettingsStrict();
+            var previous = CreateShutdownSessionState(latest);
+            var replacedOwners = session.ReplacedOwners?
+                .Where(owner => !string.IsNullOrWhiteSpace(owner))
+                .ToHashSet(StringComparer.Ordinal) ??
+                new HashSet<string>(StringComparer.Ordinal);
+            var incomingOwners = session.Files
+                .Select(file => file.SnapshotOwner)
+                .Where(owner => !string.IsNullOrWhiteSpace(owner))
+                .Cast<string>()
+                .ToHashSet(StringComparer.Ordinal);
+            replacedOwners.UnionWith(incomingOwners);
+            var replaceLegacyEntries = session.ReplacedOwners != null;
+            var retainedFiles = replacedOwners.Count == 0
+                ? new List<SessionFile>()
+                : latest.OpenFiles
+                    .Where(file =>
+                        string.IsNullOrWhiteSpace(file.SnapshotOwner)
+                            ? !replaceLegacyEntries
+                            : !replacedOwners.Contains(file.SnapshotOwner))
+                    .Select(CloneSessionFile)
+                    .ToList();
+            foreach (var retainedFile in retainedFiles)
+                retainedFile.IsActive = false;
+            var incomingFiles = session.Files.Select(CloneSessionFile).ToList();
+            latest.OpenFiles = retainedFiles.Concat(incomingFiles).ToList();
+            latest.ActiveTabIndex = incomingFiles.Count == 0
+                ? Math.Clamp(
+                    latest.ActiveTabIndex,
+                    0,
+                    Math.Max(0, retainedFiles.Count - 1))
+                : retainedFiles.Count + Math.Clamp(
+                    session.ActiveTabIndex,
+                    0,
+                    incomingFiles.Count - 1);
+            SaveSettings(latest);
+            _settings = latest;
+            var publication = new ShutdownSessionPublication(
+                previous,
+                CreateShutdownSessionState(latest));
+            whileLocked?.Invoke(publication);
+            return publication;
+        });
+    }
+
+    private AppSettings LoadSettingsStrict()
+    {
+        if (!_fileSystem.FileExists(_settingsPath))
+            return new AppSettings();
+
+        var json = _fileSystem.ReadAllText(_settingsPath);
+        return JsonSerializer.Deserialize<AppSettings>(json, SerializerOptions)
+            ?? throw new InvalidDataException("The settings file contains no data.");
+    }
+
+    private void SaveSettings(AppSettings settings)
+    {
+        var json = JsonSerializer.Serialize(settings, SerializerOptions);
         _fileSystem.WriteAllTextAtomic(_settingsPath, json);
+    }
+
+    private static ShutdownSessionState CreateShutdownSessionState(
+        AppSettings settings) =>
+        new(
+            settings.OpenFiles.Select(CloneSessionFile).ToArray(),
+            settings.ActiveTabIndex);
+
+    private static SessionFile CloneSessionFile(SessionFile file) =>
+        new()
+        {
+            FilePath = file.FilePath,
+            FileName = file.FileName,
+            TabIdentity = file.TabIdentity,
+            IsUntitled = file.IsUntitled,
+            IsBinaryMode = file.IsBinaryMode,
+            Mode = file.Mode,
+            IsModified = file.IsModified,
+            IsActive = file.IsActive,
+            TempFilePath = file.TempFilePath,
+            Content = file.Content,
+            SnapshotGeneration = file.SnapshotGeneration,
+            SnapshotFile = file.SnapshotFile,
+            SnapshotFormat = file.SnapshotFormat,
+            SnapshotOwner = file.SnapshotOwner,
+            SnapshotGenerationFiles =
+                file.SnapshotGenerationFiles?.ToList() ?? new List<string>(),
+            BaseContentHash = file.BaseContentHash,
+            EncodingCodePage = file.EncodingCodePage,
+            HasBom = file.HasBom,
+            CursorOffset = file.CursorOffset,
+            ScrollOffset = file.ScrollOffset,
+            HexOffset = file.HexOffset,
+            BytesPerRow = file.BytesPerRow,
+            LargeFileTopLine = file.LargeFileTopLine
+        };
+
+    private static string CreateSettingsMutexName(string settingsPath)
+    {
+        var normalizedPath = Path.GetFullPath(settingsPath).ToUpperInvariant();
+        var hash = Convert.ToHexString(
+            SHA256.HashData(Encoding.UTF8.GetBytes(normalizedPath)));
+        return $"Local\\FastEdit-Settings-{hash}";
+    }
+
+    private void WithSettingsLock(Action action) =>
+        WithSettingsLock(() =>
+        {
+            action();
+            return true;
+        });
+
+    private T WithSettingsLock<T>(Func<T> action)
+    {
+        using var mutex = new Mutex(false, _settingsMutexName);
+        var acquired = false;
+        try
+        {
+            try
+            {
+                acquired = mutex.WaitOne(TimeSpan.FromSeconds(30));
+            }
+            catch (AbandonedMutexException)
+            {
+                acquired = true;
+            }
+
+            if (!acquired)
+                throw new TimeoutException("Timed out waiting to persist FastEdit settings.");
+            return action();
+        }
+        finally
+        {
+            if (acquired)
+                mutex.ReleaseMutex();
+        }
     }
 
     public string GetTempFilePath(string fileName)

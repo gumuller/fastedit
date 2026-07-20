@@ -67,7 +67,11 @@ public partial class App : Application
             .ConfigureServices((context, services) =>
             {
                 // Core services
-                services.AddSingleton<ISettingsService, SettingsService>();
+                services.AddSingleton<SettingsService>();
+                services.AddSingleton<ISettingsService>(
+                    sp => sp.GetRequiredService<SettingsService>());
+                services.AddSingleton<IShutdownSessionStore>(
+                    sp => sp.GetRequiredService<SettingsService>());
                 services.AddSingleton<IThemeService, ThemeService>();
                 services.AddSingleton<IFileService, FileService>();
                 services.AddSingleton<IFileSystemService, FileSystemService>();

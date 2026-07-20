@@ -19,7 +19,19 @@ public class FileSystemService : IFileSystemService
     public void WriteAllText(string path, string content) => File.WriteAllText(path, content);
     public void WriteAllText(string path, string content, Encoding encoding) => File.WriteAllText(path, content, encoding);
     public void WriteAllTextAtomic(string path, string content)
+        => WriteStreamAtomic(path, stream =>
+        {
+            using var writer = new StreamWriter(
+                stream,
+                new UTF8Encoding(false),
+                leaveOpen: true);
+            writer.Write(content);
+            writer.Flush();
+        });
+
+    public void WriteStreamAtomic(string path, Action<Stream> write)
     {
+        ArgumentNullException.ThrowIfNull(write);
         var directory = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(directory))
             Directory.CreateDirectory(directory);
@@ -34,28 +46,45 @@ public class FileSystemService : IFileSystemService
                 FileShare.None,
                 bufferSize: 4096,
                 FileOptions.WriteThrough))
-            using (var writer = new StreamWriter(stream, new UTF8Encoding(false), leaveOpen: true))
             {
-                writer.Write(content);
-                writer.Flush();
+                write(stream);
                 stream.Flush(flushToDisk: true);
             }
 
-            if (File.Exists(path))
-                File.Replace(tempPath, path, destinationBackupFileName: null, ignoreMetadataErrors: true);
-            else
-                File.Move(tempPath, path);
+            MoveAtomicReplacement(tempPath, path);
         }
+
         finally
         {
             if (File.Exists(tempPath))
                 File.Delete(tempPath);
         }
     }
+
+    private static void MoveAtomicReplacement(string tempPath, string path)
+    {
+        const int maxAttempts = 5;
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                File.Move(tempPath, path, overwrite: true);
+                return;
+            }
+            catch (Exception ex) when (
+                attempt < maxAttempts - 1 &&
+                ex is IOException or UnauthorizedAccessException)
+            {
+                Thread.Sleep(TimeSpan.FromMilliseconds(10 * (attempt + 1)));
+            }
+        }
+    }
+
     public void WriteAllBytes(string path, byte[] bytes) => File.WriteAllBytes(path, bytes);
     public void CopyFile(string source, string destination, bool overwrite = false) => File.Copy(source, destination, overwrite);
     public void MoveFile(string source, string destination, bool overwrite = false) => File.Move(source, destination, overwrite);
     public void DeleteFile(string path) => File.Delete(path);
+    public void DeleteDirectory(string path, bool recursive = false) => Directory.Delete(path, recursive);
     public void CreateDirectory(string path) => Directory.CreateDirectory(path);
     public string GetTempPath() => Path.GetTempPath();
     public string CombinePath(params string[] paths) => Path.Combine(paths);
@@ -71,5 +100,11 @@ public class FileSystemService : IFileSystemService
     public IEnumerable<string> EnumerateDirectories(string path) => Directory.EnumerateDirectories(path);
     public Stream OpenRead(string path) => File.OpenRead(path);
     public Stream OpenWrite(string path) => File.OpenWrite(path);
+    public Stream OpenFile(
+        string path,
+        FileMode mode,
+        FileAccess access,
+        FileShare share) =>
+        new FileStream(path, mode, access, share);
     public IEnumerable<string> ReadLines(string path) => File.ReadLines(path);
 }

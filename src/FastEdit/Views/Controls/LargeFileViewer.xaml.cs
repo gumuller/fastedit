@@ -30,6 +30,9 @@ public partial class LargeFileViewer : UserControl
     private List<LargeFileDocument.SearchMatch>? _searchMatches;
     private int _currentMatchIndex = -1;
     private CancellationTokenSource? _searchCts;
+    private EditorTabViewModel? _currentViewModel;
+    private EditorTabViewModel? _pendingRestoreViewModel;
+    private int _stateRestoreVersion;
 
     public static readonly DependencyProperty FilterServiceProperty =
         DependencyProperty.Register(
@@ -168,11 +171,15 @@ public partial class LargeFileViewer : UserControl
         SubscribeToFilterService();
 
         UpdateMetrics();
+        ScheduleStateRestore(_currentViewModel);
         Render();
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
+        CaptureStateToViewModel();
+        _stateRestoreVersion++;
+        _pendingRestoreViewModel = null;
         UnsubscribeFromFilterService();
         CancelFilterScan();
         CancelSearch();
@@ -241,7 +248,46 @@ public partial class LargeFileViewer : UserControl
 
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
-        SetDocument((e.NewValue as EditorTabViewModel)?.LargeFileDoc);
+        CaptureStateToViewModel();
+        _stateRestoreVersion++;
+        _pendingRestoreViewModel = null;
+        _currentViewModel = e.NewValue as EditorTabViewModel;
+        SetDocument(_currentViewModel?.LargeFileDoc);
+        ScheduleStateRestore(_currentViewModel);
+    }
+
+    internal void CaptureStateToViewModel()
+    {
+        if (_currentViewModel?.Mode == FileOpenMode.LargeText &&
+            !ReferenceEquals(_pendingRestoreViewModel, _currentViewModel))
+            _currentViewModel.LargeFileTopLine = _viewport.TopLine;
+    }
+
+    private void ScheduleStateRestore(EditorTabViewModel? viewModel)
+    {
+        if (viewModel?.Mode != FileOpenMode.LargeText)
+            return;
+
+        var topLine = viewModel.LargeFileTopLine;
+        var restoreVersion = ++_stateRestoreVersion;
+        _pendingRestoreViewModel = viewModel;
+        _ = Dispatcher.BeginInvoke(
+            new Action(() =>
+            {
+                if (restoreVersion != _stateRestoreVersion ||
+                    !ReferenceEquals(_currentViewModel, viewModel) ||
+                    !ReferenceEquals(DataContext, viewModel))
+                {
+                    return;
+                }
+
+                _viewport.SetTopLine(Math.Max(1, topLine));
+                if (ReferenceEquals(_pendingRestoreViewModel, viewModel))
+                    _pendingRestoreViewModel = null;
+                UpdateScrollBar();
+                Render();
+            }),
+            System.Windows.Threading.DispatcherPriority.Loaded);
     }
 
     private void SetDocument(LargeFileDocument? document)
