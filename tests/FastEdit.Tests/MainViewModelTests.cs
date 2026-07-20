@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Security.Cryptography;
+using System.Text;
 using FastEdit.Helpers;
 using FastEdit.Infrastructure;
 using FastEdit.Services.Interfaces;
@@ -1306,6 +1307,116 @@ public class MainViewModelTests
     }
 
     [Fact]
+    public async Task AutoSave_DirtyBinaryRoundTripsWithoutWritingNamedFile()
+    {
+        var path = Path.GetTempFileName();
+        EditorTabViewModel? source = null;
+        EditorTabViewModel? recovered = null;
+        try
+        {
+            var original = new byte[]
+            {
+                0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A
+            };
+            await File.WriteAllBytesAsync(path, original);
+            source = CreateMockTab(Path.GetFileName(path), path);
+            await source.LoadFileAsync(path);
+            source.ByteBuffer!.SetByte(7, 0xFF);
+            _sut.Tabs.Add(source);
+            var entry = Assert.Single(_sut.GetAutoSaveEntries());
+            recovered = CreateMockTab(Path.GetFileName(path));
+            _tabFactory.Setup(factory => factory.CreateUntitled(null))
+                .Returns(recovered);
+
+            recovered = _sut.RecoverTab(entry);
+
+            Assert.True(entry.IsBinaryMode);
+            Assert.Equal(0xFF, recovered.ByteBuffer!.GetByte(7));
+            Assert.True(recovered.IsModified);
+            Assert.Equal(original, await File.ReadAllBytesAsync(path));
+        }
+        finally
+        {
+            source?.Dispose();
+            recovered?.Dispose();
+            File.Delete(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(1200, true)]
+    [InlineData(1252, false)]
+    public async Task AutoSave_DirtyNamedTextRoundTripsFormatForExplicitSave(
+        int codePage,
+        bool hasBom)
+    {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        const string path = @"C:\encoded.txt";
+        var source = CreateMockTab("encoded.txt", path);
+        source.RestoreTextSnapshot(
+            "restored text",
+            "encoded.txt",
+            path,
+            codePage,
+            hasBom,
+            isModified: true);
+        _sut.Tabs.Add(source);
+        var entry = Assert.Single(_sut.GetAutoSaveEntries());
+        var recovered = CreateMockTab("encoded.txt");
+        _tabFactory.Setup(factory => factory.CreateUntitled("restored text"))
+            .Returns(recovered);
+
+        recovered = _sut.RecoverTab(entry);
+        await recovered.SaveCommand.ExecuteAsync(null);
+
+        _fileService.Verify(service => service.WriteFileWithEncodingAsync(
+            path,
+            "restored text",
+            It.Is<Encoding>(encoding => encoding.CodePage == codePage),
+            hasBom), Times.Once);
+    }
+
+    [Fact]
+    public async Task RecoverThenRestoreSession_ExactStableEntryIsAdoptedOnce()
+    {
+        var source = CreateMockTab("Untitled-1", isModified: true);
+        source.Content = "same";
+        _sut.Tabs.Add(source);
+        var entry = Assert.Single(_sut.GetAutoSaveEntries());
+        _sut.Tabs.Clear();
+        var recovered = CreateMockTab("Untitled-1");
+        _tabFactory.Setup(factory => factory.CreateUntitled("same"))
+            .Returns(recovered);
+
+        var recovery = _sut.RecoverTabs(new[] { entry });
+        _settingsService.Setup(service => service.OpenFiles)
+            .Returns(new List<SessionFile>
+            {
+                new()
+                {
+                    EntryId = entry.SessionEntryId,
+                    SnapshotVersion = entry.SnapshotVersion,
+                    FilePath = "Untitled-1",
+                    IsUntitled = true,
+                    Content = "same",
+                    TextContentBase64 = entry.TextContentBase64,
+                    IsModified = true,
+                    EncodingCodePage = entry.EncodingCodePage,
+                    HasBom = entry.HasBom,
+                    BytesPerRow = entry.BytesPerRow,
+                    LargeFileTopLine = entry.LargeFileTopLine
+                }
+            });
+
+        await _sut.RestoreSessionAsync();
+
+        Assert.True(recovery.Success);
+        Assert.Same(recovered, Assert.Single(_sut.Tabs));
+        Assert.Equal(entry.TabIdentity, recovered.AutoSaveIdentity);
+        _tabFactory.Verify(factory => factory.CreateUntitled("same"), Times.Once);
+    }
+
+    [Fact]
     public void RecoverTabs_PartialFailureReportsFailureAndKeepsRecoveredTabs()
     {
         var first = CreateMockTab("one.txt");
@@ -1324,6 +1435,67 @@ public class MainViewModelTests
         Assert.Equal(new[] { "one" }, recovery.RecoveredEntryIds);
         Assert.Same(first, Assert.Single(_sut.Tabs));
         Assert.Contains("recovery files were retained", _sut.StatusText);
+    }
+
+    [Fact]
+    public void RecoverTabs_ExactStableDuplicatesAreAdoptedOnce()
+    {
+        const string payload = "cwBhAG0AZQA=";
+        var first = new AutoSaveEntry(
+            "generation-one",
+            "Untitled-1",
+            null,
+            "same",
+            true)
+        {
+            SnapshotVersion = 2,
+            SessionEntryId = "stable-entry",
+            TabIdentity = "stable-tab",
+            IsModified = true,
+            TextContentBase64 = payload
+        };
+        var second = first with { Id = "generation-two" };
+        var tab = CreateMockTab("Untitled-1");
+        _tabFactory.Setup(factory => factory.CreateUntitled("same"))
+            .Returns(tab);
+
+        var recovery = _sut.RecoverTabs(new[] { first, second });
+
+        Assert.True(recovery.Success);
+        Assert.Equal(
+            new[] { "generation-one", "generation-two" },
+            recovery.RecoveredEntryIds);
+        Assert.Same(tab, Assert.Single(_sut.Tabs));
+        _tabFactory.Verify(factory => factory.CreateUntitled("same"), Times.Once);
+    }
+
+    [Fact]
+    public void RecoverTab_FailedCandidateIsDisposedBeforeFailureEscapes()
+    {
+        var candidate = CreateMockTab("candidate.bin");
+        candidate.RestoreBinarySnapshot(
+            new byte[] { 1, 2, 3 },
+            "candidate.bin",
+            filePath: null,
+            isModified: true);
+        _tabFactory.Setup(factory => factory.CreateUntitled(null))
+            .Returns(candidate);
+        var entry = new AutoSaveEntry(
+            "broken",
+            "candidate.bin",
+            null,
+            "",
+            true)
+        {
+            SnapshotVersion = 2,
+            IsBinaryMode = true,
+            IsModified = true,
+            BinaryContentBase64 = "not-base64"
+        };
+
+        Assert.Throws<FormatException>(() => _sut.RecoverTab(entry));
+
+        Assert.Null(candidate.ByteBuffer);
     }
 
     // --- RestoreSession ---
@@ -1563,6 +1735,95 @@ public class MainViewModelTests
         await _sut.RestoreSessionAsync();
 
         Assert.Same(nextTab, _sut.SelectedTab);
+    }
+
+    [Theory]
+    [InlineData("bom", "\uFEFFleading")]
+    [InlineData("high", "\uD800")]
+    [InlineData("low", "\uDC00")]
+    [InlineData("controls", "a\0b\r\nc")]
+    public async Task RestoreSession_LosslessTextPayload_PreservesUtf16CodeUnits(
+        string _,
+        string content)
+    {
+        var bytes = new byte[content.Length * sizeof(char)];
+        for (var index = 0; index < content.Length; index++)
+        {
+            bytes[index * 2] = (byte)content[index];
+            bytes[(index * 2) + 1] = (byte)(content[index] >> 8);
+        }
+
+        var sessionFile = new SessionFile
+        {
+            EntryId = "exact-text",
+            SnapshotVersion = 2,
+            FilePath = "Untitled-1",
+            IsUntitled = true,
+            TextContentBase64 = Convert.ToBase64String(bytes),
+            IsModified = true
+        };
+        _settingsService.Setup(service => service.OpenFiles)
+            .Returns(new List<SessionFile> { sessionFile });
+        var tab = CreateMockTab("Untitled-1");
+        _tabFactory.Setup(factory => factory.CreateUntitled(
+                It.Is<string>(value => value == content)))
+            .Returns(tab);
+
+        await _sut.RestoreSessionAsync();
+
+        Assert.Equal(content, Assert.Single(_sut.Tabs).Content);
+    }
+
+    [Theory]
+    [InlineData("bom", "\uFEFFleading")]
+    [InlineData("high", "\uD800")]
+    [InlineData("low", "\uDC00")]
+    [InlineData("controls", "a\0b\r\nc")]
+    public async Task RestoreSession_LegacyUtf8Payload_DoesNotStripLeadingBom(
+        string _,
+        string content)
+    {
+        const string tempPath = @"C:\legacy.tmp";
+        var sessionFile = new SessionFile
+        {
+            EntryId = "legacy-text",
+            FilePath = "Untitled-1",
+            IsUntitled = true,
+            TempFilePath = tempPath,
+            IsModified = true
+        };
+        _settingsService.Setup(service => service.OpenFiles)
+            .Returns(new List<SessionFile> { sessionFile });
+        _fileSystemService.Setup(service => service.FileExists(tempPath)).Returns(true);
+        var legacyBytes = content.SelectMany(character =>
+        {
+            var codeUnit = (int)character;
+            if (codeUnit <= 0x7F)
+                return new[] { (byte)codeUnit };
+            if (codeUnit <= 0x7FF)
+            {
+                return new[]
+                {
+                    (byte)(0xC0 | (codeUnit >> 6)),
+                    (byte)(0x80 | (codeUnit & 0x3F))
+                };
+            }
+
+            return new[]
+            {
+                (byte)(0xE0 | (codeUnit >> 12)),
+                (byte)(0x80 | ((codeUnit >> 6) & 0x3F)),
+                (byte)(0x80 | (codeUnit & 0x3F))
+            };
+        }).ToArray();
+        _fileSystemService.Setup(service => service.ReadAllBytesAsync(tempPath))
+            .ReturnsAsync(legacyBytes);
+        var tab = CreateMockTab("Untitled-1");
+        _tabFactory.Setup(factory => factory.CreateUntitled(content)).Returns(tab);
+
+        await _sut.RestoreSessionAsync();
+
+        Assert.Equal(content, Assert.Single(_sut.Tabs).Content);
     }
 
     [Fact]

@@ -35,6 +35,7 @@ public class SessionFile
     public bool IsBinaryMode { get; set; }
     public string? TempFilePath { get; set; }
     public string? Content { get; set; }
+    public string? TextContentBase64 { get; set; }
     public string? BinaryContentBase64 { get; set; }
     public long? BinaryBaseLength { get; set; }
     public string? BinaryBaseSha256 { get; set; }
@@ -50,6 +51,7 @@ public class SessionFile
     public long HexOffset { get; set; }
     public long HexScrollOffset { get; set; }
     public int BytesPerRow { get; set; } = 16;
+    public long LargeFileTopLine { get; set; } = 1;
 }
 
 public class BinaryModification

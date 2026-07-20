@@ -186,7 +186,7 @@ public class EditorTabViewModelTests
             Path.GetTempPath(),
             isModified: true);
 
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(
+        await Assert.ThrowsAnyAsync<IOException>(
             () => sut.SaveCommand.ExecuteAsync(null));
 
         Assert.True(sut.IsModified);

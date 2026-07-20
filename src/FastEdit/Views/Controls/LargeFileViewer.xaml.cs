@@ -173,6 +173,7 @@ public partial class LargeFileViewer : UserControl
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
+        SaveStateToViewModel();
         UnsubscribeFromFilterService();
         CancelFilterScan();
         CancelSearch();
@@ -241,11 +242,13 @@ public partial class LargeFileViewer : UserControl
 
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
-        SetDocument((e.NewValue as EditorTabViewModel)?.LargeFileDoc);
+        SaveStateToViewModel(e.OldValue as EditorTabViewModel);
+        SetDocument(e.NewValue as EditorTabViewModel);
     }
 
-    private void SetDocument(LargeFileDocument? document)
+    private void SetDocument(EditorTabViewModel? viewModel)
     {
+        var document = viewModel?.LargeFileDoc;
         if (ReferenceEquals(_doc, document))
             return;
 
@@ -256,11 +259,25 @@ public partial class LargeFileViewer : UserControl
         _currentMatchIndex = -1;
         _filterResultsTruncated = false;
         _viewport.Configure(_doc?.TotalLines ?? 0, _viewport.VisibleLineCount);
-        _viewport.SetTopLine(1);
         _viewport.ClearShowOnly();
+        _viewport.GoToPhysicalLine(viewModel?.LargeFileTopLine ?? 1);
         UpdateScrollBar();
         UpdateFooter();
         Render();
+    }
+
+    public void SaveStateToViewModel()
+    {
+        SaveStateToViewModel(DataContext as EditorTabViewModel);
+    }
+
+    private void SaveStateToViewModel(EditorTabViewModel? viewModel)
+    {
+        if (viewModel == null || !ReferenceEquals(viewModel.LargeFileDoc, _doc))
+            return;
+
+        var physicalTopLine = _viewport.ResolvePhysicalLine(_viewport.TopLine);
+        viewModel.LargeFileTopLine = Math.Max(1, physicalTopLine);
     }
 
     private void UpdateMetrics()
@@ -502,7 +519,10 @@ public partial class LargeFileViewer : UserControl
                 return;
 
             _filterResultsTruncated = result.IsTruncated;
+            var physicalTopLine =
+                _viewport.ResolvePhysicalLine(_viewport.TopLine);
             _viewport.ShowOnly(result.Results);
+            _viewport.GoToPhysicalLine(physicalTopLine);
             UpdateScrollBar();
             UpdateFooter();
             Render();

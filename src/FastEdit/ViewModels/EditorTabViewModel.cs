@@ -107,14 +107,25 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private double _scrollOffset;
 
+    [ObservableProperty]
+    private long _largeFileTopLine = 1;
+
     public VirtualizedByteBuffer? ByteBuffer => _byteBuffer;
     public LargeFileDocument? LargeFileDoc => _largeFileDoc;
 
     public Encoding FileEncoding => _fileEncoding;
     public bool HasBom => _hasBom;
-    public string AutoSaveIdentity { get; } = Guid.NewGuid().ToString("N");
+    public string AutoSaveIdentity { get; private set; } = Guid.NewGuid().ToString("N");
     public long UserMutationVersion { get; private set; }
     public long ChangeVersion => UserMutationVersion;
+
+    internal void RestoreAutoSaveIdentity(string identity)
+    {
+        if (string.IsNullOrWhiteSpace(identity))
+            throw new ArgumentException("A persisted tab identity is required.", nameof(identity));
+
+        AutoSaveIdentity = identity;
+    }
 
     public EditorTabViewModel(IFileService fileService, IFileSystemService fileSystemService, IDialogService dialogService)
     {

@@ -1,13 +1,24 @@
 using System.IO.MemoryMappedFiles;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using Microsoft.Win32.SafeHandles;
 using FastEdit.Core.Search;
 
 namespace FastEdit.Core.HexEngine;
 
+internal enum BinarySaveStage
+{
+    SnapshotProgress,
+    BeforeCommit,
+    BeforeReopen
+}
+
 public class VirtualizedByteBuffer : IDisposable
 {
     private readonly string _filePath;
-    private readonly bool _ownsBackingFile;
+    private string _backingPath;
+    private bool _deleteBackingOnDispose;
     private FileStream _fileStream;
     private MemoryMappedFile? _memoryMappedFile;
     private long _fileLength;
@@ -20,6 +31,7 @@ public class VirtualizedByteBuffer : IDisposable
     private readonly HashSet<ActiveSearch> _activeSearches = new();
     private bool _saveInProgress;
     private bool _disposed;
+    private readonly Action<BinarySaveStage, long>? _saveProgress;
 
     private const int PageSize = 64 * 1024;
     private const int MaxCachedPages = 16;
@@ -31,7 +43,7 @@ public class VirtualizedByteBuffer : IDisposable
     public const int DefaultSearchResultLimit = 10_000;
 
     public long Length => _fileLength;
-    public bool IsSnapshotBacked => _ownsBackingFile;
+    public bool IsSnapshotBacked => _deleteBackingOnDispose;
     public bool HasModifications
     {
         get
@@ -43,19 +55,31 @@ public class VirtualizedByteBuffer : IDisposable
     public event EventHandler? ModificationsChanged;
 
     public VirtualizedByteBuffer(string filePath)
-        : this(filePath, ownsBackingFile: false)
+        : this(filePath, ownsBackingFile: false, saveProgress: null)
     {
     }
 
-    private VirtualizedByteBuffer(string filePath, bool ownsBackingFile)
+    internal VirtualizedByteBuffer(
+        string filePath,
+        Action<BinarySaveStage, long>? saveProgress)
+        : this(filePath, ownsBackingFile: false, saveProgress)
+    {
+    }
+
+    private VirtualizedByteBuffer(
+        string filePath,
+        bool ownsBackingFile,
+        Action<BinarySaveStage, long>? saveProgress)
     {
         _filePath = filePath;
-        _ownsBackingFile = ownsBackingFile;
+        _backingPath = filePath;
+        _deleteBackingOnDispose = ownsBackingFile;
+        _saveProgress = saveProgress;
         _fileStream = new FileStream(
             filePath,
             FileMode.Open,
             FileAccess.Read,
-            FileShare.Read,
+            FileShare.Read | FileShare.Delete,
             bufferSize: PageSize,
             FileOptions.RandomAccess |
             FileOptions.Asynchronous |
@@ -87,7 +111,10 @@ public class VirtualizedByteBuffer : IDisposable
         File.WriteAllBytes(path, bytes);
         try
         {
-            return new VirtualizedByteBuffer(path, ownsBackingFile: true);
+            return new VirtualizedByteBuffer(
+                path,
+                ownsBackingFile: true,
+                saveProgress: null);
         }
         catch
         {
@@ -128,7 +155,7 @@ public class VirtualizedByteBuffer : IDisposable
     public string ComputeBaseSha256()
     {
         using var stream = new FileStream(
-            _filePath,
+            _backingPath,
             FileMode.Open,
             FileAccess.Read,
             FileShare.Read,
@@ -154,11 +181,35 @@ public class VirtualizedByteBuffer : IDisposable
 
     public bool IsBackedBy(string filePath)
     {
-        return !_ownsBackingFile &&
-            string.Equals(
-                Path.GetFullPath(filePath),
-                Path.GetFullPath(_filePath),
-                StringComparison.OrdinalIgnoreCase);
+        if (_deleteBackingOnDispose)
+            return false;
+
+        try
+        {
+            using var candidate = new FileStream(
+                filePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            lock (_streamLock)
+            {
+                return TryGetFileIdentity(
+                        _fileStream.SafeFileHandle,
+                        out var currentIdentity) &&
+                    TryGetFileIdentity(
+                        candidate.SafeFileHandle,
+                        out var candidateIdentity) &&
+                    currentIdentity == candidateIdentity;
+            }
+        }
+        catch (IOException)
+        {
+            return HasExactNormalizedPath(filePath);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return HasExactNormalizedPath(filePath);
+        }
     }
 
     public void SaveTo(string filePath)
@@ -168,6 +219,11 @@ public class VirtualizedByteBuffer : IDisposable
         {
             Save();
             return;
+        }
+        if (HasExactNormalizedPath(filePath))
+        {
+            throw new IOException(
+                "The binary source was replaced after it was opened.");
         }
 
         var directory = Path.GetDirectoryName(filePath);
@@ -180,9 +236,13 @@ public class VirtualizedByteBuffer : IDisposable
         var buffer = new byte[1024 * 1024];
         try
         {
+            var securitySource = File.Exists(filePath)
+                ? filePath
+                : _backingPath;
+            CreateProtectedSibling(securitySource, tempPath);
             using (var output = new FileStream(
                 tempPath,
-                FileMode.CreateNew,
+                FileMode.Open,
                 FileAccess.Write,
                 FileShare.None,
                 buffer.Length,
@@ -206,7 +266,32 @@ public class VirtualizedByteBuffer : IDisposable
                 output.Flush(flushToDisk: true);
             }
 
-            File.Move(tempPath, filePath, overwrite: true);
+            if (File.Exists(filePath))
+            {
+                var backupPath = Path.Combine(
+                    directory ?? string.Empty,
+                    $".{Path.GetFileName(filePath)}.{Guid.NewGuid():N}.backup");
+                var replaced = false;
+                try
+                {
+                    EnsureReplaceableFile(filePath);
+                    File.Replace(
+                        tempPath,
+                        filePath,
+                        backupPath,
+                        ignoreMetadataErrors: false);
+                    replaced = true;
+                }
+                finally
+                {
+                    if (replaced && File.Exists(backupPath))
+                        File.Delete(backupPath);
+                }
+            }
+            else
+            {
+                File.Move(tempPath, filePath);
+            }
         }
         finally
         {
@@ -267,66 +352,447 @@ public class VirtualizedByteBuffer : IDisposable
         }
 
         var activeSearches = BeginSave();
+        var directory = Path.GetDirectoryName(_filePath) ?? string.Empty;
+        var tempPath = Path.Combine(
+            directory,
+            $".{Path.GetFileName(_filePath)}.{Guid.NewGuid():N}.tmp");
+        var basePath = Path.Combine(
+            directory,
+            $".{Path.GetFileName(_filePath)}.{Guid.NewGuid():N}.base");
+        var backupPath = Path.Combine(
+            directory,
+            $".{Path.GetFileName(_filePath)}.{Guid.NewGuid():N}.backup");
+        var rollbackPath = Path.Combine(
+            directory,
+            $".{Path.GetFileName(_filePath)}.{Guid.NewGuid():N}.rollback");
+        var backingReady = true;
+        var baseAdopted = false;
+        var deleteBackup = false;
         try
         {
             Task.WaitAll(activeSearches.Select(search => search.Completion.Task).ToArray());
+            if ((File.GetAttributes(_filePath) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new IOException(
+                    "Saving through a reparse-point binary path is not supported.");
+            }
+            if (!TryGetFileIdentity(
+                    _fileStream.SafeFileHandle,
+                    out var originalIdentity) ||
+                originalIdentity.NumberOfLinks != 1)
+            {
+                throw new IOException(
+                    "The binary source identity cannot be replaced safely.");
+            }
+            EnsureReplaceableFile(_filePath);
+            if (!TryGetPathIdentity(_filePath, out var openedPathIdentity) ||
+                !HasSameFileId(openedPathIdentity, originalIdentity))
+            {
+                throw new IOException(
+                    "The binary source was replaced after it was opened.");
+            }
 
-            // Close current handles before taking the exclusive write handle.
+            var buffer = new byte[1024 * 1024];
+            CreateProtectedSibling(_filePath, tempPath);
+            CreateProtectedSibling(_filePath, basePath);
+            using (var output = new FileStream(
+                tempPath,
+                FileMode.Open,
+                FileAccess.Write,
+                FileShare.None,
+                buffer.Length,
+                FileOptions.WriteThrough))
+            using (var baseOutput = new FileStream(
+                basePath,
+                FileMode.Open,
+                FileAccess.Write,
+                FileShare.None,
+                buffer.Length,
+                FileOptions.WriteThrough))
+            {
+                for (long offset = 0; offset < _fileLength;)
+                {
+                    var count = (int)Math.Min(buffer.Length, _fileLength - offset);
+                    var read = RandomAccess.Read(
+                        _fileStream.SafeFileHandle,
+                        buffer.AsSpan(0, count),
+                        offset);
+                    if (read == 0)
+                        throw new EndOfStreamException(
+                            "The binary source ended before its expected length.");
+
+                    baseOutput.Write(buffer, 0, read);
+                    ApplyModifications(buffer, read, offset, modifications);
+                    output.Write(buffer, 0, read);
+                    offset += read;
+                    _saveProgress?.Invoke(
+                        BinarySaveStage.SnapshotProgress,
+                        offset);
+                }
+
+                output.Flush(flushToDisk: true);
+                baseOutput.Flush(flushToDisk: true);
+            }
+
+            using (var candidate = new FileStream(
+                _filePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete))
+            {
+                if (!TryGetFileIdentity(
+                        candidate.SafeFileHandle,
+                        out var currentIdentity) ||
+                    !HasSameFileId(originalIdentity, currentIdentity) ||
+                    currentIdentity.NumberOfLinks != 1)
+                {
+                    throw new IOException(
+                        "The binary source changed while the save snapshot was being prepared.");
+                }
+            }
+
             _memoryMappedFile?.Dispose();
-            _fileStream.Close();
+            _memoryMappedFile = null;
+            _fileStream.Dispose();
+            backingReady = false;
 
+            _saveProgress?.Invoke(BinarySaveStage.BeforeCommit, _fileLength);
+            var committed = false;
             try
             {
-                using (var writeStream = new FileStream(_filePath, FileMode.Open, FileAccess.Write, FileShare.None))
+                File.Replace(
+                    tempPath,
+                    _filePath,
+                    backupPath,
+                    ignoreMetadataErrors: false);
+                committed = true;
+
+                if (!TryGetPathIdentity(backupPath, out var replacedIdentity) ||
+                    !HasSameFileId(replacedIdentity, originalIdentity) ||
+                    !FilesHaveSameContent(basePath, backupPath))
                 {
-                    foreach (var (offset, value) in modifications)
+                    throw new IOException(
+                        "The binary source changed immediately before the save commit.");
+                }
+                _saveProgress?.Invoke(
+                    BinarySaveStage.BeforeReopen,
+                    _fileLength);
+                if (!TryOpenBackingResources(
+                        _filePath,
+                        out var committedStream,
+                        out var committedMap))
+                {
+                    throw new IOException(
+                        "The committed binary source could not be reopened.");
+                }
+
+                _fileStream = committedStream;
+                _memoryMappedFile = committedMap;
+                _backingPath = _filePath;
+                _deleteBackingOnDispose = false;
+                backingReady = true;
+            }
+            catch
+            {
+                if (committed && File.Exists(backupPath))
+                {
+                    try
                     {
-                        writeStream.Position = offset;
-                        writeStream.WriteByte(value);
+                        File.Replace(
+                            backupPath,
+                            _filePath,
+                            rollbackPath,
+                            ignoreMetadataErrors: false);
+                    }
+                    catch
+                    {
+                        // The backup is intentionally retained if rollback fails.
                     }
                 }
-
-                lock (_modificationsLock)
-                    _modifications.Clear();
-                _pageCache.Clear();
+                throw;
             }
-            finally
-            {
-                // Always reopen the file stream and memory map so the instance remains usable
-                var newStream = new FileStream(
-                    _filePath,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.Read,
-                    bufferSize: PageSize,
-                    FileOptions.RandomAccess | FileOptions.Asynchronous);
 
-                _fileStream = newStream;
-                _fileLength = _fileStream.Length;
+            deleteBackup = true;
 
-                _useMemoryMapping = _fileLength > 1024 * 1024;
-                if (_useMemoryMapping)
-                {
-                    _memoryMappedFile = MemoryMappedFile.CreateFromFile(
-                        _fileStream,
-                        mapName: null,
-                        capacity: 0,
-                        MemoryMappedFileAccess.Read,
-                        HandleInheritability.None,
-                        leaveOpen: true);
-                }
-                else
-                {
-                    _memoryMappedFile = null;
-                }
-            }
+            lock (_modificationsLock)
+                _modifications.Clear();
+            _pageCache.Clear();
         }
         finally
         {
+            if (!backingReady)
+            {
+                if (!TryOpenBackingResources(
+                        basePath,
+                        out var recoveredStream,
+                        out var recoveredMap))
+                {
+                    EndSave();
+                    throw new IOException(
+                        "The binary save failed and its protected base snapshot could not be reopened.");
+                }
+
+                _fileStream = recoveredStream;
+                _memoryMappedFile = recoveredMap;
+                _backingPath = basePath;
+                _deleteBackingOnDispose = true;
+                baseAdopted = true;
+            }
+            if (File.Exists(tempPath))
+                File.Delete(tempPath);
+            if (!baseAdopted && File.Exists(basePath))
+                File.Delete(basePath);
+            if (File.Exists(rollbackPath))
+                File.Delete(rollbackPath);
+            if (deleteBackup && File.Exists(backupPath))
+                File.Delete(backupPath);
             EndSave();
         }
 
         ModificationsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private bool HasExactNormalizedPath(string filePath)
+    {
+        return string.Equals(
+            Path.GetFullPath(filePath),
+            Path.GetFullPath(_filePath),
+            StringComparison.Ordinal);
+    }
+
+    private static bool TryGetPathIdentity(
+        string filePath,
+        out FileIdentity identity)
+    {
+        try
+        {
+            using var stream = new FileStream(
+                filePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            return TryGetFileIdentity(stream.SafeFileHandle, out identity);
+        }
+        catch (IOException)
+        {
+            identity = default;
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            identity = default;
+            return false;
+        }
+    }
+
+    private bool TryOpenBackingResources(
+        string filePath,
+        out FileStream stream,
+        out MemoryMappedFile? memoryMap)
+    {
+        stream = null!;
+        memoryMap = null;
+        try
+        {
+            stream = new FileStream(
+                filePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read | FileShare.Delete,
+                bufferSize: PageSize,
+                FileOptions.RandomAccess | FileOptions.Asynchronous);
+            if (stream.Length > 1024 * 1024)
+            {
+                memoryMap = MemoryMappedFile.CreateFromFile(
+                    stream,
+                    mapName: null,
+                    capacity: 0,
+                    MemoryMappedFileAccess.Read,
+                    HandleInheritability.None,
+                    leaveOpen: true);
+            }
+            return true;
+        }
+        catch (IOException)
+        {
+            memoryMap?.Dispose();
+            stream?.Dispose();
+            stream = null!;
+            memoryMap = null;
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            memoryMap?.Dispose();
+            stream?.Dispose();
+            stream = null!;
+            memoryMap = null;
+            return false;
+        }
+    }
+
+    private static bool HasSameFileId(
+        FileIdentity first,
+        FileIdentity second)
+    {
+        return first.VolumeSerialNumber == second.VolumeSerialNumber &&
+            first.FileIndexHigh == second.FileIndexHigh &&
+            first.FileIndexLow == second.FileIndexLow;
+    }
+
+    private static bool FilesHaveSameContent(
+        string firstPath,
+        string secondPath)
+    {
+        using var first = new FileStream(
+            firstPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        using var second = new FileStream(
+            secondPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        return first.Length == second.Length &&
+            SHA256.HashData(first).AsSpan().SequenceEqual(
+                SHA256.HashData(second));
+    }
+
+    private static void CreateProtectedSibling(
+        string securitySource,
+        string siblingPath)
+    {
+        using (new FileStream(
+            siblingPath,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.None))
+        {
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            CopyDiscretionaryAccessControl(
+                securitySource,
+                siblingPath);
+        }
+        else
+        {
+            File.SetUnixFileMode(
+                siblingPath,
+                File.GetUnixFileMode(securitySource));
+        }
+    }
+
+    private static void EnsureReplaceableFile(string filePath)
+    {
+        if ((File.GetAttributes(filePath) & FileAttributes.ReparsePoint) != 0)
+            throw new IOException("Replacing a reparse-point binary path is not supported.");
+
+        using var stream = new FileStream(
+            filePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        if (!TryGetFileIdentity(stream.SafeFileHandle, out var identity) ||
+            identity.NumberOfLinks != 1)
+        {
+            throw new IOException(
+                "Replacing a hard-linked binary file is not supported.");
+        }
+        if (OperatingSystem.IsWindows() && HasAlternateDataStreams(filePath))
+        {
+            throw new IOException(
+                "Replacing a binary file with alternate data streams is not supported.");
+        }
+    }
+
+    private static void CopyDiscretionaryAccessControl(
+        string sourcePath,
+        string destinationPath)
+    {
+        _ = GetFileSecurity(
+            sourcePath,
+            DaclSecurityInformation,
+            null,
+            0,
+            out var requiredLength);
+        var error = Marshal.GetLastWin32Error();
+        if (requiredLength == 0 || error != ErrorInsufficientBuffer)
+            throw new Win32Exception(error);
+
+        var descriptor = new byte[requiredLength];
+        if (!GetFileSecurity(
+                sourcePath,
+                DaclSecurityInformation,
+                descriptor,
+                requiredLength,
+                out _))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        if (!SetFileSecurity(
+                destinationPath,
+                DaclSecurityInformation,
+                descriptor))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+    }
+
+    private static bool HasAlternateDataStreams(string filePath)
+    {
+        var findHandle = FindFirstStream(
+            filePath,
+            StreamInfoLevels.FindStreamInfoStandard,
+            out var streamData,
+            0);
+        if (findHandle == InvalidHandleValue)
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+
+        try
+        {
+            do
+            {
+                if (!string.Equals(
+                        streamData.StreamName,
+                        "::$DATA",
+                        StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+            while (FindNextStream(findHandle, out streamData));
+
+            var error = Marshal.GetLastWin32Error();
+            if (error != ErrorHandleEof)
+                throw new Win32Exception(error);
+            return false;
+        }
+        finally
+        {
+            _ = FindClose(findHandle);
+        }
+    }
+
+    private static bool TryGetFileIdentity(
+        SafeFileHandle handle,
+        out FileIdentity identity)
+    {
+        if (OperatingSystem.IsWindows() &&
+            GetFileInformationByHandle(handle, out var information))
+        {
+            identity = new FileIdentity(
+                information.VolumeSerialNumber,
+                information.FileIndexHigh,
+                information.FileIndexLow,
+                information.NumberOfLinks);
+            return true;
+        }
+
+        identity = default;
+        return false;
     }
 
     public void DiscardModifications()
@@ -442,7 +908,7 @@ public class VirtualizedByteBuffer : IDisposable
         var buffer = new byte[checked(SearchChunkSize + overlap)];
         long position = 0;
         using var searchStream = new FileStream(
-            _filePath,
+            _backingPath,
             FileMode.Open,
             FileAccess.Read,
             FileShare.ReadWrite | FileShare.Delete,
@@ -616,11 +1082,11 @@ public class VirtualizedByteBuffer : IDisposable
         _memoryMappedFile?.Dispose();
         _fileStream.Dispose();
         _pageCache.Clear();
-        if (_ownsBackingFile)
+        if (_deleteBackingOnDispose)
         {
             try
             {
-                File.Delete(_filePath);
+                File.Delete(_backingPath);
             }
             catch (IOException)
             {
@@ -634,6 +1100,103 @@ public class VirtualizedByteBuffer : IDisposable
 
         GC.SuppressFinalize(this);
     }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandle(
+        SafeFileHandle hFile,
+        out ByHandleFileInformation lpFileInformation);
+
+    [DllImport(
+        "advapi32.dll",
+        CharSet = CharSet.Unicode,
+        SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileSecurity(
+        string lpFileName,
+        uint requestedInformation,
+        byte[]? securityDescriptor,
+        uint length,
+        out uint lengthNeeded);
+
+    [DllImport(
+        "advapi32.dll",
+        CharSet = CharSet.Unicode,
+        SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetFileSecurity(
+        string lpFileName,
+        uint securityInformation,
+        byte[] securityDescriptor);
+
+    [DllImport(
+        "kernel32.dll",
+        CharSet = CharSet.Unicode,
+        EntryPoint = "FindFirstStreamW",
+        ExactSpelling = true,
+        SetLastError = true)]
+    private static extern IntPtr FindFirstStream(
+        string lpFileName,
+        StreamInfoLevels infoLevel,
+        out Win32FindStreamData findStreamData,
+        uint flags);
+
+    [DllImport(
+        "kernel32.dll",
+        EntryPoint = "FindNextStreamW",
+        ExactSpelling = true,
+        SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool FindNextStream(
+        IntPtr findStream,
+        out Win32FindStreamData findStreamData);
+
+    [DllImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool FindClose(IntPtr findFile);
+
+    private const uint DaclSecurityInformation = 0x00000004;
+    private const int ErrorInsufficientBuffer = 122;
+    private const int ErrorHandleEof = 38;
+    private static readonly IntPtr InvalidHandleValue = new(-1);
+
+    private enum StreamInfoLevels
+    {
+        FindStreamInfoStandard
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct Win32FindStreamData
+    {
+        public long StreamSize;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 296)]
+        public string StreamName;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public uint CreationTimeLow;
+        public uint CreationTimeHigh;
+        public uint LastAccessTimeLow;
+        public uint LastAccessTimeHigh;
+        public uint LastWriteTimeLow;
+        public uint LastWriteTimeHigh;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    private readonly record struct FileIdentity(
+        uint VolumeSerialNumber,
+        uint FileIndexHigh,
+        uint FileIndexLow,
+        uint NumberOfLinks);
 
     private sealed class ActiveSearch(CancellationTokenSource cancellation)
     {

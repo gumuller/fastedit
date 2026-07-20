@@ -203,6 +203,64 @@ public class SettingsServiceTests
         }
     }
 
+    [Fact]
+    public void SaveReload_LosslessTextPayloadPreservesUtf16CodeUnits()
+    {
+        const string content = "\uFEFF\uD800\0\r\n\uDC00";
+        var bytes = new byte[content.Length * sizeof(char)];
+        for (var index = 0; index < content.Length; index++)
+        {
+            bytes[index * 2] = (byte)content[index];
+            bytes[(index * 2) + 1] = (byte)(content[index] >> 8);
+        }
+
+        var appDataPath = Path.Combine(
+            Path.GetTempPath(),
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(appDataPath);
+        try
+        {
+            var service = new SettingsService(
+                new FileSystemService(),
+                appDataPath);
+            service.OpenFiles =
+            [
+                new SessionFile
+                {
+                    EntryId = "exact",
+                    SnapshotVersion = 2,
+                    FilePath = "Untitled-1",
+                    IsUntitled = true,
+                    Content = content,
+                    TextContentBase64 = Convert.ToBase64String(bytes),
+                    IsModified = true
+                }
+            ];
+            service.ActiveSessionEntryId = "exact";
+            service.Save();
+
+            var reloaded = new SettingsService(
+                new FileSystemService(),
+                appDataPath);
+            var restored = Assert.Single(reloaded.OpenFiles);
+            var payloadBytes = Convert.FromBase64String(
+                restored.TextContentBase64!);
+            var restoredChars = new char[payloadBytes.Length / sizeof(char)];
+            for (var index = 0; index < restoredChars.Length; index++)
+            {
+                restoredChars[index] = (char)(
+                    payloadBytes[index * 2] |
+                    (payloadBytes[(index * 2) + 1] << 8));
+            }
+
+            Assert.Equal(content, new string(restoredChars));
+        }
+        finally
+        {
+            Directory.Delete(appDataPath, recursive: true);
+        }
+    }
+
     private static void ConfigureSession(
         SettingsService service,
         string entryId,

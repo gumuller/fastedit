@@ -135,6 +135,191 @@ public class VirtualizedByteBufferTests : IDisposable
     }
 
     [Fact]
+    public void Save_MidSnapshotFailure_LeavesOriginalUntouched()
+    {
+        var path = CreateTempFile(new byte[] { 0x10, 0x20, 0x30 });
+        using var buffer = new VirtualizedByteBuffer(
+            path,
+            (stage, _) =>
+            {
+                if (stage == BinarySaveStage.SnapshotProgress)
+                    throw new IOException("injected write failure");
+            });
+        buffer.SetByte(1, 0xFF);
+
+        var action = buffer.Save;
+
+        Assert.Throws<IOException>(action);
+        Assert.Equal(new byte[] { 0x10, 0x20, 0x30 }, File.ReadAllBytes(path));
+        Assert.True(buffer.HasModifications);
+        Assert.Equal(0xFF, buffer.GetByte(1));
+    }
+
+    [Fact]
+    public void Save_ReopenFailureRollsBackAndKeepsBufferUsable()
+    {
+        var path = CreateTempFile(new byte[] { 0x10, 0x20, 0x30 });
+        using var buffer = new VirtualizedByteBuffer(
+            path,
+            (stage, _) =>
+            {
+                if (stage == BinarySaveStage.BeforeReopen)
+                    throw new IOException("injected reopen failure");
+            });
+        buffer.SetByte(1, 0xFF);
+
+        Assert.Throws<IOException>(buffer.Save);
+
+        Assert.Equal(new byte[] { 0x10, 0x20, 0x30 }, File.ReadAllBytes(path));
+        Assert.True(buffer.HasModifications);
+        Assert.Equal(0xFF, buffer.GetByte(1));
+        var saveAsPath = CreateTempFile(Array.Empty<byte>());
+        buffer.SaveTo(saveAsPath);
+        Assert.Equal(new byte[] { 0x10, 0xFF, 0x30 }, File.ReadAllBytes(saveAsPath));
+    }
+
+    [Fact]
+    public void Save_ConcurrentReplacementAtCommitIsDetectedAndPreserved()
+    {
+        var path = CreateTempFile(new byte[] { 0x10, 0x20, 0x30 });
+        var replacement = CreateTempFile(new byte[] { 0xAA, 0xBB, 0xCC });
+        using var buffer = new VirtualizedByteBuffer(path, (stage, _) =>
+        {
+            if (stage == BinarySaveStage.BeforeCommit)
+                File.Move(replacement, path, overwrite: true);
+        });
+        buffer.SetByte(1, 0xFF);
+
+        var action = buffer.Save;
+
+        Assert.Throws<IOException>(action);
+        Assert.Equal(new byte[] { 0xAA, 0xBB, 0xCC }, File.ReadAllBytes(path));
+        Assert.True(buffer.HasModifications);
+        Assert.Equal(0xFF, buffer.GetByte(1));
+        Assert.Throws<IOException>(() => buffer.SaveTo(path));
+    }
+
+    [Fact]
+    public void Save_ConcurrentInPlaceWriteAtCommitIsDetectedAndPreserved()
+    {
+        var path = CreateTempFile(new byte[] { 0x10, 0x20, 0x30 });
+        using var buffer = new VirtualizedByteBuffer(path, (stage, _) =>
+        {
+            if (stage == BinarySaveStage.BeforeCommit)
+                File.WriteAllBytes(path, new byte[] { 0xAA, 0xBB, 0xCC });
+        });
+        buffer.SetByte(1, 0xFF);
+
+        Assert.Throws<IOException>(buffer.Save);
+
+        Assert.Equal(new byte[] { 0xAA, 0xBB, 0xCC }, File.ReadAllBytes(path));
+        Assert.True(buffer.HasModifications);
+        Assert.Equal(0xFF, buffer.GetByte(1));
+    }
+
+    [Fact]
+    public void IsBackedBy_UsesFileIdentityForNormalSameFilePath()
+    {
+        var path = CreateTempFile(new byte[] { 0x10, 0x20 });
+        using var buffer = new VirtualizedByteBuffer(path);
+
+        Assert.True(buffer.IsBackedBy(path));
+    }
+
+    [Fact]
+    public void Save_ReparsePointPathFailsWithoutReplacingTarget()
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            $"fastedit-link-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var targetPath = Path.Combine(directory, "target.bin");
+        var linkPath = Path.Combine(directory, "link.bin");
+        try
+        {
+            File.WriteAllBytes(targetPath, new byte[] { 0x10, 0x20 });
+            try
+            {
+                File.CreateSymbolicLink(linkPath, targetPath);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return;
+            }
+            catch (IOException)
+            {
+                return;
+            }
+
+            using var buffer = new VirtualizedByteBuffer(linkPath);
+            buffer.SetByte(1, 0xFF);
+
+            Assert.Throws<IOException>(buffer.Save);
+            Assert.Equal(new byte[] { 0x10, 0x20 }, File.ReadAllBytes(targetPath));
+            Assert.True(File.GetAttributes(linkPath).HasFlag(FileAttributes.ReparsePoint));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Save_FileWithAlternateStreamFailsWithoutLosingStream()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+        var path = CreateTempFile(new byte[] { 0x10, 0x20 });
+        var streamPath = $"{path}:fastedit-test";
+        try
+        {
+            File.WriteAllText(streamPath, "protected metadata");
+        }
+        catch (IOException)
+        {
+            return;
+        }
+        using var buffer = new VirtualizedByteBuffer(path);
+        buffer.SetByte(1, 0xFF);
+
+        Assert.Throws<IOException>(buffer.Save);
+
+        Assert.Equal(new byte[] { 0x10, 0x20 }, File.ReadAllBytes(path));
+        Assert.Equal("protected metadata", File.ReadAllText(streamPath));
+    }
+
+    [Fact]
+    public void SaveTo_DistinguishesCaseSensitiveSiblingFiles_WhenSupported()
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            $"fastedit-case-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var upperPath = Path.Combine(directory, "File.bin");
+        var lowerPath = Path.Combine(directory, "file.bin");
+        try
+        {
+            File.WriteAllBytes(upperPath, new byte[] { 0x10, 0x20 });
+            File.WriteAllBytes(lowerPath, new byte[] { 0xAA, 0xBB });
+            if (Directory.GetFiles(directory).Length != 2)
+                return;
+
+            using var buffer = new VirtualizedByteBuffer(upperPath);
+            buffer.SetByte(1, 0xFF);
+
+            Assert.False(buffer.IsBackedBy(lowerPath));
+            buffer.SaveTo(lowerPath);
+
+            Assert.Equal(new byte[] { 0x10, 0x20 }, File.ReadAllBytes(upperPath));
+            Assert.Equal(new byte[] { 0x10, 0xFF }, File.ReadAllBytes(lowerPath));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void GetRows_Returns_Formatted_Rows()
     {
         var data = Enumerable.Range(0, 48).Select(i => (byte)i).ToArray();

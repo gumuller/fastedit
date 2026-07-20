@@ -308,6 +308,8 @@ public partial class MainWindow : FluentWindow
     {
         foreach (var editorHost in FindVisualChildren<EditorHost>(root))
             editorHost.SaveStateToViewModel();
+        foreach (var largeFileViewer in FindVisualChildren<LargeFileViewer>(root))
+            largeFileViewer.SaveStateToViewModel();
     }
 
     private void Exit_Click(object sender, RoutedEventArgs e)
