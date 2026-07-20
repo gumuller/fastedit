@@ -71,6 +71,20 @@ public class LargeFileViewerViewportTests
     }
 
     [Fact]
+    public void ApplyingFilter_CanPreserveCurrentPhysicalTopLine()
+    {
+        var viewport = new LargeFileViewerViewport();
+        viewport.Configure(totalLineCount: 100, visibleLineCount: 1);
+        viewport.SetTopLine(50);
+        var physicalTopLine = viewport.ResolvePhysicalLine(viewport.TopLine);
+
+        viewport.ShowOnly(new long[] { 3, 50, 90 });
+        viewport.GoToPhysicalLine(physicalTopLine);
+
+        Assert.Equal(50, viewport.ResolvePhysicalLine(viewport.TopLine));
+    }
+
+    [Fact]
     public void ClearShowOnly_Restores_Physical_Line_View_And_Clamps()
     {
         var viewport = new LargeFileViewerViewport();

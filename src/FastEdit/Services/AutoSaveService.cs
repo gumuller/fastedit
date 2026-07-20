@@ -1,6 +1,9 @@
 using System.Diagnostics;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
+using FastEdit.Infrastructure;
 using FastEdit.Services.Interfaces;
 
 namespace FastEdit.Services;
@@ -79,10 +82,11 @@ public sealed class AutoSaveService : IAutoSaveService
             StopTimer();
             IntervalSeconds = _settings.AutoSaveIntervalSeconds;
             _fileSystem.CreateDirectory(_autoSaveDir);
+            using var protection = ProtectAutoSaveDirectory();
             RunStartupMaintenance();
             var wasCleanShutdown = _fileSystem.FileExists(_shutdownMarkerPath);
             if (wasCleanShutdown)
-                _fileSystem.DeleteFile(_shutdownMarkerPath);
+                DeleteFileSafely(_shutdownMarkerPath);
             using (var process = Process.GetCurrentProcess())
             {
                 var marker = $"{process.Id}|{process.StartTime.ToUniversalTime().Ticks}";
@@ -155,25 +159,24 @@ public sealed class AutoSaveService : IAutoSaveService
                 return;
 
             _fileSystem.CreateDirectory(_autoSaveDir);
+            using var protection = ProtectAutoSaveDirectory();
             var manifest = new List<AutoSaveManifestEntry>(snapshot.Length);
 
             foreach (var entry in snapshot)
             {
-                var contentFile = $"{_activeContentPrefix}{entry.Id}.txt";
+                var entryKey = entry.Id.All(character =>
+                    char.IsAsciiLetterOrDigit(character) ||
+                    character is '-' or '_')
+                    ? entry.Id
+                    : Convert.ToHexString(
+                        SHA256.HashData(Encoding.UTF8.GetBytes(entry.Id)))[..24];
+                var contentFile = $"{_activeContentPrefix}{entryKey}.txt";
+                var manifestEntry = CreateManifestEntry(entry, contentFile);
                 _fileSystem.WriteAllTextAtomic(
                     Path.Combine(_autoSaveDir, contentFile),
-                    entry.Content);
+                    SerializeContentEnvelope(entry, manifestEntry));
 
-                manifest.Add(new AutoSaveManifestEntry
-                {
-                    Id = entry.Id,
-                    FileName = entry.FileName,
-                    FilePath = entry.FilePath,
-                    ContentFile = contentFile,
-                    IsUntitled = entry.IsUntitled,
-                    CursorOffset = entry.CursorOffset,
-                    ScrollOffset = entry.ScrollOffset
-                });
+                manifest.Add(manifestEntry);
             }
 
             var json = JsonSerializer.Serialize(
@@ -191,7 +194,7 @@ public sealed class AutoSaveService : IAutoSaveService
     private void VerifySnapshot(IReadOnlyCollection<AutoSaveEntry> snapshot)
     {
         var storedManifest = JsonSerializer.Deserialize<List<AutoSaveManifestEntry>>(
-            _fileSystem.ReadAllText(_activeManifestPath))
+            ReadAllTextSafely(_activeManifestPath))
             ?? throw new InvalidDataException("The replacement recovery manifest contains no entries.");
         if (storedManifest.Count != snapshot.Count)
             throw new InvalidDataException("The replacement recovery manifest is incomplete.");
@@ -200,19 +203,20 @@ public sealed class AutoSaveService : IAutoSaveService
         foreach (var entry in snapshot)
         {
             if (!storedById.TryGetValue(entry.Id, out var stored) ||
-                stored.FileName != entry.FileName ||
-                stored.FilePath != entry.FilePath ||
-                stored.IsUntitled != entry.IsUntitled ||
-                stored.CursorOffset != entry.CursorOffset ||
-                stored.ScrollOffset != entry.ScrollOffset)
+                !ManifestMatches(stored, entry))
             {
                 throw new InvalidDataException(
                     $"The replacement recovery metadata for '{entry.FileName}' could not be verified.");
             }
 
-            var storedContent = _fileSystem.ReadAllText(
-                Path.Combine(_autoSaveDir, stored.ContentFile));
-            if (!string.Equals(storedContent, entry.Content, StringComparison.Ordinal))
+            var storedContent = ReadAllTextSafely(
+                ResolveOwnedContentPath(_activeManifestPath, stored.ContentFile));
+            if (!string.Equals(
+                    storedContent,
+                    SerializeContentEnvelope(
+                        entry,
+                        CreateManifestEntry(entry, stored.ContentFile)),
+                    StringComparison.Ordinal))
             {
                 throw new InvalidDataException(
                     $"The replacement recovery content for '{entry.FileName}' could not be verified.");
@@ -225,6 +229,7 @@ public sealed class AutoSaveService : IAutoSaveService
         lock (_persistenceSync)
         {
             _fileSystem.CreateDirectory(_autoSaveDir);
+            using var protection = ProtectAutoSaveDirectory();
             return ClearActiveGenerationCore();
         }
     }
@@ -236,6 +241,7 @@ public sealed class AutoSaveService : IAutoSaveService
 
         lock (_persistenceSync)
         {
+            using var protection = ProtectAutoSaveDirectory();
             RunStartupMaintenance();
         }
 
@@ -249,6 +255,7 @@ public sealed class AutoSaveService : IAutoSaveService
     {
         lock (_persistenceSync)
         {
+            using var protection = ProtectAutoSaveDirectory();
             var manifestPaths = GetManifestPaths();
             if (manifestPaths.Count == 0)
                 return new RecoveryEntriesResult(true, Array.Empty<AutoSaveEntry>());
@@ -291,7 +298,7 @@ public sealed class AutoSaveService : IAutoSaveService
     {
         try
         {
-            var json = _fileSystem.ReadAllText(manifestPath);
+            var json = ReadAllTextSafely(manifestPath);
             var manifest = JsonSerializer.Deserialize<List<AutoSaveManifestEntry>>(json)
                 ?? throw new InvalidDataException("The auto-save manifest contains no entries.");
 
@@ -304,7 +311,17 @@ public sealed class AutoSaveService : IAutoSaveService
                     continue;
                 }
 
-                var contentPath = Path.Combine(_autoSaveDir, item.ContentFile);
+                string contentPath;
+                try
+                {
+                    contentPath = ResolveOwnedContentPath(manifestPath, item.ContentFile);
+                }
+                catch (Exception ex)
+                {
+                    errors.Add(
+                        $"Recovery content for '{item.FileName}' is not owned by its manifest: {ex.Message}");
+                    continue;
+                }
                 _lastRecoveryContentPaths.Add(contentPath);
                 if (!_fileSystem.FileExists(contentPath))
                 {
@@ -315,14 +332,13 @@ public sealed class AutoSaveService : IAutoSaveService
                 try
                 {
                     var recoveryEntryId = $"{manifestName}:{item.Id}";
-                    entriesById[recoveryEntryId] = new AutoSaveEntry(
-                        recoveryEntryId,
-                        item.FileName,
-                        item.FilePath,
-                        _fileSystem.ReadAllText(contentPath),
-                        item.IsUntitled,
-                        item.CursorOffset,
-                        item.ScrollOffset);
+                    entriesById[recoveryEntryId] =
+                        CreateRecoveryEntry(
+                            recoveryEntryId,
+                            item,
+                            ResolveOwnedContentPath(
+                                manifestPath,
+                                item.ContentFile));
                     _lastRecoveryOrigins[recoveryEntryId] =
                         new RecoveryOrigin(manifestName, item.Id);
                 }
@@ -344,6 +360,7 @@ public sealed class AutoSaveService : IAutoSaveService
     {
         lock (_persistenceSync)
         {
+            using var protection = ProtectAutoSaveDirectory();
             try
             {
                 RecordRecoveredEntriesCore(entryIds);
@@ -364,6 +381,7 @@ public sealed class AutoSaveService : IAutoSaveService
     {
         lock (_persistenceSync)
         {
+            using var protection = ProtectAutoSaveDirectory();
             try
             {
                 var snapshot = replacementEntries.ToArray();
@@ -414,7 +432,7 @@ public sealed class AutoSaveService : IAutoSaveService
 
         try
         {
-            var json = _fileSystem.ReadAllText(_resolvedEntriesPath);
+            var json = ReadAllTextSafely(_resolvedEntriesPath);
             var stored = JsonSerializer.Deserialize<Dictionary<string, string[]>>(json)
                 ?? new Dictionary<string, string[]>();
             return stored.ToDictionary(
@@ -434,6 +452,7 @@ public sealed class AutoSaveService : IAutoSaveService
     {
         lock (_persistenceSync)
         {
+            using var protection = ProtectAutoSaveDirectory();
             return ClearRecoveryFilesCore();
         }
     }
@@ -530,7 +549,7 @@ public sealed class AutoSaveService : IAutoSaveService
             }
 
             if (_fileSystem.FileExists(_activeGenerationMarkerPath))
-                _fileSystem.DeleteFile(_activeGenerationMarkerPath);
+                DeleteFileSafely(_activeGenerationMarkerPath);
             return true;
         }
         catch (Exception ex)
@@ -558,7 +577,11 @@ public sealed class AutoSaveService : IAutoSaveService
         {
             var generationId = fileName[prefix.Length..];
             foreach (var path in _fileSystem.GetFiles(_autoSaveDir, $"{generationId}-*.txt"))
-                contentPaths.Add(path);
+            {
+                contentPaths.Add(ResolveOwnedContentPath(
+                    manifestName,
+                    Path.GetFileName(path)));
+            }
         }
     }
 
@@ -568,17 +591,40 @@ public sealed class AutoSaveService : IAutoSaveService
         {
             var cleanupComplete = true;
             var originalManifestName = GetOriginalManifestName(retiredManifestPath);
-            var contentPaths = CaptureRecoveryContentPaths(new[] { retiredManifestPath })
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            if (originalManifestName != null)
-                AddGenerationContentPaths(originalManifestName, contentPaths);
+            HashSet<string> contentPaths;
+            try
+            {
+                contentPaths = CaptureRecoveryContentPaths(new[] { retiredManifestPath })
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                if (originalManifestName != null)
+                    AddGenerationContentPaths(originalManifestName, contentPaths);
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning(
+                    "Preserving invalid retired auto-save manifest '{0}': {1}",
+                    retiredManifestPath,
+                    ex);
+                continue;
+            }
 
             foreach (var contentPath in contentPaths)
             {
                 try
                 {
-                    if (_fileSystem.FileExists(contentPath))
-                        _fileSystem.DeleteFile(contentPath);
+                    var ownedPath = ResolveOwnedContentPath(
+                        retiredManifestPath,
+                        Path.GetFileName(contentPath));
+                    if (!string.Equals(
+                            Path.GetFullPath(contentPath),
+                            ownedPath,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidDataException(
+                            "Retired content no longer belongs to its manifest.");
+                    }
+                    if (_fileSystem.FileExists(ownedPath))
+                        DeleteFileSafely(ownedPath);
                 }
                 catch (Exception ex)
                 {
@@ -598,7 +644,7 @@ public sealed class AutoSaveService : IAutoSaveService
                 try
                 {
                     if (_fileSystem.FileExists(markerPath))
-                        _fileSystem.DeleteFile(markerPath);
+                        DeleteFileSafely(markerPath);
                 }
                 catch (Exception ex)
                 {
@@ -615,7 +661,7 @@ public sealed class AutoSaveService : IAutoSaveService
 
             try
             {
-                _fileSystem.DeleteFile(retiredManifestPath);
+                DeleteFileSafely(retiredManifestPath);
             }
             catch (Exception ex)
             {
@@ -662,8 +708,19 @@ public sealed class AutoSaveService : IAutoSaveService
         {
             try
             {
-                if (_fileSystem.FileExists(contentPath))
-                    _fileSystem.DeleteFile(contentPath);
+                var ownedPath = ResolveOwnedContentPath(
+                    retiredManifestPath,
+                    Path.GetFileName(contentPath));
+                if (!string.Equals(
+                        Path.GetFullPath(contentPath),
+                        ownedPath,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException(
+                        "Quarantined content no longer belongs to its manifest.");
+                }
+                if (_fileSystem.FileExists(ownedPath))
+                    DeleteFileSafely(ownedPath);
             }
             catch (Exception ex)
             {
@@ -680,7 +737,7 @@ public sealed class AutoSaveService : IAutoSaveService
             try
             {
                 if (_fileSystem.FileExists(markerPath))
-                    _fileSystem.DeleteFile(markerPath);
+                    DeleteFileSafely(markerPath);
             }
             catch (Exception ex)
             {
@@ -696,7 +753,7 @@ public sealed class AutoSaveService : IAutoSaveService
         {
             try
             {
-                _fileSystem.DeleteFile(retiredManifestPath);
+                DeleteFileSafely(retiredManifestPath);
             }
             catch (Exception ex)
             {
@@ -746,13 +803,31 @@ public sealed class AutoSaveService : IAutoSaveService
         IReadOnlyCollection<string> contentPaths,
         string markerPath)
     {
+        var intentFileName = Path.GetFileNameWithoutExtension(intentPath);
+        const string intentPrefix = ".cleanup-";
+        var generationId = intentFileName.StartsWith(
+            intentPrefix,
+            StringComparison.OrdinalIgnoreCase)
+            ? intentFileName[intentPrefix.Length..]
+            : throw new InvalidDataException("The cleanup intent name is invalid.");
         var cleanupComplete = true;
         foreach (var contentPath in contentPaths.Distinct(StringComparer.OrdinalIgnoreCase))
         {
             try
             {
-                if (_fileSystem.FileExists(contentPath))
-                    _fileSystem.DeleteFile(contentPath);
+                var ownedPath = ResolveOwnedContentPath(
+                    $"manifest-{generationId}.json",
+                    Path.GetFileName(contentPath));
+                if (!string.Equals(
+                        Path.GetFullPath(contentPath),
+                        ownedPath,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException(
+                        "Intended cleanup content no longer belongs to its generation.");
+                }
+                if (_fileSystem.FileExists(ownedPath))
+                    DeleteFileSafely(ownedPath);
             }
             catch (Exception ex)
             {
@@ -770,7 +845,7 @@ public sealed class AutoSaveService : IAutoSaveService
         try
         {
             if (_fileSystem.FileExists(markerPath))
-                _fileSystem.DeleteFile(markerPath);
+                DeleteFileSafely(markerPath);
         }
         catch (Exception ex)
         {
@@ -783,7 +858,7 @@ public sealed class AutoSaveService : IAutoSaveService
 
         try
         {
-            _fileSystem.DeleteFile(intentPath);
+            DeleteFileSafely(intentPath);
             return true;
         }
         catch (Exception ex)
@@ -804,12 +879,22 @@ public sealed class AutoSaveService : IAutoSaveService
         try
         {
             var contentFiles = contentPaths
-                .Select(Path.GetFileName)
-                .OfType<string>()
-                .Where(fileName =>
-                    fileName.StartsWith(
-                        $"{generationId}-",
-                        StringComparison.OrdinalIgnoreCase))
+                .Select(path =>
+                {
+                    var fileName = Path.GetFileName(path);
+                    var resolved = ResolveOwnedContentPath(
+                        $"manifest-{generationId}.json",
+                        fileName);
+                    if (!string.Equals(
+                            Path.GetFullPath(path),
+                            resolved,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidDataException(
+                            "Cleanup content is outside its auto-save generation.");
+                    }
+                    return fileName;
+                })
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
             if (contentFiles.Length != contentPaths.Count)
@@ -841,7 +926,7 @@ public sealed class AutoSaveService : IAutoSaveService
         try
         {
             var intent = JsonSerializer.Deserialize<CleanupIntent>(
-                _fileSystem.ReadAllText(intentPath));
+                ReadAllTextSafely(intentPath));
             if (intent == null ||
                 !Guid.TryParseExact(intent.GenerationId, "N", out _) ||
                 !string.Equals(
@@ -861,7 +946,9 @@ public sealed class AutoSaveService : IAutoSaveService
             generationId = intent.GenerationId;
             contentPaths = intent.ContentFiles
                 .Distinct(StringComparer.OrdinalIgnoreCase)
-                .Select(fileName => Path.Combine(_autoSaveDir, fileName))
+                .Select(fileName => ResolveOwnedContentPath(
+                    $"manifest-{intent.GenerationId}.json",
+                    fileName))
                 .ToArray();
             return true;
         }
@@ -920,7 +1007,7 @@ public sealed class AutoSaveService : IAutoSaveService
         try
         {
             if (_fileSystem.FileExists(markerPath))
-                _fileSystem.DeleteFile(markerPath);
+                DeleteFileSafely(markerPath);
         }
         catch (Exception ex)
         {
@@ -937,12 +1024,24 @@ public sealed class AutoSaveService : IAutoSaveService
     {
         try
         {
-            var manifest = contentPaths.Select(contentPath => new AutoSaveManifestEntry
+            var manifest = contentPaths.Select(contentPath =>
             {
-                Id = Path.GetFileNameWithoutExtension(contentPath),
-                FileName = Path.GetFileName(contentPath),
-                ContentFile = Path.GetFileName(contentPath),
-                IsUntitled = true
+                var contentFile = Path.GetFileName(contentPath);
+                var ownedPath = ResolveOwnedContentPath(manifestPath, contentFile);
+                var envelope = TryReadContentEnvelope(ownedPath);
+                if (envelope != null)
+                {
+                    envelope.Metadata.ContentFile = contentFile;
+                    return envelope.Metadata;
+                }
+
+                return new AutoSaveManifestEntry
+                {
+                    Id = Path.GetFileNameWithoutExtension(contentPath),
+                    FileName = contentFile,
+                    ContentFile = contentFile,
+                    IsUntitled = true
+                };
             });
             var json = JsonSerializer.Serialize(
                 manifest,
@@ -986,7 +1085,7 @@ public sealed class AutoSaveService : IAutoSaveService
 
         try
         {
-            var parts = _fileSystem.ReadAllText(markerPath).Split('|');
+            var parts = ReadAllTextSafely(markerPath).Split('|');
             if (parts.Length != 2 ||
                 !int.TryParse(parts[0], out var processId) ||
                 !long.TryParse(parts[1], out var startTimeTicks))
@@ -1040,13 +1139,15 @@ public sealed class AutoSaveService : IAutoSaveService
         {
             try
             {
-                var json = _fileSystem.ReadAllText(manifestPath);
+                var json = ReadAllTextSafely(manifestPath);
                 var manifest = JsonSerializer.Deserialize<List<AutoSaveManifestEntry>>(json);
                 if (manifest == null)
                     continue;
 
                 foreach (var item in manifest)
-                    contentPaths.Add(Path.Combine(_autoSaveDir, item.ContentFile));
+                    contentPaths.Add(ResolveOwnedContentPath(
+                        manifestPath,
+                        item.ContentFile));
             }
             catch (Exception ex)
             {
@@ -1054,9 +1155,158 @@ public sealed class AutoSaveService : IAutoSaveService
                     "Failed to enumerate content for recovery manifest '{0}': {1}",
                     manifestPath,
                     ex);
+                throw;
             }
         }
         return contentPaths.ToArray();
+    }
+
+    private string ResolveOwnedContentPath(
+        string manifestPath,
+        string contentFile)
+    {
+        EnsureAutoSaveRootIsNotReparsePoint();
+        if (string.IsNullOrWhiteSpace(contentFile) ||
+            Path.IsPathRooted(contentFile) ||
+            Path.GetFileName(contentFile) != contentFile ||
+            contentFile.Contains(Path.DirectorySeparatorChar) ||
+            contentFile.Contains(Path.AltDirectorySeparatorChar))
+        {
+            throw new InvalidDataException("The recovery content name is not a leaf file.");
+        }
+
+        var originalManifestName =
+            GetOriginalManifestName(manifestPath) ?? Path.GetFileName(manifestPath);
+        var generationId = GetGenerationId(originalManifestName);
+        if (generationId != null &&
+            (!contentFile.StartsWith(
+                $"{generationId}-",
+                StringComparison.OrdinalIgnoreCase) ||
+             !contentFile.EndsWith(".txt", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidDataException(
+                "The recovery content does not belong to its manifest generation.");
+        }
+
+        var fullPath = Path.GetFullPath(Path.Combine(_autoSaveDir, contentFile));
+        var parent = Path.GetDirectoryName(fullPath);
+        if (!string.Equals(
+                parent,
+                Path.GetFullPath(_autoSaveDir).TrimEnd(
+                    Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "The recovery content escapes the auto-save directory.");
+        }
+
+        if (_fileSystem.FileExists(fullPath) &&
+            (_fileSystem.GetAttributes(fullPath) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidDataException(
+                "Recovery content cannot be a reparse point.");
+        }
+
+        return fullPath;
+    }
+
+    private IDisposable ProtectAutoSaveDirectory()
+    {
+        return _fileSystem is ISecureFileSystemService secureFileSystem
+            ? secureFileSystem.ProtectDirectoryTree(
+                _autoSaveDir,
+                Environment.GetFolderPath(
+                    Environment.SpecialFolder.ApplicationData))
+            : EmptyProtection.Instance;
+    }
+
+    private string ReadAllTextSafely(string path)
+    {
+        ValidateOwnedAutoSavePath(path);
+        return _fileSystem is ISecureFileSystemService secureFileSystem
+            ? secureFileSystem.ReadAllTextNoFollow(path)
+            : _fileSystem.ReadAllText(path);
+    }
+
+    private byte[] ReadAllBytesSafely(string path)
+    {
+        ValidateOwnedAutoSavePath(path);
+        return _fileSystem is ISecureFileSystemService secureFileSystem
+            ? secureFileSystem.ReadAllBytesNoFollow(path)
+            : _fileSystem.ReadAllBytes(path);
+    }
+
+    private void DeleteFileSafely(string path)
+    {
+        ValidateOwnedAutoSavePath(path);
+        if (_fileSystem is ISecureFileSystemService secureFileSystem)
+            secureFileSystem.DeleteFileNoFollow(path);
+        else
+            _fileSystem.DeleteFile(path);
+    }
+
+    private void ValidateOwnedAutoSavePath(string path)
+    {
+        EnsureAutoSaveRootIsNotReparsePoint();
+        var fullPath = Path.GetFullPath(path);
+        if (!string.Equals(
+                Path.GetDirectoryName(fullPath),
+                Path.GetFullPath(_autoSaveDir).TrimEnd(
+                    Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "The auto-save file is outside the protected directory.");
+        }
+        if (_fileSystem.FileExists(fullPath) &&
+            (_fileSystem.GetAttributes(fullPath) &
+             FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidDataException(
+                "The auto-save file cannot be a reparse point.");
+        }
+    }
+
+    private void EnsureAutoSaveRootIsNotReparsePoint()
+    {
+        var trustedRoot = Path.GetFullPath(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData))
+            .TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar);
+        for (var directory = Path.GetFullPath(_autoSaveDir);
+             !string.Equals(
+                 directory,
+                 trustedRoot,
+                 StringComparison.OrdinalIgnoreCase);
+             directory = Path.GetDirectoryName(directory) ??
+                 throw new InvalidDataException(
+                     "The auto-save directory is outside the trusted application-data root."))
+        {
+            if (_fileSystem.DirectoryExists(directory) &&
+                (_fileSystem.GetAttributes(directory) &
+                 FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidDataException(
+                    "The auto-save directory cannot traverse a reparse point.");
+            }
+        }
+    }
+
+    private static string? GetGenerationId(string? manifestName)
+    {
+        if (string.IsNullOrEmpty(manifestName))
+            return null;
+        var fileName = Path.GetFileNameWithoutExtension(manifestName);
+        const string prefix = "manifest-";
+        if (!fileName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            return null;
+        var generationId = fileName[prefix.Length..];
+        return Guid.TryParseExact(generationId, "N", out _)
+            ? generationId
+            : null;
     }
 
     private void SaveResolvedEntries(Dictionary<string, HashSet<string>> resolvedEntries)
@@ -1064,7 +1314,7 @@ public sealed class AutoSaveService : IAutoSaveService
         if (resolvedEntries.Count == 0)
         {
             if (_fileSystem.FileExists(_resolvedEntriesPath))
-                _fileSystem.DeleteFile(_resolvedEntriesPath);
+                DeleteFileSafely(_resolvedEntriesPath);
             return;
         }
 
@@ -1099,6 +1349,259 @@ public sealed class AutoSaveService : IAutoSaveService
         _timer = null;
     }
 
+    private static string GetPersistedPayload(AutoSaveEntry entry)
+    {
+        if (entry.BinaryContentBase64 != null)
+            return entry.BinaryContentBase64;
+        if (entry.TextContentBase64 != null)
+            return entry.TextContentBase64;
+        return entry.Content;
+    }
+
+    private static string SerializeContentEnvelope(
+        AutoSaveEntry entry,
+        AutoSaveManifestEntry metadata)
+    {
+        if (entry.SnapshotVersion == 0)
+            return GetPersistedPayload(entry);
+
+        return JsonSerializer.Serialize(
+            new AutoSaveContentEnvelope
+            {
+                Format = "FastEdit.AutoSaveSnapshot",
+                Version = 1,
+                Metadata = metadata,
+                Payload = GetPersistedPayload(entry)
+            });
+    }
+
+    private static AutoSaveManifestEntry CreateManifestEntry(
+        AutoSaveEntry entry,
+        string contentFile)
+    {
+        return new AutoSaveManifestEntry
+        {
+            Id = entry.Id,
+            FileName = entry.FileName,
+            FilePath = entry.FilePath,
+            ContentFile = contentFile,
+            IsUntitled = entry.IsUntitled,
+            CursorOffset = entry.CursorOffset,
+            ScrollOffset = entry.ScrollOffset,
+            SnapshotVersion = entry.SnapshotVersion,
+            SessionEntryId = entry.SessionEntryId,
+            TabIdentity = entry.TabIdentity,
+            PayloadKind = GetPayloadKind(entry),
+            IsBinaryMode = entry.IsBinaryMode,
+            IsModified = entry.IsModified,
+            EncodingCodePage = entry.EncodingCodePage,
+            HasBom = entry.HasBom,
+            BinaryBaseLength = entry.BinaryBaseLength,
+            BinaryBaseSha256 = entry.BinaryBaseSha256,
+            BinaryModifications = entry.BinaryModifications,
+            HexOffset = entry.HexOffset,
+            HexScrollOffset = entry.HexScrollOffset,
+            BytesPerRow = entry.BytesPerRow,
+            LargeFileTopLine = entry.LargeFileTopLine
+        };
+    }
+
+    private AutoSaveEntry CreateRecoveryEntry(
+        string recoveryEntryId,
+        AutoSaveManifestEntry item,
+        string contentPath)
+    {
+        var envelope = TryReadContentEnvelope(contentPath);
+        string payload;
+        if (envelope != null)
+        {
+            if (!ManifestEntriesMatch(item, envelope.Metadata))
+            {
+                throw new InvalidDataException(
+                    $"Recovery content metadata for '{item.FileName}' does not match its manifest.");
+            }
+            payload = envelope.Payload;
+        }
+        else
+        {
+            payload = item.PayloadKind == "legacy-text" ||
+                string.IsNullOrEmpty(item.PayloadKind)
+                ? SessionSnapshotCodec.DecodeLegacyUtf8(
+                    ReadAllBytesSafely(contentPath))
+                : ReadAllTextSafely(contentPath);
+        }
+        return new AutoSaveEntry(
+            recoveryEntryId,
+            item.FileName,
+            item.FilePath,
+            item.PayloadKind == "legacy-text" ||
+                string.IsNullOrEmpty(item.PayloadKind)
+                ? payload
+                : "",
+            item.IsUntitled,
+            item.CursorOffset,
+            item.ScrollOffset)
+        {
+            SnapshotVersion = item.SnapshotVersion,
+            SessionEntryId = item.SessionEntryId,
+            TabIdentity = item.TabIdentity,
+            IsBinaryMode = item.IsBinaryMode,
+            IsModified = item.IsModified,
+            EncodingCodePage = item.EncodingCodePage,
+            HasBom = item.HasBom,
+            TextContentBase64 = item.PayloadKind == "text-utf16-base64"
+                ? payload
+                : null,
+            BinaryContentBase64 = item.PayloadKind == "binary-base64"
+                ? payload
+                : null,
+            BinaryBaseLength = item.BinaryBaseLength,
+            BinaryBaseSha256 = item.BinaryBaseSha256,
+            BinaryModifications = item.BinaryModifications,
+            HexOffset = item.HexOffset,
+            HexScrollOffset = item.HexScrollOffset,
+            BytesPerRow = item.BytesPerRow,
+            LargeFileTopLine = item.LargeFileTopLine
+        };
+    }
+
+    private static bool ManifestMatches(
+        AutoSaveManifestEntry stored,
+        AutoSaveEntry entry)
+    {
+        return stored.FileName == entry.FileName &&
+            stored.FilePath == entry.FilePath &&
+            stored.IsUntitled == entry.IsUntitled &&
+            stored.CursorOffset == entry.CursorOffset &&
+            stored.ScrollOffset == entry.ScrollOffset &&
+            stored.SnapshotVersion == entry.SnapshotVersion &&
+            stored.SessionEntryId == entry.SessionEntryId &&
+            stored.TabIdentity == entry.TabIdentity &&
+            stored.PayloadKind == GetPayloadKind(entry) &&
+            stored.IsBinaryMode == entry.IsBinaryMode &&
+            stored.IsModified == entry.IsModified &&
+            stored.EncodingCodePage == entry.EncodingCodePage &&
+            stored.HasBom == entry.HasBom &&
+            stored.BinaryBaseLength == entry.BinaryBaseLength &&
+            stored.BinaryBaseSha256 == entry.BinaryBaseSha256 &&
+            BinaryModificationsMatch(
+                stored.BinaryModifications,
+                entry.BinaryModifications) &&
+            stored.HexOffset == entry.HexOffset &&
+            stored.HexScrollOffset == entry.HexScrollOffset &&
+            stored.BytesPerRow == entry.BytesPerRow &&
+            stored.LargeFileTopLine == entry.LargeFileTopLine;
+    }
+
+    private AutoSaveContentEnvelope? TryReadContentEnvelope(string contentPath)
+    {
+        try
+        {
+            var serialized = ReadAllTextSafely(contentPath);
+            if (string.IsNullOrEmpty(serialized) ||
+                serialized[0] != '{')
+            {
+                return null;
+            }
+            var envelope = JsonSerializer.Deserialize<AutoSaveContentEnvelope>(
+                serialized);
+            return envelope is
+            {
+                Format: "FastEdit.AutoSaveSnapshot",
+                Version: 1,
+                Metadata: not null,
+                Payload: not null
+            } &&
+                IsValidEnvelopeMetadata(envelope.Metadata)
+                ? envelope
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static bool ManifestEntriesMatch(
+        AutoSaveManifestEntry first,
+        AutoSaveManifestEntry second)
+    {
+        return         first.Id == second.Id &&
+        first.FileName == second.FileName &&
+        first.FilePath == second.FilePath &&
+        first.IsUntitled == second.IsUntitled &&
+            first.CursorOffset == second.CursorOffset &&
+            first.ScrollOffset == second.ScrollOffset &&
+            first.SnapshotVersion == second.SnapshotVersion &&
+            first.SessionEntryId == second.SessionEntryId &&
+            first.TabIdentity == second.TabIdentity &&
+            first.PayloadKind == second.PayloadKind &&
+            first.IsBinaryMode == second.IsBinaryMode &&
+            first.IsModified == second.IsModified &&
+            first.EncodingCodePage == second.EncodingCodePage &&
+            first.HasBom == second.HasBom &&
+            first.BinaryBaseLength == second.BinaryBaseLength &&
+            first.BinaryBaseSha256 == second.BinaryBaseSha256 &&
+            BinaryModificationsMatch(
+                first.BinaryModifications,
+                second.BinaryModifications) &&
+            first.HexOffset == second.HexOffset &&
+            first.HexScrollOffset == second.HexScrollOffset &&
+            first.BytesPerRow == second.BytesPerRow &&
+            first.LargeFileTopLine == second.LargeFileTopLine;
+    }
+
+    private static bool IsValidEnvelopeMetadata(
+        AutoSaveManifestEntry metadata)
+    {
+        if (string.IsNullOrWhiteSpace(metadata.Id) ||
+            string.IsNullOrWhiteSpace(metadata.FileName) ||
+            string.IsNullOrWhiteSpace(metadata.ContentFile) ||
+            metadata.SnapshotVersion < 2 ||
+            string.IsNullOrWhiteSpace(metadata.SessionEntryId) ||
+            string.IsNullOrWhiteSpace(metadata.TabIdentity))
+        {
+            return false;
+        }
+
+        return metadata.PayloadKind switch
+        {
+            "text-utf16-base64" => !metadata.IsBinaryMode,
+            "binary-base64" => metadata.IsBinaryMode,
+            "binary-overlay" => metadata.IsBinaryMode &&
+                metadata.BinaryBaseLength.HasValue &&
+                !string.IsNullOrWhiteSpace(metadata.BinaryBaseSha256) &&
+                metadata.BinaryModifications != null,
+            _ => false
+        };
+    }
+
+    private static string GetPayloadKind(AutoSaveEntry entry)
+    {
+        if (entry.BinaryContentBase64 != null)
+            return "binary-base64";
+        if (entry.IsBinaryMode)
+            return "binary-overlay";
+        return entry.TextContentBase64 != null
+            ? "text-utf16-base64"
+            : "legacy-text";
+    }
+
+    private static bool BinaryModificationsMatch(
+        IReadOnlyList<BinaryModification>? first,
+        IReadOnlyList<BinaryModification>? second)
+    {
+        if (first == null || second == null)
+            return first == null && second == null;
+        return first.Count == second.Count &&
+            first.Zip(
+                second,
+                (left, right) =>
+                    left.Offset == right.Offset &&
+                    left.Value == right.Value)
+                .All(matches => matches);
+    }
+
     private sealed class AutoSaveManifestEntry
     {
         public string Id { get; set; } = "";
@@ -1108,6 +1611,37 @@ public sealed class AutoSaveService : IAutoSaveService
         public bool IsUntitled { get; set; }
         public int CursorOffset { get; set; }
         public double ScrollOffset { get; set; }
+        public int SnapshotVersion { get; set; }
+        public string SessionEntryId { get; set; } = "";
+        public string TabIdentity { get; set; } = "";
+        public string PayloadKind { get; set; } = "";
+        public bool IsBinaryMode { get; set; }
+        public bool IsModified { get; set; } = true;
+        public int EncodingCodePage { get; set; } = 65001;
+        public bool HasBom { get; set; }
+        public long? BinaryBaseLength { get; set; }
+        public string? BinaryBaseSha256 { get; set; }
+        public List<BinaryModification>? BinaryModifications { get; set; }
+        public long HexOffset { get; set; }
+        public long HexScrollOffset { get; set; }
+        public int BytesPerRow { get; set; } = 16;
+        public long LargeFileTopLine { get; set; } = 1;
+    }
+
+    private sealed class AutoSaveContentEnvelope
+    {
+        public string Format { get; set; } = "";
+        public int Version { get; set; }
+        public AutoSaveManifestEntry Metadata { get; set; } = new();
+        public string Payload { get; set; } = "";
+    }
+
+    private sealed class EmptyProtection : IDisposable
+    {
+        public static EmptyProtection Instance { get; } = new();
+        public void Dispose()
+        {
+        }
     }
 
     private sealed record RecoveryOrigin(string ManifestName, string EntryId);

@@ -62,14 +62,23 @@ public partial class HexEditorControl : UserControl
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
+        if (_viewModel != null)
+        {
+            _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
+            _viewModel.PropertyChanged += OnViewModelPropertyChanged;
+        }
         SubscribeToByteBuffer(_viewModel?.ByteBuffer);
+        RestoreStateFromViewModel();
         RefreshBrushes();
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
+        SaveStateToViewModel();
         CancelSearch();
         SubscribeToByteBuffer(null);
+        if (_viewModel != null)
+            _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
     }
 
     private void RefreshBrushes()
@@ -91,10 +100,33 @@ public partial class HexEditorControl : UserControl
     {
         CancelSearch();
         ClearSearchResults();
+        SaveStateToViewModel();
+        if (_viewModel != null)
+            _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
         _viewModel = e.NewValue as EditorTabViewModel;
+        if (IsLoaded && _viewModel != null)
+            _viewModel.PropertyChanged += OnViewModelPropertyChanged;
         SubscribeToByteBuffer(IsLoaded ? _viewModel?.ByteBuffer : null);
         UpdateScrollBar();
+        RestoreStateFromViewModel();
         RefreshBrushes();
+        RenderHex();
+    }
+
+    private void OnViewModelPropertyChanged(
+        object? sender,
+        System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(EditorTabViewModel.ByteBuffer))
+            return;
+
+        CancelSearch();
+        ClearSearchResults();
+        _lastSearchQuery = "";
+        HexSearchStatus.Text = "";
+        SubscribeToByteBuffer(_viewModel?.ByteBuffer);
+        UpdateScrollBar();
+        RestoreStateFromViewModel();
         RenderHex();
     }
 
@@ -118,6 +150,8 @@ public partial class HexEditorControl : UserControl
     private void ScrollBar_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         _scrollPosition = (long)e.NewValue;
+        if (_viewModel != null)
+            _viewModel.HexScrollOffset = _scrollPosition;
         RenderHex();
     }
 
@@ -164,6 +198,7 @@ public partial class HexEditorControl : UserControl
         if (offset >= 0 && offset < _viewModel.ByteBuffer.Length)
         {
             _selectedOffset = offset;
+            _viewModel.HexOffset = offset;
             _editingHighNibble = true;
             RenderHex();
         }
@@ -202,6 +237,8 @@ public partial class HexEditorControl : UserControl
                 return;
             case HexEditorKeyAction.MoveSelection:
                 _selectedOffset = decision.Offset;
+                if (_viewModel != null)
+                    _viewModel.HexOffset = _selectedOffset;
                 _editingHighNibble = true;
                 EnsureOffsetVisible(_selectedOffset);
                 RenderHex();
@@ -224,6 +261,8 @@ public partial class HexEditorControl : UserControl
             _editingHighNibble = true;
             if (_selectedOffset < buffer.Length - 1)
                 _selectedOffset++;
+            if (_viewModel != null)
+                _viewModel.HexOffset = _selectedOffset;
         }
 
         RenderHex();
@@ -244,6 +283,33 @@ public partial class HexEditorControl : UserControl
         {
             VerticalScrollBar.Value = row - _visibleRows + 2;
         }
+    }
+
+    public void SaveStateToViewModel()
+    {
+        if (_viewModel == null)
+            return;
+
+        _viewModel.HexOffset = _selectedOffset;
+        _viewModel.HexScrollOffset = _scrollPosition;
+    }
+
+    public void RestoreStateFromViewModel()
+    {
+        var buffer = _viewModel?.ByteBuffer;
+        if (_viewModel == null || buffer == null)
+            return;
+
+        _selectedOffset = _viewModel.HexOffset >= 0 &&
+            _viewModel.HexOffset < buffer.Length
+                ? _viewModel.HexOffset
+                : -1;
+        var maximumRow = Math.Max(
+            0,
+            (buffer.Length + _viewModel.BytesPerRow - 1) /
+            _viewModel.BytesPerRow - 1);
+        _scrollPosition = Math.Clamp(_viewModel.HexScrollOffset, 0, maximumRow);
+        VerticalScrollBar.Value = _scrollPosition;
     }
 
     private void RenderHex()

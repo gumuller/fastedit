@@ -95,6 +95,9 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     private long _hexOffset;
 
     [ObservableProperty]
+    private long _hexScrollOffset;
+
+    [ObservableProperty]
     private int _bytesPerRow = 16;
 
     // Session restore state
@@ -104,20 +107,104 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private double _scrollOffset;
 
+    [ObservableProperty]
+    private long _largeFileTopLine = 1;
+
     public VirtualizedByteBuffer? ByteBuffer => _byteBuffer;
     public LargeFileDocument? LargeFileDoc => _largeFileDoc;
 
     public Encoding FileEncoding => _fileEncoding;
     public bool HasBom => _hasBom;
-    public string AutoSaveIdentity { get; } = Guid.NewGuid().ToString("N");
+    public string AutoSaveIdentity { get; private set; } = Guid.NewGuid().ToString("N");
     public long UserMutationVersion { get; private set; }
     public long ChangeVersion => UserMutationVersion;
+
+    internal void RestoreAutoSaveIdentity(string identity)
+    {
+        if (string.IsNullOrWhiteSpace(identity))
+            throw new ArgumentException("A persisted tab identity is required.", nameof(identity));
+
+        AutoSaveIdentity = identity;
+    }
 
     public EditorTabViewModel(IFileService fileService, IFileSystemService fileSystemService, IDialogService dialogService)
     {
         _fileService = fileService;
         _fileSystemService = fileSystemService;
         _dialogService = dialogService;
+    }
+
+    public void RestoreTextSnapshot(
+        string content,
+        string fileName,
+        string? filePath,
+        int encodingCodePage,
+        bool hasBom,
+        bool isModified)
+    {
+        ReleaseLoadedResources();
+        Mode = FileOpenMode.Text;
+        FileName = fileName;
+        FilePath = filePath ?? string.Empty;
+        System.Text.Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        _fileEncoding = System.Text.Encoding.GetEncoding(encodingCodePage);
+        _hasBom = hasBom;
+        Encoding = GetEncodingDisplayName(_fileEncoding, hasBom);
+        SyntaxLanguage = string.IsNullOrEmpty(filePath)
+            ? string.Empty
+            : SyntaxLanguageResolver.Resolve(filePath);
+        SetContentBaseline(content, isModified);
+    }
+
+    public void RestoreBinarySnapshot(
+        byte[] bytes,
+        string fileName,
+        string? filePath,
+        bool isModified)
+    {
+        ArgumentNullException.ThrowIfNull(bytes);
+        ReleaseLoadedResources();
+        Mode = FileOpenMode.Binary;
+        FileName = fileName;
+        FilePath = filePath ?? string.Empty;
+        FileSize = bytes.LongLength;
+        Encoding = "Binary";
+        SyntaxLanguage = string.Empty;
+        _byteBuffer = VirtualizedByteBuffer.FromSnapshot(bytes);
+        _byteBuffer.ModificationsChanged += OnByteBufferModificationsChanged;
+        IsModified = isModified;
+    }
+
+    public void RestoreBinaryOverlay(
+        string filePath,
+        long expectedLength,
+        string expectedSha256,
+        IReadOnlyList<BinaryModification> modifications,
+        bool isModified)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+        ArgumentNullException.ThrowIfNull(modifications);
+        var restoredBuffer = new VirtualizedByteBuffer(filePath);
+        if (!restoredBuffer.MatchesBaseIdentity(expectedLength, expectedSha256))
+        {
+            restoredBuffer.Dispose();
+            throw new InvalidDataException(
+                $"Binary file '{filePath}' changed after its session snapshot was created.");
+        }
+
+        foreach (var modification in modifications)
+            restoredBuffer.SetByte(modification.Offset, modification.Value);
+
+        ReleaseLoadedResources();
+        Mode = FileOpenMode.Binary;
+        FileName = Path.GetFileName(filePath);
+        FilePath = filePath;
+        FileSize = new FileInfo(filePath).Length;
+        Encoding = "Binary";
+        SyntaxLanguage = string.Empty;
+        _byteBuffer = restoredBuffer;
+        _byteBuffer.ModificationsChanged += OnByteBufferModificationsChanged;
+        IsModified = isModified;
     }
 
     public async Task LoadFileAsync(string filePath, IProgress<double>? indexProgress = null)
@@ -185,13 +272,24 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     {
         if (Mode == FileOpenMode.Binary)
         {
-            if (_byteBuffer != null)
+            if (_byteBuffer == null)
+                return false;
+
+            var binarySavePath = FilePath;
+            if (string.IsNullOrEmpty(binarySavePath))
             {
-                SaveBinaryBuffer();
-                IsModified = false;
-                return true;
+                binarySavePath = _dialogService.ShowSaveFileDialog(
+                    filter: FileDialogFilters,
+                    defaultFileName: FileName);
+                if (string.IsNullOrEmpty(binarySavePath))
+                    return false;
             }
-            return false;
+
+            SaveBinaryBuffer(binarySavePath);
+            FilePath = binarySavePath;
+            FileName = Path.GetFileName(binarySavePath);
+            IsModified = false;
+            return true;
         }
 
         if (Mode == FileOpenMode.LargeText)
@@ -235,17 +333,10 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
 
         if (Mode == FileOpenMode.Binary)
         {
-            if (_byteBuffer != null)
-            {
-                SaveBinaryBuffer(); // saves to original path
-                // For Save As in binary mode, copy file to new location
-                if (savePath != FilePath)
-                    _fileSystemService.CopyFile(FilePath, savePath, overwrite: true);
-            }
-            else
-            {
+            if (_byteBuffer == null)
                 return false;
-            }
+
+            SaveBinaryBuffer(savePath);
         }
         else if (Mode == FileOpenMode.LargeText)
         {
@@ -289,41 +380,47 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
 
         if (Mode == FileOpenMode.Binary)
         {
-            // Binary → Text: dispose buffer, reload as text
-            _byteBuffer?.Dispose();
-            _byteBuffer = null;
-
-            _largeFileDoc?.Dispose();
-            _largeFileDoc = null;
-
-            Mode = FileOpenModeRouter.SelectTextMode(FileSize);
-            if (Mode == FileOpenMode.LargeText)
+            var textMode = FileOpenModeRouter.SelectTextMode(FileSize);
+            if (textMode == FileOpenMode.LargeText)
             {
-                _largeFileDoc = new LargeFileDocument(FilePath);
-                Encoding = _largeFileDoc.EncodingDisplayName;
+                var largeFileDocument = new LargeFileDocument(FilePath);
+                await largeFileDocument.BuildIndexAsync(null, CancellationToken.None);
+                _byteBuffer?.Dispose();
+                _byteBuffer = null;
+                OnPropertyChanged(nameof(ByteBuffer));
+                _largeFileDoc?.Dispose();
+                _largeFileDoc = largeFileDocument;
+                Encoding = largeFileDocument.EncodingDisplayName;
                 SyntaxLanguage = string.Empty;
-                await _largeFileDoc.BuildIndexAsync(null, CancellationToken.None);
+                Mode = textMode;
                 return;
             }
 
             var result = await _fileService.ReadFileWithEncodingAsync(FilePath);
+            _byteBuffer?.Dispose();
+            _byteBuffer = null;
+            OnPropertyChanged(nameof(ByteBuffer));
+            _largeFileDoc?.Dispose();
+            _largeFileDoc = null;
             SetContentBaseline(result.Content, isModified: false);
             _fileEncoding = result.Encoding;
             _hasBom = result.HasBom;
             Encoding = GetEncodingDisplayName(result.Encoding, result.HasBom);
             SyntaxLanguage = SyntaxLanguageResolver.Resolve(FilePath);
+            Mode = textMode;
         }
         else if (Mode == FileOpenMode.Text || Mode == FileOpenMode.LargeText)
         {
-            // Text → Binary: create byte buffer
+            var byteBuffer = new VirtualizedByteBuffer(FilePath);
+            byteBuffer.ModificationsChanged += OnByteBufferModificationsChanged;
             _largeFileDoc?.Dispose();
             _largeFileDoc = null;
+            _byteBuffer = byteBuffer;
+            OnPropertyChanged(nameof(ByteBuffer));
             Mode = FileOpenMode.Binary;
             SetContentBaseline(string.Empty, isModified: false);
             Encoding = "Binary";
             SyntaxLanguage = string.Empty;
-            _byteBuffer = new VirtualizedByteBuffer(FilePath);
-            _byteBuffer.ModificationsChanged += OnByteBufferModificationsChanged;
         }
     }
 
@@ -334,12 +431,35 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         IsModified = _byteBuffer?.HasModifications == true;
     }
 
-    private void SaveBinaryBuffer()
+    private void SaveBinaryBuffer(string savePath)
     {
+        if (_byteBuffer == null)
+            return;
+
         _isApplyingBinaryBaseline = true;
         try
         {
-            _byteBuffer!.Save();
+            var sourceBuffer = _byteBuffer;
+            try
+            {
+                sourceBuffer.SaveTo(savePath);
+                if (sourceBuffer.IsBackedBy(savePath))
+                    return;
+
+                var replacement = new VirtualizedByteBuffer(savePath);
+                sourceBuffer.DiscardModifications();
+                sourceBuffer.ModificationsChanged -= OnByteBufferModificationsChanged;
+                sourceBuffer.Dispose();
+                _byteBuffer = replacement;
+                OnPropertyChanged(nameof(ByteBuffer));
+            }
+            catch
+            {
+                IsModified = true;
+                throw;
+            }
+
+            _byteBuffer.ModificationsChanged += OnByteBufferModificationsChanged;
         }
         finally
         {

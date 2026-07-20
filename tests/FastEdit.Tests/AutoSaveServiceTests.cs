@@ -1,5 +1,6 @@
 using System.IO;
 using System.IO.Enumeration;
+using System.Text.Json;
 using FastEdit.Services;
 using FastEdit.Services.Interfaces;
 using FluentAssertions;
@@ -393,7 +394,8 @@ public class AutoSaveServiceTests
             .Returns(new[] { manifestPath });
         _fileSystem.Setup(f => f.ReadAllText(manifestPath)).Returns(manifest);
         _fileSystem.Setup(f => f.FileExists(Path.Combine(_autoSaveDir, "id1.txt"))).Returns(true);
-        _fileSystem.Setup(f => f.ReadAllText(Path.Combine(_autoSaveDir, "id1.txt"))).Returns("recovered content");
+        _fileSystem.Setup(f => f.ReadAllBytes(Path.Combine(_autoSaveDir, "id1.txt")))
+            .Returns("recovered content"u8.ToArray());
 
         var result = _sut.GetRecoveryEntries();
 
@@ -401,6 +403,197 @@ public class AutoSaveServiceTests
         result.Entries.Should().ContainSingle();
         result.Entries[0].Content.Should().Be("recovered content");
         result.Entries[0].CursorOffset.Should().Be(5);
+    }
+
+    [Fact]
+    public void GetRecoveryEntries_LegacyJsonTextIsNotMistakenForModernEnvelope()
+    {
+        const string legacyContent = """{"Version":1}""";
+        var manifestPath = Path.Combine(_autoSaveDir, "manifest.json");
+        var contentPath = Path.Combine(_autoSaveDir, "id1.txt");
+        var manifest = """[{"Id":"id1","FileName":"test.json","ContentFile":"id1.txt","IsUntitled":true}]""";
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(new[] { manifestPath });
+        _fileSystem.Setup(f => f.ReadAllText(manifestPath)).Returns(manifest);
+        _fileSystem.Setup(f => f.FileExists(contentPath)).Returns(true);
+        _fileSystem.Setup(f => f.ReadAllText(contentPath)).Returns(legacyContent);
+        _fileSystem.Setup(f => f.ReadAllBytes(contentPath))
+            .Returns(System.Text.Encoding.UTF8.GetBytes(legacyContent));
+
+        var recovery = _sut.GetRecoveryEntries();
+
+        recovery.Success.Should().BeTrue();
+        recovery.Entries.Should().ContainSingle()
+            .Which.Content.Should().Be(legacyContent);
+    }
+
+    [Fact]
+    public void SaveAndRecover_ModernTextPayloadPreservesExactUtf16Metadata()
+    {
+        const string content = "\uFEFF\uD800\0\r\n\uDC00";
+        var utf16Bytes = new byte[content.Length * sizeof(char)];
+        for (var index = 0; index < content.Length; index++)
+        {
+            utf16Bytes[index * 2] = (byte)content[index];
+            utf16Bytes[(index * 2) + 1] = (byte)(content[index] >> 8);
+        }
+        var payload = Convert.ToBase64String(utf16Bytes);
+        string? manifestPath = null;
+        string? manifestJson = null;
+        string? contentPath = null;
+        string? persistedPayload = null;
+        _fileSystem.Setup(f => f.WriteAllTextAtomic(
+                It.IsAny<string>(),
+                It.IsAny<string>()))
+            .Callback<string, string>((path, value) =>
+            {
+                if (path.EndsWith(".txt", StringComparison.Ordinal))
+                {
+                    contentPath = path;
+                    persistedPayload = value;
+                }
+                else if (Path.GetFileName(path).StartsWith(
+                    "manifest-",
+                    StringComparison.Ordinal))
+                {
+                    manifestPath = path;
+                    manifestJson = value;
+                }
+            });
+        var entry = new AutoSaveEntry(
+            "tab-id",
+            "encoded.txt",
+            @"C:\encoded.txt",
+            content,
+            false,
+            9,
+            3.5)
+        {
+            SnapshotVersion = 2,
+            SessionEntryId = "session-id",
+            TabIdentity = "identity",
+            IsModified = true,
+            EncodingCodePage = 1200,
+            HasBom = true,
+            TextContentBase64 = payload
+        };
+
+        _sut.SaveNow(new[] { entry });
+
+        persistedPayload.Should().Contain(payload);
+        persistedPayload.Should().Contain("\"Version\":1");
+        persistedPayload.Should().NotContain(content);
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(new[] { manifestPath! });
+        _fileSystem.Setup(f => f.ReadAllText(manifestPath!)).Returns(manifestJson!);
+        _fileSystem.Setup(f => f.FileExists(contentPath!)).Returns(true);
+        _fileSystem.Setup(f => f.ReadAllText(contentPath!)).Returns(persistedPayload!);
+
+        var recovered = _sut.GetRecoveryEntries();
+
+        recovered.Success.Should().BeTrue();
+        var restored = recovered.Entries.Should().ContainSingle().Subject;
+        restored.TextContentBase64.Should().Be(payload);
+        restored.SessionEntryId.Should().Be("session-id");
+        restored.TabIdentity.Should().Be("identity");
+        restored.EncodingCodePage.Should().Be(1200);
+        restored.HasBom.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Start_ManifestlessModernEnvelopeRecoversRichSnapshotMetadata()
+    {
+        string? envelopeJson = null;
+        _fileSystem.Setup(f => f.WriteAllTextAtomic(
+                It.Is<string>(path => path.EndsWith(".txt", StringComparison.Ordinal)),
+                It.IsAny<string>()))
+            .Callback<string, string>((_, content) => envelopeJson = content);
+        var payload = Convert.ToBase64String(
+            new byte[] { (byte)'e', 0, (byte)'x', 0 });
+        _sut.SaveNow(
+        [
+            new AutoSaveEntry(
+                "tab-stable",
+                "encoded.txt",
+                @"C:\encoded.txt",
+                "ex",
+                false,
+                41,
+                8.5)
+            {
+                SnapshotVersion = 2,
+                SessionEntryId = "session-stable",
+                TabIdentity = "tab-stable",
+                IsModified = true,
+                EncodingCodePage = 1200,
+                HasBom = true,
+                TextContentBase64 = payload,
+                LargeFileTopLine = 77
+            }
+        ]);
+
+        var generation = Guid.NewGuid().ToString("N");
+        var markerPath = Path.Combine(
+            _autoSaveDir,
+            $"active-{generation}.lock");
+        var contentPath = Path.Combine(
+            _autoSaveDir,
+            $"{generation}-orphan.txt");
+        var manifestPath = Path.Combine(
+            _autoSaveDir,
+            $"manifest-{generation}.json");
+        var existingFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            markerPath,
+            contentPath
+        };
+        var contents = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            [markerPath] = "stale",
+            [contentPath] = envelopeJson!
+        };
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.FileExists(It.IsAny<string>()))
+            .Returns((string path) => existingFiles.Contains(path));
+        _fileSystem.Setup(f => f.ReadAllText(It.IsAny<string>()))
+            .Returns((string path) => contents[path]);
+        _fileSystem.Setup(f => f.GetFiles(
+                _autoSaveDir,
+                It.IsAny<string>(),
+                false))
+            .Returns((string _, string pattern, bool _) =>
+                existingFiles
+                    .Where(path => FileSystemName.MatchesSimpleExpression(
+                        pattern,
+                        Path.GetFileName(path),
+                        ignoreCase: true))
+                    .ToArray());
+        _fileSystem.Setup(f => f.WriteAllTextAtomic(
+                It.IsAny<string>(),
+                It.IsAny<string>()))
+            .Callback<string, string>((path, content) =>
+            {
+                existingFiles.Add(path);
+                contents[path] = content;
+            });
+
+        _sut.Start();
+        _sut.Stop();
+        var recovery = _sut.GetRecoveryEntries();
+
+        recovery.Success.Should().BeTrue(recovery.ErrorMessage);
+        var restored = recovery.Entries.Should().ContainSingle().Subject;
+        restored.TextContentBase64.Should().Be(payload);
+        restored.SessionEntryId.Should().Be("session-stable");
+        restored.TabIdentity.Should().Be("tab-stable");
+        restored.EncodingCodePage.Should().Be(1200);
+        restored.HasBom.Should().BeTrue();
+        restored.CursorOffset.Should().Be(41);
+        restored.ScrollOffset.Should().Be(8.5);
+        restored.LargeFileTopLine.Should().Be(77);
+        existingFiles.Should().Contain(manifestPath);
     }
 
     [Fact]
@@ -417,6 +610,100 @@ public class AutoSaveServiceTests
         result.Success.Should().BeFalse();
         result.Entries.Should().BeEmpty();
         result.ErrorMessage.Should().NotBeNullOrWhiteSpace();
+    }
+
+    [Theory]
+    [InlineData("..\\outside.txt")]
+    [InlineData("nested\\outside.txt")]
+    [InlineData("C:\\outside.txt")]
+    public void GetRecoveryEntries_EscapingContentPath_IsPreservedAndNeverReadOrDeleted(
+        string contentFile)
+    {
+        var generation = Guid.NewGuid().ToString("N");
+        var manifestPath = Path.Combine(
+            _autoSaveDir,
+            $"manifest-{generation}.json");
+        var manifest = $$"""
+            [{"Id":"id1","FileName":"test.txt","ContentFile":{{JsonSerializer.Serialize(contentFile)}},"IsUntitled":true}]
+            """;
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(new[] { manifestPath });
+        _fileSystem.Setup(f => f.ReadAllText(manifestPath)).Returns(manifest);
+
+        var result = _sut.GetRecoveryEntries();
+        var cleared = _sut.ClearRecoveryFiles();
+
+        result.Success.Should().BeFalse();
+        result.Entries.Should().BeEmpty();
+        cleared.Should().BeFalse();
+        _fileSystem.Verify(f => f.ReadAllBytes(It.IsAny<string>()), Times.Never);
+        _fileSystem.Verify(f => f.DeleteFile(
+            It.Is<string>(path => path.Contains("outside", StringComparison.OrdinalIgnoreCase))),
+            Times.Never);
+        _fileSystem.Verify(f => f.MoveFile(manifestPath, It.IsAny<string>(), false), Times.Never);
+    }
+
+    [Fact]
+    public void GetRecoveryEntries_ReparseContent_IsPreservedAndNeverReadOrDeleted()
+    {
+        var generation = Guid.NewGuid().ToString("N");
+        var contentFile = $"{generation}-id1.txt";
+        var contentPath = Path.Combine(_autoSaveDir, contentFile);
+        var manifestPath = Path.Combine(
+            _autoSaveDir,
+            $"manifest-{generation}.json");
+        var manifest = $$"""
+            [{"Id":"id1","FileName":"test.txt","ContentFile":"{{contentFile}}","IsUntitled":true}]
+            """;
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(new[] { manifestPath });
+        _fileSystem.Setup(f => f.ReadAllText(manifestPath)).Returns(manifest);
+        _fileSystem.Setup(f => f.FileExists(contentPath)).Returns(true);
+        _fileSystem.Setup(f => f.GetAttributes(contentPath))
+            .Returns(FileAttributes.ReparsePoint);
+
+        var result = _sut.GetRecoveryEntries();
+        var cleared = _sut.ClearRecoveryFiles();
+
+        result.Success.Should().BeFalse();
+        cleared.Should().BeFalse();
+        _fileSystem.Verify(f => f.ReadAllBytes(contentPath), Times.Never);
+        _fileSystem.Verify(f => f.DeleteFile(contentPath), Times.Never);
+        _fileSystem.Verify(f => f.MoveFile(manifestPath, It.IsAny<string>(), false), Times.Never);
+    }
+
+    [Fact]
+    public void GetRecoveryEntries_ReparseParent_IsPreservedAndNeverReadOrDeleted()
+    {
+        var generation = Guid.NewGuid().ToString("N");
+        var contentFile = $"{generation}-id1.txt";
+        var contentPath = Path.Combine(_autoSaveDir, contentFile);
+        var manifestPath = Path.Combine(
+            _autoSaveDir,
+            $"manifest-{generation}.json");
+        var fastEditDirectory = Path.GetDirectoryName(_autoSaveDir)!;
+        var manifest = $$"""
+            [{"Id":"id1","FileName":"test.txt","ContentFile":"{{contentFile}}","IsUntitled":true}]
+            """;
+        _fileSystem.Setup(f => f.DirectoryExists(_autoSaveDir)).Returns(true);
+        _fileSystem.Setup(f => f.DirectoryExists(fastEditDirectory)).Returns(true);
+        _fileSystem.Setup(f => f.GetAttributes(fastEditDirectory))
+            .Returns(FileAttributes.ReparsePoint);
+        _fileSystem.Setup(f => f.GetFiles(_autoSaveDir, "manifest*.json", false))
+            .Returns(new[] { manifestPath });
+        _fileSystem.Setup(f => f.ReadAllText(manifestPath)).Returns(manifest);
+        _fileSystem.Setup(f => f.FileExists(contentPath)).Returns(true);
+
+        var result = _sut.GetRecoveryEntries();
+        var cleared = _sut.ClearRecoveryFiles();
+
+        result.Success.Should().BeFalse();
+        cleared.Should().BeFalse();
+        _fileSystem.Verify(f => f.ReadAllBytes(contentPath), Times.Never);
+        _fileSystem.Verify(f => f.DeleteFile(contentPath), Times.Never);
+        _fileSystem.Verify(f => f.MoveFile(manifestPath, It.IsAny<string>(), false), Times.Never);
     }
 
     [Fact]
@@ -548,7 +835,8 @@ public class AutoSaveServiceTests
         {
             var contentPath = Path.Combine(_autoSaveDir, $"{id}.txt");
             _fileSystem.Setup(f => f.FileExists(contentPath)).Returns(true);
-            _fileSystem.Setup(f => f.ReadAllText(contentPath)).Returns(id);
+            _fileSystem.Setup(f => f.ReadAllBytes(contentPath))
+                .Returns(System.Text.Encoding.UTF8.GetBytes(id));
         }
         _fileSystem.Setup(f => f.FileExists(resolvedPath))
             .Returns(() => resolvedJson != null);
@@ -592,7 +880,7 @@ public class AutoSaveServiceTests
         _fileSystem.Setup(f => f.ReadAllText(manifestPath)).Returns(manifest);
         _fileSystem.Setup(f => f.FileExists(It.IsAny<string>()))
             .Returns((string path) => existingFiles.Contains(path));
-        _fileSystem.Setup(f => f.ReadAllText(contentPath)).Returns("content");
+        _fileSystem.Setup(f => f.ReadAllBytes(contentPath)).Returns("content"u8.ToArray());
         _fileSystem.Setup(f => f.MoveFile(
                 It.IsAny<string>(),
                 It.IsAny<string>(),
@@ -628,6 +916,9 @@ public class AutoSaveServiceTests
             .Returns((string path) => existingFiles.Contains(path));
         _fileSystem.Setup(f => f.ReadAllText(It.IsAny<string>()))
             .Returns((string path) => fileContents[path]);
+        _fileSystem.Setup(f => f.ReadAllBytes(It.IsAny<string>()))
+            .Returns((string path) =>
+                System.Text.Encoding.UTF8.GetBytes(fileContents[path]));
         _fileSystem.Setup(f => f.GetFiles(
                 _autoSaveDir,
                 It.IsAny<string>(),
@@ -750,6 +1041,9 @@ public class AutoSaveServiceTests
             .Returns((string path) => existingFiles.Contains(path));
         _fileSystem.Setup(f => f.ReadAllText(It.IsAny<string>()))
             .Returns((string path) => fileContents[path]);
+        _fileSystem.Setup(f => f.ReadAllBytes(It.IsAny<string>()))
+            .Returns((string path) =>
+                System.Text.Encoding.UTF8.GetBytes(fileContents[path]));
         _fileSystem.Setup(f => f.GetFiles(
                 _autoSaveDir,
                 It.IsAny<string>(),
@@ -991,7 +1285,8 @@ public class AutoSaveServiceTests
         var manifest = $$"""[{"Id":"shared","FileName":"test.txt","FilePath":"C:\\test.txt","ContentFile":"{{contentFile}}","IsUntitled":false,"CursorOffset":0,"ScrollOffset":0}]""";
         _fileSystem.Setup(f => f.ReadAllText(manifestPath)).Returns(manifest);
         _fileSystem.Setup(f => f.FileExists(contentPath)).Returns(true);
-        _fileSystem.Setup(f => f.ReadAllText(contentPath)).Returns(content);
+        _fileSystem.Setup(f => f.ReadAllBytes(contentPath))
+            .Returns(System.Text.Encoding.UTF8.GetBytes(content));
         return contentPath;
     }
 
