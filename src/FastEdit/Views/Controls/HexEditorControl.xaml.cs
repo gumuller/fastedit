@@ -91,10 +91,49 @@ public partial class HexEditorControl : UserControl
     {
         CancelSearch();
         ClearSearchResults();
+        _selectedOffset = -1;
+        _scrollPosition = 0;
+        VerticalScrollBar.Value = 0;
         _viewModel = e.NewValue as EditorTabViewModel;
         SubscribeToByteBuffer(IsLoaded ? _viewModel?.ByteBuffer : null);
         UpdateScrollBar();
         RefreshBrushes();
+        RenderHex();
+    }
+
+    internal void CaptureStateToViewModel(EditorTabViewModel viewModel)
+    {
+        if (!ReferenceEquals(_viewModel, viewModel))
+            return;
+
+        viewModel.HexOffset = _selectedOffset;
+        viewModel.ScrollOffset = _scrollPosition;
+    }
+
+    internal void ApplyStateFromViewModel(
+        EditorTabViewModel viewModel,
+        long selectedOffset,
+        double scrollOffset,
+        int bytesPerRow)
+    {
+        if (!ReferenceEquals(_viewModel, viewModel) ||
+            viewModel.ByteBuffer == null)
+        {
+            return;
+        }
+
+        viewModel.BytesPerRow = Math.Max(1, bytesPerRow);
+        _selectedOffset = viewModel.ByteBuffer.Length == 0
+            ? -1
+            : Math.Clamp(selectedOffset, 0, viewModel.ByteBuffer.Length - 1);
+        UpdateScrollBar();
+        var scrollRow = double.IsFinite(scrollOffset)
+            ? Math.Max(0, scrollOffset)
+            : 0;
+        VerticalScrollBar.Value = Math.Min(
+            VerticalScrollBar.Maximum,
+            scrollRow);
+        _scrollPosition = (long)VerticalScrollBar.Value;
         RenderHex();
     }
 

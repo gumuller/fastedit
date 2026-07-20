@@ -96,6 +96,10 @@ public class MainWindowFactoryTests
             fileSystemService.Object,
             tabFactory.Object,
             workspaceService.Object,
+            new DocumentSessionCoordinator(
+                settingsService.Object,
+                fileSystemService.Object,
+                tabFactory.Object),
             fileTree);
     }
 

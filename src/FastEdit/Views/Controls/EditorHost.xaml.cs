@@ -61,6 +61,8 @@ public partial class EditorHost : UserControl
     private CancellationTokenSource? _externalReloadCts;
     private int _externalChangeActive;
     private bool _isRuntimeAttached;
+    private EditorTabViewModel? _pendingStateRestoreVm;
+    private int _stateRestoreVersion;
 
     private static readonly IReadOnlyDictionary<MacroAction, Action<EditorHost, MacroStep, ITextToolsService?>> MacroStepHandlers =
         new Dictionary<MacroAction, Action<EditorHost, MacroStep, ITextToolsService?>>
@@ -279,13 +281,19 @@ public partial class EditorHost : UserControl
         if (_currentVm != null)
         {
             UpdateEditor(_currentVm);
+            ScheduleStateRestore(_currentVm);
         }
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
         if (!_isRuntimeAttached)
+        {
+            InvalidatePendingStateRestore();
             return;
+        }
+        SaveStateToViewModel();
+        InvalidatePendingStateRestore();
         _isRuntimeAttached = false;
 
         _filterRefreshCoordinator.Cancel();
@@ -1199,9 +1207,8 @@ public partial class EditorHost : UserControl
                             return;
                         }
 
-                        vm.ReplaceContentFromDisk(content);
+                        ApplyExternalReloadContent(vm, content);
                         contentApplied = true;
-                        TextEditor.ScrollToEnd();
                         SetStatus($"Auto-reloaded: {_fileSystemService.GetFileName(filePath)}");
                     }));
 
@@ -1431,18 +1438,25 @@ public partial class EditorHost : UserControl
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
         CancelExternalReload();
-        if (e.OldValue is EditorTabViewModel oldVm)
-        {
-            oldVm.PropertyChanged -= OnViewModelPropertyChanged;
-        }
-
-        _currentVm = e.NewValue as EditorTabViewModel;
-
-        if (_currentVm != null)
-        {
-            _currentVm.PropertyChanged += OnViewModelPropertyChanged;
-            UpdateEditor(_currentVm);
-        }
+        var incomingVm = e.NewValue as EditorTabViewModel;
+        EditorStateTransitionCoordinator.Transition(
+            e.OldValue as EditorTabViewModel,
+            incomingVm,
+            SaveStateToViewModel,
+            vm =>
+            {
+                vm.PropertyChanged -= OnViewModelPropertyChanged;
+                InvalidatePendingStateRestore();
+            },
+            vm =>
+            {
+                _currentVm = vm;
+                vm.PropertyChanged += OnViewModelPropertyChanged;
+                UpdateEditor(vm);
+            },
+            ScheduleStateRestore);
+        if (incomingVm == null)
+            _currentVm = null;
     }
 
     private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
@@ -1451,13 +1465,13 @@ public partial class EditorHost : UserControl
 
         if (e.PropertyName == nameof(EditorTabViewModel.Content))
         {
+            InvalidatePendingStateRestore();
             if (IsTextMode(vm) && TextEditor.Text != vm.Content)
-            {
                 TextEditor.Text = vm.Content;
-            }
         }
         else if (e.PropertyName == nameof(EditorTabViewModel.Mode))
         {
+            InvalidatePendingStateRestore();
             UpdateEditor(vm);
         }
     }
@@ -1512,6 +1526,18 @@ public partial class EditorHost : UserControl
             ShowNoEditor();
         else
             ShowTextEditor(vm);
+    }
+
+    internal void ApplyExternalReloadContent(
+        EditorTabViewModel vm,
+        string content)
+    {
+        if (!ReferenceEquals(_currentVm, vm) || !IsTextMode(vm))
+            return;
+
+        InvalidatePendingStateRestore();
+        vm.ReplaceContentFromDisk(content);
+        TextEditor.ScrollToEnd();
     }
 
     private void ShowBinaryEditor(EditorTabViewModel vm)
@@ -1789,22 +1815,115 @@ public partial class EditorHost : UserControl
     // --- Session State Save ---
     public void SaveStateToViewModel()
     {
-        if (_currentVm == null) return;
-        _currentVm.CursorOffset = TextEditor.CaretOffset;
-        _currentVm.ScrollOffset = TextEditor.VerticalOffset;
+        if (_currentVm != null)
+            SaveStateToViewModel(_currentVm);
     }
 
     public void RestoreStateFromViewModel()
     {
-        if (_currentVm == null) return;
+        if (_currentVm != null)
+            RestoreStateFromViewModel(_currentVm);
+    }
 
-        if (_currentVm.CursorOffset > 0 && _currentVm.CursorOffset <= TextEditor.Document.TextLength)
+    private void SaveStateToViewModel(EditorTabViewModel vm)
+    {
+        if (!ReferenceEquals(_currentVm, vm) ||
+            ReferenceEquals(_pendingStateRestoreVm, vm))
+            return;
+
+        if (IsBinaryMode(vm))
         {
-            TextEditor.CaretOffset = _currentVm.CursorOffset;
+            HexEditor.CaptureStateToViewModel(vm);
         }
-        if (_currentVm.ScrollOffset > 0)
+        else if (IsTextMode(vm))
         {
-            TextEditor.ScrollToVerticalOffset(_currentVm.ScrollOffset);
+            vm.CursorOffset = TextEditor.CaretOffset;
+            vm.ScrollOffset = TextEditor.VerticalOffset;
+        }
+    }
+
+    private void ScheduleStateRestore(EditorTabViewModel vm)
+    {
+        if (!IsTextMode(vm) && !IsBinaryMode(vm))
+            return;
+
+        var cursorOffset = vm.CursorOffset;
+        var scrollOffset = vm.ScrollOffset;
+        var hexOffset = vm.HexOffset;
+        var bytesPerRow = vm.BytesPerRow;
+        var restoreVersion = ++_stateRestoreVersion;
+        _pendingStateRestoreVm = vm;
+        _ = Dispatcher.BeginInvoke(
+            new Action(() =>
+            {
+                if (restoreVersion != _stateRestoreVersion ||
+                    !ReferenceEquals(_pendingStateRestoreVm, vm) ||
+                    !ReferenceEquals(_currentVm, vm))
+                {
+                    return;
+                }
+
+                try
+                {
+                    RestoreStateFromViewModel(
+                        vm,
+                        cursorOffset,
+                        scrollOffset,
+                        hexOffset,
+                        bytesPerRow);
+                }
+                finally
+                {
+                    if (restoreVersion == _stateRestoreVersion)
+                        _pendingStateRestoreVm = null;
+                }
+            }),
+            System.Windows.Threading.DispatcherPriority.Loaded);
+    }
+
+    private void InvalidatePendingStateRestore()
+    {
+        _stateRestoreVersion++;
+        _pendingStateRestoreVm = null;
+    }
+
+    private void RestoreStateFromViewModel(EditorTabViewModel vm)
+    {
+        RestoreStateFromViewModel(
+            vm,
+            vm.CursorOffset,
+            vm.ScrollOffset,
+            vm.HexOffset,
+            vm.BytesPerRow);
+    }
+
+    private void RestoreStateFromViewModel(
+        EditorTabViewModel vm,
+        int cursorOffset,
+        double scrollOffset,
+        long hexOffset,
+        int bytesPerRow)
+    {
+        if (!ReferenceEquals(_currentVm, vm))
+            return;
+
+        if (IsBinaryMode(vm))
+        {
+            HexEditor.ApplyStateFromViewModel(
+                vm,
+                hexOffset,
+                scrollOffset,
+                bytesPerRow);
+        }
+        else if (IsTextMode(vm))
+        {
+            TextEditor.CaretOffset =
+                EditorStateTransitionCoordinator.ClampCursorOffset(
+                    cursorOffset,
+                    TextEditor.Document.TextLength);
+            TextEditor.ScrollToVerticalOffset(
+                EditorStateTransitionCoordinator.ClampScrollOffset(
+                    scrollOffset));
         }
     }
 

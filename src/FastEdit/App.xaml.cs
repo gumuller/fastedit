@@ -1,6 +1,7 @@
 using System.Windows;
 using System.Diagnostics;
 using FastEdit.Helpers;
+using FastEdit.Infrastructure;
 using FastEdit.Services;
 using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
@@ -66,7 +67,11 @@ public partial class App : Application
             .ConfigureServices((context, services) =>
             {
                 // Core services
-                services.AddSingleton<ISettingsService, SettingsService>();
+                services.AddSingleton<SettingsService>();
+                services.AddSingleton<ISettingsService>(
+                    sp => sp.GetRequiredService<SettingsService>());
+                services.AddSingleton<IShutdownSessionStore>(
+                    sp => sp.GetRequiredService<SettingsService>());
                 services.AddSingleton<IThemeService, ThemeService>();
                 services.AddSingleton<IFileService, FileService>();
                 services.AddSingleton<IFileSystemService, FileSystemService>();
@@ -83,6 +88,7 @@ public partial class App : Application
                 services.AddSingleton<IGitService, GitService>();
                 services.AddSingleton<IKeyBindingService, KeyBindingService>();
                 services.AddSingleton<ILineFilterService, LineFilterService>();
+                services.AddSingleton<DocumentSessionCoordinator>();
 
                 // Factories
                 services.AddSingleton<IEditorTabFactory, EditorTabFactory>();

@@ -1,4 +1,5 @@
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -20,6 +21,8 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     private readonly IFileSystemService _fileSystemService;
     private readonly IDialogService _dialogService;
     private VirtualizedByteBuffer? _byteBuffer;
+    private string? _binaryBackingPath;
+    private bool _binaryBackingRequiresAutoSaveHandoff;
     private LargeFileDocument? _largeFileDoc;
     private bool _disposed;
     private bool _isSettingContentBaseline;
@@ -97,6 +100,9 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private int _bytesPerRow = 16;
 
+    [ObservableProperty]
+    private long _largeFileTopLine = 1;
+
     // Session restore state
     [ObservableProperty]
     private int _cursorOffset;
@@ -109,7 +115,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
 
     public Encoding FileEncoding => _fileEncoding;
     public bool HasBom => _hasBom;
-    public string AutoSaveIdentity { get; } = Guid.NewGuid().ToString("N");
+    public string AutoSaveIdentity { get; private set; } = Guid.NewGuid().ToString("N");
     public long UserMutationVersion { get; private set; }
     public long ChangeVersion => UserMutationVersion;
 
@@ -118,6 +124,12 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         _fileService = fileService;
         _fileSystemService = fileSystemService;
         _dialogService = dialogService;
+    }
+
+    internal void RestoreAutoSaveIdentity(string identity)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(identity);
+        AutoSaveIdentity = identity;
     }
 
     public async Task LoadFileAsync(string filePath, IProgress<double>? indexProgress = null)
@@ -142,14 +154,16 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         {
             Encoding = analysis.DetectedEncoding ?? "Binary";
             _byteBuffer = new VirtualizedByteBuffer(filePath);
+            _binaryBackingPath = filePath;
             _byteBuffer.ModificationsChanged += OnByteBufferModificationsChanged;
         }
         else if (Mode == FileOpenMode.LargeText)
         {
-            _largeFileDoc = new LargeFileDocument(filePath);
-            Encoding = _largeFileDoc.EncodingDisplayName;
-            SyntaxLanguage = string.Empty; // no highlighting for huge files
-            await _largeFileDoc.BuildIndexAsync(indexProgress, CancellationToken.None);
+            await RestoreLargeTextViewAsync(
+                filePath,
+                Path.GetFileName(filePath),
+                filePath,
+                indexProgress);
         }
         else
         {
@@ -163,6 +177,24 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         }
 
         IsModified = false;
+    }
+
+    internal async Task RestoreLargeTextViewAsync(
+        string filePath,
+        string fileName,
+        string backingPath,
+        IProgress<double>? indexProgress = null)
+    {
+        ReleaseLoadedResources();
+        FilePath = filePath;
+        FileName = fileName;
+        Mode = FileOpenMode.LargeText;
+        FileSize = new FileInfo(backingPath).Length;
+        SetContentBaseline(string.Empty, isModified: false);
+        SyntaxLanguage = string.Empty;
+        _largeFileDoc = new LargeFileDocument(backingPath);
+        Encoding = _largeFileDoc.EncodingDisplayName;
+        await _largeFileDoc.BuildIndexAsync(indexProgress, CancellationToken.None);
     }
 
     private static string GetEncodingDisplayName(System.Text.Encoding encoding, bool hasBom)
@@ -237,10 +269,18 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         {
             if (_byteBuffer != null)
             {
-                SaveBinaryBuffer(); // saves to original path
-                // For Save As in binary mode, copy file to new location
-                if (savePath != FilePath)
-                    _fileSystemService.CopyFile(FilePath, savePath, overwrite: true);
+                if (AreSameFilePath(savePath, FilePath))
+                {
+                    SaveBinaryBuffer();
+                }
+                else
+                {
+                    _fileSystemService.WriteStreamAtomic(
+                        savePath,
+                        _byteBuffer.WriteSnapshot);
+                    ReplaceBinaryBuffer(savePath);
+                    _binaryBackingRequiresAutoSaveHandoff = false;
+                }
             }
             else
             {
@@ -322,8 +362,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
             SetContentBaseline(string.Empty, isModified: false);
             Encoding = "Binary";
             SyntaxLanguage = string.Empty;
-            _byteBuffer = new VirtualizedByteBuffer(FilePath);
-            _byteBuffer.ModificationsChanged += OnByteBufferModificationsChanged;
+            ReplaceBinaryBuffer(FilePath);
         }
     }
 
@@ -336,15 +375,182 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
 
     private void SaveBinaryBuffer()
     {
+        if (_byteBuffer == null || string.IsNullOrEmpty(FilePath))
+            throw new InvalidOperationException("Binary content is not available for saving.");
+
         _isApplyingBinaryBaseline = true;
         try
         {
-            _byteBuffer!.Save();
+            if (AreSameFilePath(_binaryBackingPath, FilePath))
+            {
+                _byteBuffer.Save();
+            }
+            else
+            {
+                if (_fileSystemService.FileExists(FilePath))
+                {
+                    throw new IOException(
+                        "The original binary file may have changed since recovery. Use Save As to preserve both versions.");
+                }
+                _fileSystemService.WriteStreamAtomic(
+                    FilePath,
+                    _byteBuffer.WriteSnapshot);
+                ReplaceBinaryBuffer(FilePath);
+            }
+            _binaryBackingRequiresAutoSaveHandoff = false;
         }
         finally
         {
             _isApplyingBinaryBaseline = false;
         }
+    }
+
+    internal void RestoreTextSnapshot(
+            string filePath,
+            string fileName,
+            string content,
+            bool isModified,
+            int encodingCodePage,
+            bool hasBom)
+        {
+            ReleaseLoadedResources();
+            System.Text.Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+            _fileEncoding = System.Text.Encoding.GetEncoding(encodingCodePage);
+            _hasBom = hasBom;
+            FilePath = filePath;
+            FileName = fileName;
+            Mode = FileOpenMode.Text;
+            FileSize = _fileEncoding.GetByteCount(content);
+            SetContentBaseline(content, isModified);
+            Encoding = GetEncodingDisplayName(_fileEncoding, _hasBom);
+            SyntaxLanguage = string.IsNullOrEmpty(filePath)
+                ? string.Empty
+                : SyntaxLanguageResolver.Resolve(filePath);
+        }
+
+    internal void RestoreBinarySnapshot(
+            string filePath,
+            string fileName,
+            string snapshotPath,
+            bool isModified,
+            long hexOffset,
+            int bytesPerRow)
+        {
+            ReleaseLoadedResources();
+            FilePath = filePath;
+            FileName = fileName;
+            Mode = FileOpenMode.Binary;
+            Encoding = "Binary";
+            SyntaxLanguage = string.Empty;
+            HexOffset = hexOffset;
+            BytesPerRow = bytesPerRow;
+            ReplaceBinaryBuffer(snapshotPath);
+            _binaryBackingRequiresAutoSaveHandoff = false;
+            FileSize = _byteBuffer!.Length;
+            IsModified = isModified;
+        }
+
+        internal void RestoreAutoSaveBinarySnapshot(
+            string filePath,
+            string fileName,
+            string snapshotPath,
+            bool isModified,
+            long hexOffset,
+            int bytesPerRow)
+        {
+            RestoreBinarySnapshot(
+                filePath,
+                fileName,
+                snapshotPath,
+                isModified,
+                hexOffset,
+                bytesPerRow);
+            _binaryBackingRequiresAutoSaveHandoff = true;
+        }
+
+    internal void WriteBinarySnapshot(Stream destination)
+        {
+            if (_byteBuffer == null)
+                throw new InvalidOperationException("Binary content is not available.");
+            _byteBuffer.WriteSnapshot(destination);
+        }
+
+        internal void ReleaseBinarySnapshotForShutdown()
+        {
+            if (Mode != FileOpenMode.Binary || _byteBuffer == null)
+                return;
+
+            _byteBuffer.ModificationsChanged -= OnByteBufferModificationsChanged;
+            _byteBuffer.Dispose();
+            _byteBuffer = null;
+            _binaryBackingPath = null;
+        }
+
+        internal VirtualizedByteBuffer PrepareBinarySnapshot(string snapshotPath) =>
+            new(snapshotPath);
+
+        internal bool RequiresAutoSaveBinaryHandoff =>
+            _binaryBackingRequiresAutoSaveHandoff;
+
+        internal bool TryAdoptAutoSaveBinarySnapshot(
+            string snapshotPath,
+            long expectedMutationVersion,
+            bool isModified)
+        {
+            if (!_binaryBackingRequiresAutoSaveHandoff)
+                return true;
+            if (UserMutationVersion != expectedMutationVersion)
+                return false;
+
+            var preparedBuffer = PrepareBinarySnapshot(snapshotPath);
+            if (UserMutationVersion != expectedMutationVersion)
+            {
+                preparedBuffer.Dispose();
+                return false;
+            }
+
+            RebaseBinarySnapshot(
+                preparedBuffer,
+                snapshotPath,
+                isModified);
+            _binaryBackingRequiresAutoSaveHandoff = true;
+            return true;
+        }
+
+        internal void RebaseBinarySnapshot(
+            VirtualizedByteBuffer preparedBuffer,
+            string snapshotPath,
+            bool isModified)
+        {
+            if (Mode != FileOpenMode.Binary)
+            {
+                preparedBuffer.Dispose();
+                return;
+            }
+
+            ReplaceBinaryBuffer(preparedBuffer, snapshotPath);
+            _binaryBackingRequiresAutoSaveHandoff = false;
+            IsModified = isModified;
+        }
+
+    private void ReplaceBinaryBuffer(string backingPath)
+        {
+            ReplaceBinaryBuffer(new VirtualizedByteBuffer(backingPath), backingPath);
+        }
+
+        private void ReplaceBinaryBuffer(
+            VirtualizedByteBuffer replacement,
+            string backingPath)
+        {
+            if (_byteBuffer != null)
+            {
+                _byteBuffer.ModificationsChanged -= OnByteBufferModificationsChanged;
+                _byteBuffer.Dispose();
+            }
+
+            _byteBuffer = replacement;
+            _binaryBackingPath = backingPath;
+            _byteBuffer.ModificationsChanged += OnByteBufferModificationsChanged;
     }
 
     partial void OnContentChanged(string value)
@@ -391,8 +597,91 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     {
         _byteBuffer?.Dispose();
         _byteBuffer = null;
+        _binaryBackingPath = null;
+        _binaryBackingRequiresAutoSaveHandoff = false;
 
         _largeFileDoc?.Dispose();
         _largeFileDoc = null;
+    }
+
+    internal static bool AreSameFilePath(string? firstPath, string? secondPath)
+    {
+        if (string.IsNullOrEmpty(firstPath) || string.IsNullOrEmpty(secondPath))
+            return false;
+
+        var firstFullPath = Path.GetFullPath(firstPath);
+        var secondFullPath = Path.GetFullPath(secondPath);
+        if (string.Equals(
+                firstFullPath,
+                secondFullPath,
+                StringComparison.Ordinal))
+        {
+            return true;
+        }
+        if (!OperatingSystem.IsWindows() ||
+            !string.Equals(
+                firstFullPath,
+                secondFullPath,
+                StringComparison.OrdinalIgnoreCase) ||
+            !File.Exists(firstFullPath) ||
+            !File.Exists(secondFullPath))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var firstHandle = File.OpenHandle(
+                firstFullPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            using var secondHandle = File.OpenHandle(
+                secondFullPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            return GetFileInformationByHandle(
+                       firstHandle,
+                       out var firstInformation) &&
+                   GetFileInformationByHandle(
+                       secondHandle,
+                       out var secondInformation) &&
+                   firstInformation.VolumeSerialNumber ==
+                       secondInformation.VolumeSerialNumber &&
+                   firstInformation.FileIndexHigh ==
+                       secondInformation.FileIndexHigh &&
+                   firstInformation.FileIndexLow ==
+                       secondInformation.FileIndexLow;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandle(
+        Microsoft.Win32.SafeHandles.SafeFileHandle fileHandle,
+        out ByHandleFileInformation fileInformation);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
     }
 }

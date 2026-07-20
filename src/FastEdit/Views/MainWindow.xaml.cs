@@ -121,6 +121,7 @@ public partial class MainWindow : FluentWindow
         _viewModel.CompareFilesRequested += OnCompareFilesRequested;
         _viewModel.CommandPaletteRequested += OnCommandPaletteRequested;
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
+        _viewModel.EditorStateCaptureRequested += CaptureEditorState;
         _viewModel.FindRequested += OnFindRequested;
         _viewModel.ReplaceRequested += OnReplaceRequested;
 
@@ -301,7 +302,6 @@ public partial class MainWindow : FluentWindow
 
         try
         {
-            SaveEditorState();
             SaveWindowState();
             _viewModel.SaveSession();
         }
@@ -334,11 +334,18 @@ public partial class MainWindow : FluentWindow
         Close();
     }
 
-    private void SaveEditorState()
+    internal void CaptureEditorState()
     {
-        // Save cursor/scroll offsets from active editors before session save
-        var editorHost = FindActiveEditorHost();
-        editorHost?.SaveStateToViewModel();
+        foreach (var editorHost in FindVisualChildren<EditorHost>(this)
+                     .Where(host => host.IsVisible))
+        {
+            editorHost.SaveStateToViewModel();
+        }
+        foreach (var largeFileViewer in FindVisualChildren<LargeFileViewer>(this)
+                     .Where(viewer => viewer.IsVisible))
+        {
+            largeFileViewer.CaptureStateToViewModel();
+        }
     }
 
     private void Exit_Click(object sender, RoutedEventArgs e)
@@ -696,6 +703,23 @@ public partial class MainWindow : FluentWindow
             if (found != null) return found;
         }
         return null;
+    }
+
+    private static IEnumerable<T> FindVisualChildren<T>(
+        DependencyObject parent)
+        where T : UIElement
+    {
+        for (var index = 0;
+             index < VisualTreeHelper.GetChildrenCount(parent);
+             index++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, index);
+            if (child is T match)
+                yield return match;
+
+            foreach (var descendant in FindVisualChildren<T>(child))
+                yield return descendant;
+        }
     }
 
     private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)

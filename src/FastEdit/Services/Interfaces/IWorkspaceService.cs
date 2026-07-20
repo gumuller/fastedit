@@ -24,10 +24,14 @@ public class SessionData
 public class SessionFileEntry
 {
     public string FilePath { get; set; } = "";
+    public string? TabIdentity { get; set; }
     public bool IsUntitled { get; set; }
     public string? Content { get; set; }
     public int CursorOffset { get; set; }
     public double ScrollOffset { get; set; }
+    public long HexOffset { get; set; }
+    public int BytesPerRow { get; set; } = 16;
+    public long LargeFileTopLine { get; set; } = 1;
 }
 
 public class WorkspaceData
