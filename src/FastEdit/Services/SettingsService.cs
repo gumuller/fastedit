@@ -353,6 +353,7 @@ public class SettingsService : ISettingsService, IShutdownSessionStore
             Content = file.Content,
             SnapshotGeneration = file.SnapshotGeneration,
             SnapshotFile = file.SnapshotFile,
+            SnapshotFormat = file.SnapshotFormat,
             SnapshotOwner = file.SnapshotOwner,
             SnapshotGenerationFiles =
                 file.SnapshotGenerationFiles?.ToList() ?? new List<string>(),
@@ -362,7 +363,8 @@ public class SettingsService : ISettingsService, IShutdownSessionStore
             CursorOffset = file.CursorOffset,
             ScrollOffset = file.ScrollOffset,
             HexOffset = file.HexOffset,
-            BytesPerRow = file.BytesPerRow
+            BytesPerRow = file.BytesPerRow,
+            LargeFileTopLine = file.LargeFileTopLine
         };
 
     private static string CreateSettingsMutexName(string settingsPath)

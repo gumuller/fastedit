@@ -1828,21 +1828,29 @@ public partial class EditorHost : UserControl
     private void SaveStateToViewModel(EditorTabViewModel vm)
     {
         if (!ReferenceEquals(_currentVm, vm) ||
-            ReferenceEquals(_pendingStateRestoreVm, vm) ||
-            !IsTextMode(vm))
+            ReferenceEquals(_pendingStateRestoreVm, vm))
             return;
 
-        vm.CursorOffset = TextEditor.CaretOffset;
-        vm.ScrollOffset = TextEditor.VerticalOffset;
+        if (IsBinaryMode(vm))
+        {
+            HexEditor.CaptureStateToViewModel(vm);
+        }
+        else if (IsTextMode(vm))
+        {
+            vm.CursorOffset = TextEditor.CaretOffset;
+            vm.ScrollOffset = TextEditor.VerticalOffset;
+        }
     }
 
     private void ScheduleStateRestore(EditorTabViewModel vm)
     {
-        if (!IsTextMode(vm))
+        if (!IsTextMode(vm) && !IsBinaryMode(vm))
             return;
 
         var cursorOffset = vm.CursorOffset;
         var scrollOffset = vm.ScrollOffset;
+        var hexOffset = vm.HexOffset;
+        var bytesPerRow = vm.BytesPerRow;
         var restoreVersion = ++_stateRestoreVersion;
         _pendingStateRestoreVm = vm;
         _ = Dispatcher.BeginInvoke(
@@ -1860,7 +1868,9 @@ public partial class EditorHost : UserControl
                     RestoreStateFromViewModel(
                         vm,
                         cursorOffset,
-                        scrollOffset);
+                        scrollOffset,
+                        hexOffset,
+                        bytesPerRow);
                 }
                 finally
                 {
@@ -1882,24 +1892,39 @@ public partial class EditorHost : UserControl
         RestoreStateFromViewModel(
             vm,
             vm.CursorOffset,
-            vm.ScrollOffset);
+            vm.ScrollOffset,
+            vm.HexOffset,
+            vm.BytesPerRow);
     }
 
     private void RestoreStateFromViewModel(
         EditorTabViewModel vm,
         int cursorOffset,
-        double scrollOffset)
+        double scrollOffset,
+        long hexOffset,
+        int bytesPerRow)
     {
-        if (!ReferenceEquals(_currentVm, vm) || !IsTextMode(vm))
+        if (!ReferenceEquals(_currentVm, vm))
             return;
 
-        TextEditor.CaretOffset =
-            EditorStateTransitionCoordinator.ClampCursorOffset(
-                cursorOffset,
-                TextEditor.Document.TextLength);
-        TextEditor.ScrollToVerticalOffset(
-            EditorStateTransitionCoordinator.ClampScrollOffset(
-                scrollOffset));
+        if (IsBinaryMode(vm))
+        {
+            HexEditor.ApplyStateFromViewModel(
+                vm,
+                hexOffset,
+                scrollOffset,
+                bytesPerRow);
+        }
+        else if (IsTextMode(vm))
+        {
+            TextEditor.CaretOffset =
+                EditorStateTransitionCoordinator.ClampCursorOffset(
+                    cursorOffset,
+                    TextEditor.Document.TextLength);
+            TextEditor.ScrollToVerticalOffset(
+                EditorStateTransitionCoordinator.ClampScrollOffset(
+                    scrollOffset));
+        }
     }
 
     private static IHighlightingDefinition? GetHighlightingForLanguage(string language)

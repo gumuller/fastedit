@@ -341,6 +341,11 @@ public partial class MainWindow : FluentWindow
         {
             editorHost.SaveStateToViewModel();
         }
+        foreach (var largeFileViewer in FindVisualChildren<LargeFileViewer>(this)
+                     .Where(viewer => viewer.IsVisible))
+        {
+            largeFileViewer.CaptureStateToViewModel();
+        }
     }
 
     private void Exit_Click(object sender, RoutedEventArgs e)

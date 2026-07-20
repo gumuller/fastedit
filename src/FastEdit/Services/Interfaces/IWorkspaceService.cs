@@ -29,6 +29,9 @@ public class SessionFileEntry
     public string? Content { get; set; }
     public int CursorOffset { get; set; }
     public double ScrollOffset { get; set; }
+    public long HexOffset { get; set; }
+    public int BytesPerRow { get; set; } = 16;
+    public long LargeFileTopLine { get; set; } = 1;
 }
 
 public class WorkspaceData

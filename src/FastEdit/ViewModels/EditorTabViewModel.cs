@@ -98,6 +98,9 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private int _bytesPerRow = 16;
 
+    [ObservableProperty]
+    private long _largeFileTopLine = 1;
+
     // Session restore state
     [ObservableProperty]
     private int _cursorOffset;
@@ -154,10 +157,11 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         }
         else if (Mode == FileOpenMode.LargeText)
         {
-            _largeFileDoc = new LargeFileDocument(filePath);
-            Encoding = _largeFileDoc.EncodingDisplayName;
-            SyntaxLanguage = string.Empty; // no highlighting for huge files
-            await _largeFileDoc.BuildIndexAsync(indexProgress, CancellationToken.None);
+            await RestoreLargeTextViewAsync(
+                filePath,
+                Path.GetFileName(filePath),
+                filePath,
+                indexProgress);
         }
         else
         {
@@ -171,6 +175,24 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         }
 
         IsModified = false;
+    }
+
+    internal async Task RestoreLargeTextViewAsync(
+        string filePath,
+        string fileName,
+        string backingPath,
+        IProgress<double>? indexProgress = null)
+    {
+        ReleaseLoadedResources();
+        FilePath = filePath;
+        FileName = fileName;
+        Mode = FileOpenMode.LargeText;
+        FileSize = new FileInfo(backingPath).Length;
+        SetContentBaseline(string.Empty, isModified: false);
+        SyntaxLanguage = string.Empty;
+        _largeFileDoc = new LargeFileDocument(backingPath);
+        Encoding = _largeFileDoc.EncodingDisplayName;
+        await _largeFileDoc.BuildIndexAsync(indexProgress, CancellationToken.None);
     }
 
     private static string GetEncodingDisplayName(System.Text.Encoding encoding, bool hasBom)

@@ -42,6 +42,7 @@ public class SessionFile
     public string? Content { get; set; }
     public string? SnapshotGeneration { get; set; }
     public string? SnapshotFile { get; set; }
+    public string? SnapshotFormat { get; set; }
     public string? SnapshotOwner { get; set; }
     public List<string> SnapshotGenerationFiles { get; set; } = new();
     public string? BaseContentHash { get; set; }
@@ -51,4 +52,5 @@ public class SessionFile
     public double ScrollOffset { get; set; }
     public long HexOffset { get; set; }
     public int BytesPerRow { get; set; } = 16;
+    public long LargeFileTopLine { get; set; } = 1;
 }

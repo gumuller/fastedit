@@ -1,4 +1,5 @@
 using System.IO;
+using FastEdit.Infrastructure;
 using FastEdit.Services;
 using FastEdit.Services.Interfaces;
 using Moq;
@@ -109,6 +110,124 @@ public class SettingsServiceTests
         {
             Directory.Delete(appDataPath, recursive: true);
         }
+    }
+
+    [Fact]
+    public void LegacyStorePublishesThroughVersionedDurableSessionApi()
+    {
+        var appDataPath = Path.Combine(
+            Path.GetTempPath(),
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(appDataPath);
+        try
+        {
+            var fileSystem = new FileSystemService();
+            var settings = new SettingsService(fileSystem, appDataPath);
+            settings.PublishShutdownSession(new ShutdownSessionState(
+                new[]
+                {
+                    new SessionFile
+                    {
+                        FilePath = "old.txt",
+                        TabIdentity = "old",
+                        SnapshotOwner = "old-owner"
+                    }
+                },
+                0));
+            var legacy = new LegacyShutdownSessionStore(settings);
+
+            legacy.PublishShutdownSession(new ShutdownSessionState(
+                new[]
+                {
+                    new SessionFile
+                    {
+                        FilePath = "new.txt",
+                        TabIdentity = "new",
+                        SnapshotOwner = "new-owner"
+                    }
+                },
+                0,
+                new[] { "old-owner" }));
+
+            var durable = new SettingsService(fileSystem, appDataPath)
+                .ReadShutdownSession();
+            Assert.Equal("new", Assert.Single(durable.Files).TabIdentity);
+        }
+        finally
+        {
+            Directory.Delete(appDataPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LegacyStorePublicationFailureRetainsPreviousDurableSession()
+    {
+        var appDataPath = Path.Combine(
+            Path.GetTempPath(),
+            Guid.NewGuid().ToString("N"));
+        var settingsPath = Path.Combine(appDataPath, "settings.json");
+        string? durableJson = null;
+        var failWrites = false;
+        var fileSystem = new Mock<IFileSystemService>();
+        fileSystem.Setup(service => service.FileExists(settingsPath))
+            .Returns(() => durableJson != null);
+        fileSystem.Setup(service => service.ReadAllText(settingsPath))
+            .Returns(() => durableJson!);
+        fileSystem.Setup(service => service.WriteAllTextAtomic(
+                settingsPath,
+                It.IsAny<string>()))
+            .Callback<string, string>((_, json) =>
+            {
+                if (failWrites)
+                    throw new IOException("disk full");
+                durableJson = json;
+            });
+        var settings = new SettingsService(fileSystem.Object, appDataPath);
+        settings.PublishShutdownSession(new ShutdownSessionState(
+            new[]
+            {
+                new SessionFile
+                {
+                    FilePath = "old.txt",
+                    TabIdentity = "old",
+                    SnapshotOwner = "old-owner"
+                }
+            },
+            0));
+        var legacy = new LegacyShutdownSessionStore(settings);
+        failWrites = true;
+
+        Assert.Throws<IOException>(() => legacy.PublishShutdownSession(
+            new ShutdownSessionState(
+                new[]
+                {
+                    new SessionFile
+                    {
+                        FilePath = "new.txt",
+                        TabIdentity = "new",
+                        SnapshotOwner = "new-owner"
+                    }
+                },
+                0,
+                new[] { "old-owner" })));
+
+        failWrites = false;
+        var durable = new SettingsService(fileSystem.Object, appDataPath)
+            .ReadShutdownSession();
+        Assert.Equal("old", Assert.Single(durable.Files).TabIdentity);
+    }
+
+    [Fact]
+    public void LegacyStoreRejectsNonAtomicSessionReadsAndWrites()
+    {
+        var legacy = new LegacyShutdownSessionStore(
+            new Mock<ISettingsService>().Object);
+
+        Assert.Throws<InvalidOperationException>(
+            () => legacy.ReadShutdownSession());
+        Assert.Throws<InvalidOperationException>(
+            () => legacy.PublishShutdownSession(
+                new ShutdownSessionState(Array.Empty<SessionFile>(), 0)));
     }
 
     [Fact]

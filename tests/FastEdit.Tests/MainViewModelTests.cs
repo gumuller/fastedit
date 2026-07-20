@@ -19,6 +19,10 @@ public class MainViewModelTests
     private readonly Mock<IFileSystemService> _fileSystemService = new();
     private readonly Mock<IEditorTabFactory> _tabFactory = new();
     private readonly Mock<IWorkspaceService> _workspaceService = new();
+    private readonly Mock<IShutdownSessionStore> _shutdownSessionStore = new();
+    private ShutdownSessionState _shutdownSession = new(
+        Array.Empty<SessionFile>(),
+        0);
     private readonly DocumentSessionCoordinator _sessionCoordinator;
     private readonly FileTreeViewModel _fileTree;
     private readonly MainViewModel _sut;
@@ -34,6 +38,33 @@ public class MainViewModelTests
         _fileSystemService.Setup(f => f.DirectoryExists(It.IsAny<string>())).Returns(true);
         _fileSystemService.Setup(f => f.GetDirectories(It.IsAny<string>())).Returns(Array.Empty<string>());
         _fileSystemService.Setup(f => f.GetFiles(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>())).Returns(Array.Empty<string>());
+        _shutdownSessionStore.Setup(store => store.ReadShutdownSession(
+                It.IsAny<Action<ShutdownSessionState>?>()))
+            .Returns((Action<ShutdownSessionState>? whileLocked) =>
+            {
+                var configuredFiles = _settingsService.Object.OpenFiles;
+                var session = configuredFiles is { Count: > 0 }
+                    ? new ShutdownSessionState(
+                        configuredFiles,
+                        _settingsService.Object.ActiveTabIndex)
+                    : _shutdownSession;
+                whileLocked?.Invoke(session);
+                return session;
+            });
+        _shutdownSessionStore.Setup(store => store.PublishShutdownSession(
+                It.IsAny<ShutdownSessionState>(),
+                It.IsAny<Action<ShutdownSessionPublication>?>()))
+            .Returns((
+                ShutdownSessionState session,
+                Action<ShutdownSessionPublication>? whileLocked) =>
+            {
+                var publication = new ShutdownSessionPublication(
+                    _shutdownSession,
+                    session);
+                _shutdownSession = session;
+                whileLocked?.Invoke(publication);
+                return publication;
+            });
 
         _fileTree = new FileTreeViewModel(
             _fileService.Object,
@@ -43,7 +74,8 @@ public class MainViewModelTests
         _sessionCoordinator = new DocumentSessionCoordinator(
             _settingsService.Object,
             _fileSystemService.Object,
-            _tabFactory.Object);
+            _tabFactory.Object,
+            _shutdownSessionStore.Object);
 
         _sut = new MainViewModel(
             _fileService.Object,
@@ -595,15 +627,16 @@ public class MainViewModelTests
         Assert.True(await _sut.PrepareForExitAsync());
         _sut.SaveSession();
 
-        _settingsService.VerifySet(s => s.OpenFiles = It.Is<List<SessionFile>>(files =>
-            files.Count == 1 &&
-            files[0].FilePath == retained.FileName &&
-            files[0].IsUntitled));
+        var persisted = Assert.Single(_shutdownSession.Files);
+        Assert.Equal(retained.FileName, persisted.FilePath);
+        Assert.True(persisted.IsUntitled);
         _fileSystemService.Verify(
             f => f.WriteAllTextAtomic(It.IsAny<string>(), "discard me"),
             Times.Never);
         _fileSystemService.Verify(
-            f => f.WriteAllTextAtomic(It.IsAny<string>(), "restore me"),
+            f => f.WriteStreamAtomic(
+                It.Is<string>(path => path.EndsWith(".txt")),
+                It.IsAny<Action<Stream>>()),
             Times.Once);
     }
 
@@ -686,9 +719,14 @@ public class MainViewModelTests
 
         _sut.SaveSession();
 
-        _settingsService.VerifySet(s => s.OpenFiles = It.Is<List<SessionFile>>(
-            l => l.Count == 1 && l[0].FilePath == @"C:\test.txt"));
-        _settingsService.Verify(s => s.Save(), Times.Once);
+        Assert.Equal(
+            @"C:\test.txt",
+            Assert.Single(_shutdownSession.Files).FilePath);
+        _workspaceService.Verify(
+            service => service.SaveNamedSession(
+                It.IsAny<string>(),
+                It.IsAny<SessionData>()),
+            Times.Never);
     }
 
     [Fact]
@@ -701,8 +739,11 @@ public class MainViewModelTests
 
         _sut.SaveSession();
 
-        _fileSystemService.Verify(f => f.CreateDirectory(It.IsAny<string>()), Times.Once);
-        _fileSystemService.Verify(f => f.WriteAllTextAtomic(It.IsAny<string>(), "hello world"), Times.Once);
+        _fileSystemService.Verify(
+            f => f.WriteStreamAtomic(
+                It.Is<string>(path => path.EndsWith(".txt")),
+                It.IsAny<Action<Stream>>()),
+            Times.Once);
     }
 
     [Fact]
@@ -712,7 +753,10 @@ public class MainViewModelTests
         tab.Content = "hello world";
         _tabFactory.Setup(f => f.CreateUntitled(null)).Returns(tab);
         _sut.NewFileCommand.Execute(null);
-        _settingsService.Setup(s => s.Save()).Throws(new IOException("disk full"));
+        _shutdownSessionStore.Setup(store => store.PublishShutdownSession(
+                It.IsAny<ShutdownSessionState>(),
+                It.IsAny<Action<ShutdownSessionPublication>?>()))
+            .Throws(new IOException("disk full"));
 
         Assert.Throws<IOException>(() => _sut.SaveSession());
 
@@ -736,7 +780,7 @@ public class MainViewModelTests
         Assert.True(await _sut.PrepareForExitAsync());
         _sut.SaveSession();
 
-        _settingsService.VerifySet(s => s.OpenFiles = It.Is<List<SessionFile>>(files => files.Count == 0));
+        Assert.Empty(_shutdownSession.Files);
         _fileSystemService.Verify(
             f => f.WriteAllTextAtomic(It.IsAny<string>(), "discard me"),
             Times.Never);
@@ -758,8 +802,7 @@ public class MainViewModelTests
         _sut.CancelExitPreparation();
         _sut.SaveSession();
 
-        _settingsService.VerifySet(s => s.OpenFiles = It.Is<List<SessionFile>>(
-            files => files.Count == 1 && files[0].IsUntitled));
+        Assert.True(Assert.Single(_shutdownSession.Files).IsUntitled);
     }
 
     [Fact]
@@ -781,7 +824,7 @@ public class MainViewModelTests
         Assert.True(await _sut.PrepareForExitAsync());
         _sut.SaveSession();
 
-        _settingsService.VerifySet(s => s.ActiveTabIndex = 0);
+        Assert.Equal(0, _shutdownSession.ActiveTabIndex);
     }
 
     [Fact]
@@ -1231,15 +1274,13 @@ public class MainViewModelTests
 
         Assert.Same(restoredTab, Assert.Single(_sut.Tabs));
         Assert.Same(restoredTab, _sut.SelectedTab);
-        _settingsService.VerifySet(service => service.OpenFiles =
-            It.Is<List<SessionFile>>(files =>
-                files.Count == 2 &&
-                files.Any(file =>
-                    file.TabIdentity == "missing" &&
-                    file.SnapshotGeneration == "missing-generation") &&
-                files.Any(file =>
-                    file.TabIdentity == restoredTab.AutoSaveIdentity &&
-                    file.Content == null)));
+        Assert.Equal(2, _shutdownSession.Files.Count);
+        Assert.Contains(_shutdownSession.Files, file =>
+            file.TabIdentity == "missing" &&
+            file.SnapshotGeneration == "missing-generation");
+        Assert.Contains(_shutdownSession.Files, file =>
+            file.TabIdentity == restoredTab.AutoSaveIdentity &&
+            file.Content == null);
     }
 
     [Fact]
