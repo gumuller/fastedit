@@ -1089,6 +1089,62 @@ public class AutoSaveServiceTests
             Times.Never);
     }
 
+    [Fact]
+    public void ReparseAutoSaveParent_PreservesManifestAndContentWithoutTraversal()
+    {
+        var generationId = Guid.NewGuid().ToString("N");
+        var contentFile = $"{generationId}-tab-safe.txt";
+        var contentPath = Path.Combine(_autoSaveDir, contentFile);
+        var manifestPath = Path.Combine(
+            _autoSaveDir,
+            $"manifest-{generationId}.json");
+        var fastEditDirectory = Path.GetDirectoryName(_autoSaveDir)!;
+        _fileSystem.Setup(service => service.DirectoryExists(_autoSaveDir))
+            .Returns(true);
+        _fileSystem.Setup(service => service.DirectoryExists(fastEditDirectory))
+            .Returns(true);
+        _fileSystem.Setup(service => service.GetAttributes(_autoSaveDir))
+            .Returns(FileAttributes.Directory);
+        _fileSystem.Setup(service => service.GetAttributes(fastEditDirectory))
+            .Returns(FileAttributes.Directory | FileAttributes.ReparsePoint);
+
+        var recovery = _sut.GetRecoveryEntries();
+        var completed = _sut.CompleteRecovery(
+            Array.Empty<AutoSaveEntry>(),
+            Array.Empty<string>(),
+            allEntriesRecovered: true);
+        var cleared = _sut.ClearRecoveryFiles();
+
+        recovery.Success.Should().BeFalse();
+        recovery.Entries.Should().BeEmpty();
+        completed.Should().BeFalse();
+        cleared.Should().BeFalse();
+        _fileSystem.Verify(
+            service => service.GetFiles(
+                _autoSaveDir,
+                It.IsAny<string>(),
+                It.IsAny<bool>()),
+            Times.Never);
+        _fileSystem.Verify(
+            service => service.ReadAllText(manifestPath),
+            Times.Never);
+        _fileSystem.Verify(
+            service => service.ReadAllText(contentPath),
+            Times.Never);
+        _fileSystem.Verify(
+            service => service.ReadAllBytes(contentPath),
+            Times.Never);
+        _fileSystem.Verify(
+            service => service.DeleteFile(contentPath),
+            Times.Never);
+        _fileSystem.Verify(
+            service => service.MoveFile(
+                manifestPath,
+                It.IsAny<string>(),
+                It.IsAny<bool>()),
+            Times.Never);
+    }
+
     [Theory]
     [InlineData("relative")]
     [InlineData("rooted")]

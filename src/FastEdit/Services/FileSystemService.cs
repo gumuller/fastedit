@@ -1,6 +1,7 @@
 using System.IO;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using FastEdit.Services.Interfaces;
 using Microsoft.Win32.SafeHandles;
@@ -9,6 +10,34 @@ namespace FastEdit.Services;
 
 public class FileSystemService : IFileSystemService, ISecureFileSystemService
 {
+    private readonly Action<string, string, bool> _moveFile;
+    private readonly Action<string, string, string> _replaceFile;
+    private readonly Action<TimeSpan> _delay;
+
+    public FileSystemService()
+        : this(
+            (source, destination, overwrite) =>
+                File.Move(source, destination, overwrite),
+            (source, destination, backup) =>
+                File.Replace(
+                    source,
+                    destination,
+                    backup,
+                    ignoreMetadataErrors: true),
+            Thread.Sleep)
+    {
+    }
+
+    internal FileSystemService(
+        Action<string, string, bool> moveFile,
+        Action<string, string, string> replaceFile,
+        Action<TimeSpan> delay)
+    {
+        _moveFile = moveFile;
+        _replaceFile = replaceFile;
+        _delay = delay;
+    }
+
     public bool FileExists(string path) => File.Exists(path);
     public bool DirectoryExists(string path) => Directory.Exists(path);
     public string[] GetFiles(string path, string searchPattern = "*", bool recursive = false)
@@ -54,7 +83,7 @@ public class FileSystemService : IFileSystemService, ISecureFileSystemService
                 stream.Flush(flushToDisk: true);
             }
 
-            MoveAtomicReplacement(tempPath, path);
+            CommitAtomicReplacement(tempPath, path);
         }
 
         finally
@@ -64,28 +93,445 @@ public class FileSystemService : IFileSystemService, ISecureFileSystemService
         }
     }
 
-    private static void MoveAtomicReplacement(string tempPath, string path)
+    private void CommitAtomicReplacement(string tempPath, string path)
     {
-        const int maxAttempts = 5;
+        if (File.Exists(path))
+            EnsureReplaceableFile(path);
+        var replacementSafetyPath = CreateSafetySnapshot(tempPath);
+        var completed = false;
+        try
+        {
+            var replacementFingerprint =
+                CaptureFingerprint(replacementSafetyPath);
+            if (!File.Exists(path))
+            {
+                CommitNewFile(
+                    tempPath,
+                    path,
+                    replacementSafetyPath,
+                    replacementFingerprint);
+                completed = true;
+                return;
+            }
+
+            CommitReplacement(
+                tempPath,
+                path,
+                replacementFingerprint);
+            completed = true;
+        }
+        finally
+        {
+            if (completed)
+                DeleteIfExists(replacementSafetyPath);
+        }
+    }
+
+    private void CommitNewFile(
+        string tempPath,
+        string path,
+        string replacementSafetyPath,
+        FileFingerprint replacementFingerprint)
+    {
+        try
+        {
+            MoveFileWithRetries(tempPath, path, overwrite: false);
+        }
+        catch
+        {
+            if (MatchesFingerprint(path, replacementFingerprint))
+                return;
+            if (!File.Exists(path))
+                RestoreMissingDestination(replacementSafetyPath, path);
+            throw;
+        }
+
+        using var committed = OpenPinnedRead(path);
+        if (CaptureFingerprint(committed) != replacementFingerprint)
+        {
+            throw new IOException(
+                "The atomically created file changed before it could be verified.");
+        }
+    }
+
+    private void CommitReplacement(
+        string tempPath,
+        string path,
+        FileFingerprint replacementFingerprint)
+    {
+        var backupPath = Path.Combine(
+            Path.GetDirectoryName(path)!,
+            $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.backup");
+        var originalSafetyPath = CreateSafetySnapshot(path);
+        var originalFingerprint = CaptureFingerprint(originalSafetyPath);
+        var committed = false;
+        try
+        {
+            try
+            {
+                ReplaceFileWithRetries(tempPath, path, backupPath);
+            }
+            catch
+            {
+                committed =
+                    MatchesFingerprint(path, replacementFingerprint) &&
+                    MatchesFingerprint(backupPath, originalFingerprint);
+                if (!committed)
+                {
+                    EnsureDestinationPresent(
+                        path,
+                        backupPath,
+                        originalSafetyPath,
+                        replacementFingerprint);
+                    throw;
+                }
+            }
+
+            using var committedStream = OpenPinnedRead(path);
+            if (CaptureFingerprint(committedStream) != replacementFingerprint)
+            {
+                throw new IOException(
+                    "The atomic replacement changed before it could be verified.");
+            }
+            if (!MatchesFingerprint(backupPath, originalFingerprint))
+            {
+                committedStream.Dispose();
+                RestoreDisplacedDestination(
+                    backupPath,
+                    path,
+                    replacementFingerprint);
+                throw new IOException(
+                    "The destination changed before the atomic replacement.");
+            }
+
+            committed = true;
+            DeleteIfExists(backupPath);
+        }
+        finally
+        {
+            if (!committed &&
+                !File.Exists(path))
+            {
+                EnsureDestinationPresent(
+                    path,
+                    backupPath,
+                    originalSafetyPath,
+                    replacementFingerprint);
+            }
+            DeleteIfExists(originalSafetyPath);
+        }
+    }
+
+    private void EnsureDestinationPresent(
+        string path,
+        string backupPath,
+        string originalSafetyPath,
+        FileFingerprint replacementFingerprint)
+    {
+        if (File.Exists(path))
+            return;
+        var recoveryPath =
+            File.Exists(backupPath) &&
+            !MatchesFingerprint(backupPath, replacementFingerprint)
+                ? backupPath
+                : originalSafetyPath;
+        if (File.Exists(recoveryPath))
+            RestoreMissingDestination(recoveryPath, path);
+    }
+
+    private void RestoreDisplacedDestination(
+        string backupPath,
+        string path,
+        FileFingerprint replacementFingerprint)
+    {
+        var displacedFingerprint = CaptureFingerprint(backupPath);
+        var displacedSafetyPath = CreateSafetySnapshot(backupPath);
+        var replacementPath = Path.Combine(
+            Path.GetDirectoryName(path)!,
+            $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.displaced");
+        var restored = false;
+        try
+        {
+            try
+            {
+                ReplaceFileWithRetries(
+                    backupPath,
+                    path,
+                    replacementPath);
+                restored = true;
+            }
+            catch
+            {
+                restored =
+                    MatchesFingerprint(path, displacedFingerprint) &&
+                    MatchesFingerprint(
+                        replacementPath,
+                        replacementFingerprint);
+                if (!restored)
+                {
+                    if (!File.Exists(path))
+                    {
+                        RestoreMissingDestination(
+                            displacedSafetyPath,
+                            path);
+                    }
+                    throw;
+                }
+            }
+
+            if (!MatchesFingerprint(path, displacedFingerprint))
+            {
+                throw new IOException(
+                    "The displaced destination could not be restored.");
+            }
+            if (MatchesFingerprint(
+                    replacementPath,
+                    replacementFingerprint))
+            {
+                DeleteIfExists(replacementPath);
+            }
+        }
+        finally
+        {
+            if (restored)
+                DeleteIfExists(displacedSafetyPath);
+        }
+    }
+
+    private void RestoreMissingDestination(
+        string recoveryPath,
+        string path)
+    {
+        var restorePath = CreateSafetySnapshot(recoveryPath);
+        try
+        {
+            File.Move(restorePath, path, overwrite: false);
+        }
+        catch (IOException) when (File.Exists(path))
+        {
+        }
+        finally
+        {
+            DeleteIfExists(restorePath);
+        }
+    }
+
+    private void ReplaceFileWithRetries(
+        string sourcePath,
+        string destinationPath,
+        string backupPath)
+    {
         for (var attempt = 0; ; attempt++)
         {
             try
             {
-                File.Move(tempPath, path, overwrite: true);
+                _replaceFile(sourcePath, destinationPath, backupPath);
                 return;
             }
             catch (Exception ex) when (
-                attempt < maxAttempts - 1 &&
-                ex is IOException or UnauthorizedAccessException)
+                attempt < 9 &&
+                File.Exists(sourcePath) &&
+                IsRetryableAtomicError(ex))
             {
-                Thread.Sleep(TimeSpan.FromMilliseconds(10 * (attempt + 1)));
+                _delay(TimeSpan.FromMilliseconds(10 * (attempt + 1)));
             }
         }
     }
 
+    private void MoveFileWithRetries(
+        string sourcePath,
+        string destinationPath,
+        bool overwrite)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                _moveFile(sourcePath, destinationPath, overwrite);
+                return;
+            }
+            catch (Exception ex) when (
+                attempt < 9 &&
+                File.Exists(sourcePath) &&
+                IsRetryableAtomicError(ex))
+            {
+                _delay(TimeSpan.FromMilliseconds(10 * (attempt + 1)));
+            }
+        }
+    }
+
+    private static bool IsRetryableAtomicError(Exception exception)
+    {
+        if (exception is not IOException)
+            return false;
+        var errorCode = exception.HResult & 0xFFFF;
+        return errorCode is 32 or 33 or 1175;
+    }
+
+    private static void EnsureReplaceableFile(string path)
+    {
+        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new IOException(
+                "Replacing a reparse-point file is not supported.");
+        }
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        if (!GetFileInformationByHandle(
+                stream.SafeFileHandle,
+                out var information) ||
+            information.NumberOfLinks != 1)
+        {
+            throw new IOException(
+                "Replacing a hard-linked file is not supported.");
+        }
+        if (HasAlternateDataStreams(path))
+        {
+            throw new IOException(
+                "Replacing a file with alternate data streams is not supported.");
+        }
+    }
+
+    private static bool HasAlternateDataStreams(string path)
+    {
+        var findHandle = FindFirstStream(
+            path,
+            StreamInfoLevels.FindStreamInfoStandard,
+            out var streamData,
+            0);
+        if (findHandle == InvalidHandleValue)
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+
+        try
+        {
+            do
+            {
+                if (!string.Equals(
+                        streamData.StreamName,
+                        "::$DATA",
+                        StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+            while (FindNextStream(findHandle, out streamData));
+
+            var error = Marshal.GetLastWin32Error();
+            if (error != ErrorHandleEof)
+                throw new Win32Exception(error);
+            return false;
+        }
+        finally
+        {
+            _ = FindClose(findHandle);
+        }
+    }
+
+    private static FileStream OpenPinnedRead(string path) =>
+        new(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read);
+
+    private static FileFingerprint CaptureFingerprint(string path)
+    {
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        return CaptureFingerprint(stream);
+    }
+
+    private static FileFingerprint CaptureFingerprint(Stream stream)
+    {
+        stream.Position = 0;
+        return new FileFingerprint(
+            stream.Length,
+            Convert.ToHexString(SHA256.HashData(stream)));
+    }
+
+    private static bool MatchesFingerprint(
+        string path,
+        FileFingerprint expected)
+    {
+        try
+        {
+            return CaptureFingerprint(path) == expected;
+        }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return false;
+        }
+    }
+
+    private static string CreateSafetySnapshot(string sourcePath)
+    {
+        var path = Path.Combine(
+            Path.GetDirectoryName(sourcePath)!,
+            $".{Path.GetFileName(sourcePath)}.{Guid.NewGuid():N}.snapshot");
+        try
+        {
+            if (!OperatingSystem.IsWindows() ||
+                !CreateHardLink(path, sourcePath, IntPtr.Zero))
+            {
+                File.Copy(sourcePath, path, overwrite: false);
+            }
+        }
+        catch (Exception ex) when (
+            ex is IOException or
+                UnauthorizedAccessException or
+                PlatformNotSupportedException or
+                NotSupportedException)
+        {
+            File.Copy(sourcePath, path, overwrite: false);
+        }
+        return path;
+    }
+
+    private static void DeleteIfExists(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    [DllImport(
+        "kernel32.dll",
+        CharSet = CharSet.Unicode,
+        SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateHardLink(
+        string fileName,
+        string existingFileName,
+        IntPtr securityAttributes);
+
+    private readonly record struct FileFingerprint(
+        long Length,
+        string ContentHash);
+
     public void WriteAllBytes(string path, byte[] bytes) => File.WriteAllBytes(path, bytes);
     public void CopyFile(string source, string destination, bool overwrite = false) => File.Copy(source, destination, overwrite);
-    public void MoveFile(string source, string destination, bool overwrite = false) => File.Move(source, destination, overwrite);
+    public void MoveFile(string source, string destination, bool overwrite = false) => _moveFile(source, destination, overwrite);
     public void DeleteFile(string path) => File.Delete(path);
     public void DeleteDirectory(string path, bool recursive = false) => Directory.Delete(path, recursive);
     public void CreateDirectory(string path) => Directory.CreateDirectory(path);
@@ -176,22 +622,35 @@ public class FileSystemService : IFileSystemService, ISecureFileSystemService
 
     public byte[] ReadAllBytesNoFollow(string path)
     {
+        using var stream = OpenReadNoFollow(path);
+        using var output = new MemoryStream();
+        stream.CopyTo(output);
+        return output.ToArray();
+    }
+
+    public Stream OpenReadNoFollow(string path)
+    {
         if (!OperatingSystem.IsWindows())
         {
             throw new PlatformNotSupportedException(
                 "Protected autosave reads require Windows no-follow handles.");
         }
 
-        using var handle = OpenNoFollow(
+        var handle = OpenNoFollow(
             path,
             GenericRead,
             FileShareRead | FileShareWrite | FileShareDelete,
             FileFlagOpenReparsePoint);
-        EnsureRegularFile(handle);
-        using var stream = new FileStream(handle, FileAccess.Read);
-        using var output = new MemoryStream();
-        stream.CopyTo(output);
-        return output.ToArray();
+        try
+        {
+            EnsureRegularFile(handle);
+            return new FileStream(handle, FileAccess.Read);
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
     }
 
     public void DeleteFileNoFollow(string path)
@@ -283,6 +742,49 @@ public class FileSystemService : IFileSystemService, ISecureFileSystemService
         FileInfoByHandleClass fileInformationClass,
         ref FileDispositionInfo lpFileInformation,
         int dwBufferSize);
+
+    [DllImport(
+        "kernel32.dll",
+        CharSet = CharSet.Unicode,
+        EntryPoint = "FindFirstStreamW",
+        ExactSpelling = true,
+        SetLastError = true)]
+    private static extern IntPtr FindFirstStream(
+        string fileName,
+        StreamInfoLevels infoLevel,
+        out Win32FindStreamData findStreamData,
+        uint flags);
+
+    [DllImport(
+        "kernel32.dll",
+        EntryPoint = "FindNextStreamW",
+        ExactSpelling = true,
+        SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool FindNextStream(
+        IntPtr findStream,
+        out Win32FindStreamData findStreamData);
+
+    [DllImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool FindClose(IntPtr findFile);
+
+    private const int ErrorHandleEof = 38;
+    private static readonly IntPtr InvalidHandleValue = new(-1);
+
+    private enum StreamInfoLevels
+    {
+        FindStreamInfoStandard
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct Win32FindStreamData
+    {
+        public long StreamSize;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 296)]
+        public string StreamName;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct ByHandleFileInformation

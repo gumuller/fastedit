@@ -254,6 +254,253 @@ public class VirtualizedByteBufferTests : IDisposable
     }
 
     [Fact]
+    public void Save_ReconcilesReplacementThatCommittedBeforeReportedFailure()
+    {
+        var path = CreateTempFile(new byte[] { 1, 2, 3 });
+        using var buffer = new VirtualizedByteBuffer(
+            path,
+            saveSnapshotWriter: null,
+            beforeAtomicCommit: null,
+            replaceFile: (source, destination, backup) =>
+            {
+                File.Replace(source, destination, backup);
+                throw new AtomicIOException(1177);
+            });
+        buffer.SetByte(1, 42);
+
+        buffer.Save();
+
+        Assert.Equal(new byte[] { 1, 42, 3 }, File.ReadAllBytes(path));
+        Assert.False(buffer.HasModifications);
+    }
+
+    [Fact]
+    public void Save_PartialReplacementRestoresMissingDestinationAndStaysDirty()
+    {
+        var path = CreateTempFile(new byte[] { 1, 2, 3 });
+        using var buffer = new VirtualizedByteBuffer(
+            path,
+            saveSnapshotWriter: null,
+            beforeAtomicCommit: null,
+            replaceFile: (source, destination, backup) =>
+            {
+                File.Move(destination, backup);
+                throw new AtomicIOException(1177);
+            });
+        buffer.SetByte(1, 42);
+
+        Assert.Throws<AtomicIOException>(() => buffer.Save());
+
+        Assert.Equal(new byte[] { 1, 2, 3 }, File.ReadAllBytes(path));
+        Assert.True(buffer.HasModifications);
+        Assert.Equal(42, buffer.GetByte(1));
+    }
+
+    [Fact]
+    public void Save_PostCommitPathReplacementIsNotAdoptedOrCleared()
+    {
+        var path = CreateTempFile(new byte[] { 1, 2, 3 });
+        var external = CreateTempFile(new byte[] { 9, 9, 9 });
+        using var buffer = new VirtualizedByteBuffer(
+            path,
+            saveSnapshotWriter: null,
+            beforeAtomicCommit: null,
+            replaceFile: (source, destination, backup) =>
+            {
+                File.Replace(source, destination, backup);
+                ReplaceFileWithRetries(external, destination);
+            });
+        buffer.SetByte(1, 42);
+
+        Assert.Throws<IOException>(() => buffer.Save());
+
+        Assert.Equal(new byte[] { 9, 9, 9 }, File.ReadAllBytes(path));
+        using var retained = new MemoryStream();
+        buffer.WriteSnapshot(retained);
+        Assert.Equal(new byte[] { 1, 42, 3 }, retained.ToArray());
+        Assert.True(buffer.HasModifications);
+    }
+
+    [Fact]
+    public void Save_PartialConflictRollbackRestoresExternalTargetAndEditedSnapshot()
+    {
+        var path = CreateTempFile(new byte[] { 1, 2, 3 });
+        var external = CreateTempFile(new byte[] { 9, 9, 9 });
+        var replaceAttempts = 0;
+        using var buffer = new VirtualizedByteBuffer(
+            path,
+            saveSnapshotWriter: null,
+            beforeAtomicCommit: () =>
+                ReplaceFileWithRetries(external, path),
+            replaceFile: (source, destination, backup) =>
+            {
+                replaceAttempts++;
+                if (replaceAttempts == 1)
+                {
+                    File.Replace(source, destination, backup);
+                    return;
+                }
+                File.Move(destination, backup);
+                throw new AtomicIOException(1177);
+            });
+        buffer.SetByte(1, 42);
+
+        Assert.Throws<AtomicIOException>(() => buffer.Save());
+
+        Assert.Equal(2, replaceAttempts);
+        Assert.Equal(new byte[] { 9, 9, 9 }, File.ReadAllBytes(path));
+        using var retained = new MemoryStream();
+        buffer.WriteSnapshot(retained);
+        Assert.Equal(new byte[] { 1, 42, 3 }, retained.ToArray());
+        Assert.True(buffer.HasModifications);
+    }
+
+    [Theory]
+    [InlineData(32)]
+    [InlineData(33)]
+    [InlineData(1175)]
+    public void Save_RetriesRetryableWindowsReplacementFailures(int errorCode)
+    {
+        var path = CreateTempFile(new byte[] { 1, 2, 3 });
+        var attempts = 0;
+        using var buffer = new VirtualizedByteBuffer(
+            path,
+            saveSnapshotWriter: null,
+            beforeAtomicCommit: null,
+            replaceFile: (source, destination, backup) =>
+            {
+                attempts++;
+                if (attempts < 4)
+                    throw new AtomicIOException(errorCode);
+                File.Replace(source, destination, backup);
+            });
+        buffer.SetByte(1, 42);
+
+        buffer.Save();
+
+        Assert.Equal(4, attempts);
+        Assert.Equal(new byte[] { 1, 42, 3 }, File.ReadAllBytes(path));
+    }
+
+    [Fact]
+    public void Save_ReparsePointPathFailsWithoutReplacingTarget()
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            $"fastedit-link-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var targetPath = Path.Combine(directory, "target.bin");
+        var linkPath = Path.Combine(directory, "link.bin");
+        try
+        {
+            File.WriteAllBytes(targetPath, new byte[] { 0x10, 0x20 });
+            try
+            {
+                File.CreateSymbolicLink(linkPath, targetPath);
+            }
+            catch (Exception exception) when (
+                exception is UnauthorizedAccessException or IOException)
+            {
+                return;
+            }
+
+            using var buffer = new VirtualizedByteBuffer(linkPath);
+            buffer.SetByte(1, 0xFF);
+
+            Assert.Throws<IOException>(buffer.Save);
+            Assert.Equal(new byte[] { 0x10, 0x20 }, File.ReadAllBytes(targetPath));
+            Assert.True(
+                File.GetAttributes(linkPath).HasFlag(FileAttributes.ReparsePoint));
+            Assert.True(buffer.HasModifications);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Save_FileWithAlternateStreamFailsWithoutLosingStream()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var path = CreateTempFile(new byte[] { 0x10, 0x20 });
+        var streamPath = $"{path}:fastedit-test";
+        try
+        {
+            File.WriteAllText(streamPath, "protected metadata");
+        }
+        catch (IOException)
+        {
+            return;
+        }
+
+        using var buffer = new VirtualizedByteBuffer(path);
+        buffer.SetByte(1, 0xFF);
+
+        Assert.Throws<IOException>(buffer.Save);
+
+        Assert.Equal(new byte[] { 0x10, 0x20 }, File.ReadAllBytes(path));
+        Assert.Equal("protected metadata", File.ReadAllText(streamPath));
+        Assert.True(buffer.HasModifications);
+    }
+
+    [Fact]
+    public void Save_HardLinkedPathFailsWithoutBreakingLinkIdentity()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            $"fastedit-hardlink-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "source.bin");
+        var linkPath = Path.Combine(directory, "linked.bin");
+        try
+        {
+            File.WriteAllBytes(path, new byte[] { 0x10, 0x20 });
+            WindowsFileSystemTestHelper.CreateHardLink(linkPath, path);
+            using var buffer = new VirtualizedByteBuffer(path);
+            buffer.SetByte(1, 0xFF);
+
+            Assert.Throws<IOException>(buffer.Save);
+
+            Assert.Equal(new byte[] { 0x10, 0x20 }, File.ReadAllBytes(path));
+            Assert.Equal(new byte[] { 0x10, 0x20 }, File.ReadAllBytes(linkPath));
+            Assert.True(buffer.HasModifications);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Save_DoesNotRetryNonSharingFailures()
+    {
+        var path = CreateTempFile(new byte[] { 1, 2, 3 });
+        var attempts = 0;
+        using var buffer = new VirtualizedByteBuffer(
+            path,
+            saveSnapshotWriter: null,
+            beforeAtomicCommit: null,
+            replaceFile: (_, _, _) =>
+            {
+                attempts++;
+                throw new AtomicIOException(1177);
+            });
+        buffer.SetByte(1, 42);
+
+        Assert.Throws<AtomicIOException>(() => buffer.Save());
+
+        Assert.Equal(1, attempts);
+        Assert.Equal(new byte[] { 1, 2, 3 }, File.ReadAllBytes(path));
+        Assert.True(buffer.HasModifications);
+    }
+
+    [Fact]
     public void GetRows_Returns_Formatted_Rows()
     {
         var data = Enumerable.Range(0, 48).Select(i => (byte)i).ToArray();
@@ -408,6 +655,14 @@ public class VirtualizedByteBufferTests : IDisposable
                 Thread.Sleep(TimeSpan.FromMilliseconds(
                     10 * (attempt + 1)));
             }
+        }
+    }
+
+    private sealed class AtomicIOException : IOException
+    {
+        public AtomicIOException(int errorCode)
+        {
+            HResult = unchecked((int)(0x80070000u | (uint)errorCode));
         }
     }
 }

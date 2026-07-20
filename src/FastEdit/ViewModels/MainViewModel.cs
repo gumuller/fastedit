@@ -116,6 +116,8 @@ public partial class MainViewModel : ObservableObject
     public event Action<int>? MacroPlaybackRequested;
     public event Action? ToggleFilterPanelRequested;
     public event Action? EditorStateCaptureRequested;
+    public bool HasUnresolvedSessionEntries =>
+        _sessionCoordinator.ShutdownRestoreStatus.RequiresCarryForward;
 
     public MainViewModel(
         IFileService fileService,

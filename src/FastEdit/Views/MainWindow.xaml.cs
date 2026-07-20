@@ -162,7 +162,8 @@ public partial class MainWindow : FluentWindow
                 path => CommandRunner.SetWorkingDirectoryAsync(path),
                 _viewModel.RecoverTabs,
                 _viewModel.GetAutoSaveEntries,
-                CommandRunner.ShutdownAsync));
+                CommandRunner.ShutdownAsync,
+                () => _viewModel.HasUnresolvedSessionEntries));
 
         BuildCommandRegistry();
     }

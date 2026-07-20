@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
@@ -13,6 +14,7 @@ public class VirtualizedByteBuffer : IDisposable
     private string? _discardBackingPath;
     private readonly Action<Stream>? _saveSnapshotWriter;
     private readonly Action? _beforeAtomicCommit;
+    private readonly Action<string, string, string> _replaceFile;
     private FileStream _fileStream;
     private BackingFileIdentity _backingIdentity;
     private MemoryMappedFile? _memoryMappedFile;
@@ -55,12 +57,19 @@ public class VirtualizedByteBuffer : IDisposable
     internal VirtualizedByteBuffer(
         string filePath,
         Action<Stream>? saveSnapshotWriter,
-        Action? beforeAtomicCommit = null)
+        Action? beforeAtomicCommit = null,
+        Action<string, string, string>? replaceFile = null)
     {
         _filePath = filePath;
         _backingPath = filePath;
         _saveSnapshotWriter = saveSnapshotWriter;
         _beforeAtomicCommit = beforeAtomicCommit;
+        _replaceFile = replaceFile ??
+            ((source, destination, backup) => File.Replace(
+                source,
+                destination,
+                backup,
+                ignoreMetadataErrors: true));
         _fileStream = OpenBackingStream();
 
         _fileLength = _fileStream.Length;
@@ -183,11 +192,16 @@ public class VirtualizedByteBuffer : IDisposable
                         writeStream.Flush(flushToDisk: true);
                     }
 
-                    var expectedBacking = CaptureBackingFingerprint(
-                        _fileStream,
-                        _backingPath);
+                    BackingFileFingerprint expectedBacking;
+                    lock (_streamLock)
+                    {
+                        expectedBacking = CaptureBackingFingerprint(
+                            _fileStream,
+                            _backingPath);
+                    }
                     var replacementIdentity =
                         CapturePathIdentity(tempPath);
+                    EnsureReplaceableFile(_filePath);
                     _discardBackingPath ??=
                         CreateSafetySnapshot(_backingPath);
                     _beforeAtomicCommit?.Invoke();
@@ -374,17 +388,39 @@ public class VirtualizedByteBuffer : IDisposable
         var previousOwnedBackingPath =
             _ownsBackingPath ? _backingPath : null;
         var safetySnapshotPath = CreateSafetySnapshot(tempPath);
+        var replacementFingerprint =
+            CaptureBackingFingerprintFromPath(safetySnapshotPath);
         var reopened = false;
         var handlesDisposed = false;
         var replacementCommitted = false;
         var commitSucceeded = false;
         try
         {
-            ReplaceFileWithRetries(
-                tempPath,
-                _filePath,
-                backupPath);
-            replacementCommitted = true;
+            try
+            {
+                ReplaceFileWithRetries(
+                    tempPath,
+                    _filePath,
+                    backupPath);
+                replacementCommitted = true;
+            }
+            catch
+            {
+                replacementCommitted =
+                    MatchesBackingFingerprint(
+                        _filePath,
+                        replacementFingerprint) &&
+                    MatchesBackingFingerprint(
+                        backupPath,
+                        expectedBacking);
+                if (!replacementCommitted)
+                {
+                    EnsureDestinationPresentAfterFailedReplace(
+                        backupPath,
+                        replacementFingerprint);
+                    throw;
+                }
+            }
             DisposeBackingHandles();
             handlesDisposed = true;
             _backingPath = _filePath;
@@ -414,16 +450,16 @@ public class VirtualizedByteBuffer : IDisposable
                 var displacedPath = Path.Combine(
                     Path.GetDirectoryName(_filePath)!,
                     $".{Path.GetFileName(_filePath)}.{Guid.NewGuid():N}.conflict");
-                ReplaceFileWithRetries(
-                    backupPath,
-                    _filePath,
-                    displacedPath);
-                var displacedIsSnapshot = MatchesBackingIdentity(
-                    displacedPath,
-                    CapturePathIdentity(safetySnapshotPath));
                 _backingPath = safetySnapshotPath;
                 _ownsBackingPath = true;
                 _pageCache.Clear();
+                RestoreDisplacedTarget(
+                    backupPath,
+                    displacedPath,
+                    replacementFingerprint);
+                var displacedIsSnapshot = MatchesBackingIdentity(
+                    displacedPath,
+                    CapturePathIdentity(safetySnapshotPath));
                 if (displacedIsSnapshot)
                     DeleteOwnedBackingPath(displacedPath);
                 ReopenBackingHandles();
@@ -542,7 +578,125 @@ public class VirtualizedByteBuffer : IDisposable
         }
     }
 
-    private static void ReplaceFileWithRetries(
+    private BackingFileFingerprint CaptureBackingFingerprintFromPath(
+        string path)
+    {
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        return CaptureBackingFingerprint(stream, path);
+    }
+
+    private void EnsureDestinationPresentAfterFailedReplace(
+        string backupPath,
+        BackingFileFingerprint replacementFingerprint)
+    {
+        if (File.Exists(_filePath))
+            return;
+
+        string? recoveryPath = null;
+        if (File.Exists(backupPath) &&
+            !MatchesBackingFingerprint(
+                backupPath,
+                replacementFingerprint))
+        {
+            recoveryPath = backupPath;
+        }
+        else if (!string.IsNullOrEmpty(_discardBackingPath) &&
+                 File.Exists(_discardBackingPath))
+        {
+            recoveryPath = _discardBackingPath;
+        }
+
+        if (recoveryPath is null)
+            return;
+
+        var restorePath = CreateSafetySnapshot(recoveryPath);
+        try
+        {
+            File.Move(restorePath, _filePath, overwrite: false);
+        }
+        catch (IOException) when (File.Exists(_filePath))
+        {
+        }
+        finally
+        {
+            DeleteOwnedBackingPath(restorePath);
+        }
+    }
+
+    private void RestoreDisplacedTarget(
+        string backupPath,
+        string displacedPath,
+        BackingFileFingerprint replacementFingerprint)
+    {
+        var displacedTargetFingerprint =
+            CaptureBackingFingerprintFromPath(backupPath);
+        var targetSafetyPath = CreateSafetySnapshot(backupPath);
+        var restored = false;
+        try
+        {
+            try
+            {
+                ReplaceFileWithRetries(
+                    backupPath,
+                    _filePath,
+                    displacedPath);
+                restored = true;
+            }
+            catch
+            {
+                restored =
+                    MatchesBackingFingerprint(
+                        _filePath,
+                        displacedTargetFingerprint) &&
+                    MatchesBackingFingerprint(
+                        displacedPath,
+                        replacementFingerprint);
+                if (!restored)
+                {
+                    if (!File.Exists(_filePath))
+                    {
+                        var restorePath =
+                            CreateSafetySnapshot(targetSafetyPath);
+                        try
+                        {
+                            File.Move(
+                                restorePath,
+                                _filePath,
+                                overwrite: false);
+                        }
+                        catch (IOException) when (
+                            File.Exists(_filePath))
+                        {
+                        }
+                        finally
+                        {
+                            DeleteOwnedBackingPath(restorePath);
+                        }
+                    }
+                    throw;
+                }
+            }
+
+            if (!MatchesBackingFingerprint(
+                    _filePath,
+                    displacedTargetFingerprint))
+            {
+                throw new IOException(
+                    "The displaced binary target could not be restored.");
+            }
+        }
+        finally
+        {
+            if (restored)
+                DeleteOwnedBackingPath(targetSafetyPath);
+        }
+    }
+
+    private void ReplaceFileWithRetries(
         string sourcePath,
         string destinationPath,
         string backupPath)
@@ -552,21 +706,108 @@ public class VirtualizedByteBuffer : IDisposable
         {
             try
             {
-                File.Replace(
-                    sourcePath,
-                    destinationPath,
-                    backupPath,
-                    ignoreMetadataErrors: true);
+                _replaceFile(sourcePath, destinationPath, backupPath);
                 return;
             }
             catch (Exception ex) when (
                 attempt < maxAttempts - 1 &&
                 File.Exists(sourcePath) &&
-                ex is IOException or UnauthorizedAccessException)
+                IsRetryableAtomicReplaceError(ex))
             {
                 Thread.Sleep(TimeSpan.FromMilliseconds(
                     10 * (attempt + 1)));
             }
+        }
+    }
+
+    private static bool IsRetryableAtomicReplaceError(Exception exception)
+    {
+        if (exception is not IOException)
+            return false;
+        var errorCode = exception.HResult & 0xFFFF;
+        return errorCode is 32 or 33 or 1175;
+    }
+
+    private void EnsureReplaceableFile(string filePath)
+    {
+        if ((File.GetAttributes(filePath) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new IOException(
+                "Replacing a reparse-point binary path is not supported.");
+        }
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        using var stream = new FileStream(
+            filePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        if (!GetFileInformationByHandle(
+                stream.SafeFileHandle,
+                out var information))
+        {
+            throw new IOException(
+                "The binary file identity could not be validated before replacement.");
+        }
+
+        var expectedLinkCount = 1u;
+        if (!string.IsNullOrEmpty(_discardBackingPath) &&
+            File.Exists(_discardBackingPath))
+        {
+            var identity = new BackingFileIdentity(
+                information.VolumeSerialNumber,
+                information.FileIndexHigh,
+                information.FileIndexLow,
+                0,
+                default);
+            if (MatchesBackingIdentity(_discardBackingPath, identity))
+                expectedLinkCount++;
+        }
+        if (information.NumberOfLinks != expectedLinkCount)
+        {
+            throw new IOException(
+                "Replacing a hard-linked binary file is not supported.");
+        }
+        if (HasAlternateDataStreams(filePath))
+        {
+            throw new IOException(
+                "Replacing a binary file with alternate data streams is not supported.");
+        }
+    }
+
+    private static bool HasAlternateDataStreams(string filePath)
+    {
+        var findHandle = FindFirstStream(
+            filePath,
+            StreamInfoLevels.FindStreamInfoStandard,
+            out var streamData,
+            0);
+        if (findHandle == InvalidHandleValue)
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+
+        try
+        {
+            do
+            {
+                if (!string.Equals(
+                        streamData.StreamName,
+                        "::$DATA",
+                        StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+            while (FindNextStream(findHandle, out streamData));
+
+            var error = Marshal.GetLastWin32Error();
+            if (error != ErrorHandleEof)
+                throw new Win32Exception(error);
+            return false;
+        }
+        finally
+        {
+            _ = FindClose(findHandle);
         }
     }
 
@@ -626,6 +867,49 @@ public class VirtualizedByteBuffer : IDisposable
     private static extern bool GetFileInformationByHandle(
         SafeFileHandle fileHandle,
         out ByHandleFileInformation fileInformation);
+
+    [DllImport(
+        "kernel32.dll",
+        CharSet = CharSet.Unicode,
+        EntryPoint = "FindFirstStreamW",
+        ExactSpelling = true,
+        SetLastError = true)]
+    private static extern IntPtr FindFirstStream(
+        string fileName,
+        StreamInfoLevels infoLevel,
+        out Win32FindStreamData findStreamData,
+        uint flags);
+
+    [DllImport(
+        "kernel32.dll",
+        EntryPoint = "FindNextStreamW",
+        ExactSpelling = true,
+        SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool FindNextStream(
+        IntPtr findStream,
+        out Win32FindStreamData findStreamData);
+
+    [DllImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool FindClose(IntPtr findFile);
+
+    private const int ErrorHandleEof = 38;
+    private static readonly IntPtr InvalidHandleValue = new(-1);
+
+    private enum StreamInfoLevels
+    {
+        FindStreamInfoStandard
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct Win32FindStreamData
+    {
+        public long StreamSize;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 296)]
+        public string StreamName;
+    }
 
     [DllImport(
         "kernel32.dll",

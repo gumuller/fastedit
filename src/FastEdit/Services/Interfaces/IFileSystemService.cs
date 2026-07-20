@@ -46,5 +46,6 @@ public interface ISecureFileSystemService
     IDisposable ProtectDirectoryTree(string path, string trustedRoot);
     string ReadAllTextNoFollow(string path);
     byte[] ReadAllBytesNoFollow(string path);
+    Stream OpenReadNoFollow(string path);
     void DeleteFileNoFollow(string path);
 }

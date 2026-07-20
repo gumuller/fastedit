@@ -55,6 +55,11 @@ internal static class LosslessTextSnapshotCodec
         string snapshotPath)
     {
         using var stream = fileSystem.OpenRead(snapshotPath);
+        return Read(stream);
+    }
+
+    public static string Read(Stream stream)
+    {
         Span<byte> magic = stackalloc byte[Magic.Length];
         if (ReadUpTo(stream, magic) != Magic.Length ||
             !magic.SequenceEqual(Magic))

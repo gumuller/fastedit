@@ -14,6 +14,7 @@ public sealed class AutoSaveService : IAutoSaveService
     private readonly ISettingsService _settings;
     private readonly IDispatcherService _dispatcher;
     private readonly string _autoSaveDir;
+    private readonly string _trustedAutoSaveRoot;
     private readonly string _shutdownMarkerPath;
     private readonly string _resolvedEntriesPath;
     private readonly string _activeGenerationMarkerPath;
@@ -63,7 +64,8 @@ public sealed class AutoSaveService : IAutoSaveService
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                 "FastEdit",
                 "AutoSave"),
-            Guid.NewGuid().ToString("N"))
+            Guid.NewGuid().ToString("N"),
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData))
     {
     }
 
@@ -72,13 +74,19 @@ public sealed class AutoSaveService : IAutoSaveService
         ISettingsService settings,
         IDispatcherService dispatcher,
         string autoSaveDir,
-        string activeGenerationId)
+        string activeGenerationId,
+        string? trustedAutoSaveRoot = null)
     {
         _fileSystem = fileSystem;
         _settings = settings;
         _dispatcher = dispatcher;
         _intervalSeconds = Math.Max(1, settings.AutoSaveIntervalSeconds);
         _autoSaveDir = Path.GetFullPath(autoSaveDir);
+        _trustedAutoSaveRoot = Path.GetFullPath(
+            trustedAutoSaveRoot ??
+            Path.GetDirectoryName(_autoSaveDir) ??
+            throw new InvalidOperationException(
+                "The auto-save directory does not have a trusted parent."));
         _shutdownMarkerPath = Path.Combine(_autoSaveDir, ".clean-shutdown");
         _resolvedEntriesPath = Path.Combine(_autoSaveDir, "resolved.json");
         if (!Guid.TryParseExact(activeGenerationId, "N", out _))
@@ -104,6 +112,7 @@ public sealed class AutoSaveService : IAutoSaveService
             StopTimer();
             IntervalSeconds = _settings.AutoSaveIntervalSeconds;
             _fileSystem.CreateDirectory(_autoSaveDir);
+            using var protection = ProtectAutoSaveDirectory();
             RunStartupMaintenance();
             var wasCleanShutdown = _fileSystem.FileExists(_shutdownMarkerPath);
             if (wasCleanShutdown)
@@ -183,6 +192,7 @@ public sealed class AutoSaveService : IAutoSaveService
                 return;
 
             _fileSystem.CreateDirectory(_autoSaveDir);
+            using var protection = ProtectAutoSaveDirectory();
             previousContentPaths = new HashSet<string>(
                 StringComparer.OrdinalIgnoreCase);
             if (_fileSystem.FileExists(_activeManifestPath) &&
@@ -403,7 +413,7 @@ public sealed class AutoSaveService : IAutoSaveService
             try
             {
                 if (_fileSystem.FileExists(contentPath))
-                    _fileSystem.DeleteFile(contentPath);
+                    DeleteContentFileSafely(contentPath);
             }
             catch (Exception ex)
             {
@@ -430,7 +440,7 @@ public sealed class AutoSaveService : IAutoSaveService
             try
             {
                 if (_fileSystem.FileExists(previousPath))
-                    _fileSystem.DeleteFile(previousPath);
+                    DeleteContentFileSafely(previousPath);
             }
             catch (Exception ex)
             {
@@ -449,7 +459,7 @@ public sealed class AutoSaveService : IAutoSaveService
             try
             {
                 if (_fileSystem.FileExists(contentPath))
-                    _fileSystem.DeleteFile(contentPath);
+                    DeleteContentFileSafely(contentPath);
             }
             catch (Exception ex)
             {
@@ -492,7 +502,11 @@ public sealed class AutoSaveService : IAutoSaveService
 
     private (string Hash, long Length) ComputeContentFingerprint(string path)
     {
-        using var stream = _fileSystem.OpenRead(path);
+        ValidateOwnedAutoSavePath(path);
+        using var protection = ProtectAutoSaveDirectory();
+        using var stream = _fileSystem is ISecureFileSystemService secureFileSystem
+            ? secureFileSystem.OpenReadNoFollow(path)
+            : _fileSystem.OpenRead(path);
         return (
             Convert.ToHexString(SHA256.HashData(stream)),
             stream.Length);
@@ -572,18 +586,9 @@ public sealed class AutoSaveService : IAutoSaveService
 
             if (entry.Mode != FileOpenMode.Binary)
             {
-                var storedContent = string.Equals(
-                    stored.ContentFormat,
-                    LosslessTextSnapshotCodec.Format,
-                    StringComparison.Ordinal)
-                    ? LosslessTextSnapshotCodec
-                        .ReadAsync(
-                            _fileSystem,
-                            storedContentPath,
-                            stored.ContentFormat)
-                        .GetAwaiter()
-                        .GetResult()
-                    : _fileSystem.ReadAllText(storedContentPath);
+                var storedContent = ReadContentTextSafely(
+                    storedContentPath,
+                    stored.ContentFormat);
                 if (!string.Equals(
                         storedContent,
                         entry.Content,
@@ -605,8 +610,17 @@ public sealed class AutoSaveService : IAutoSaveService
     {
         lock (_persistenceSync)
         {
-            _fileSystem.CreateDirectory(_autoSaveDir);
-            return ClearActiveGenerationCore();
+            try
+            {
+                _fileSystem.CreateDirectory(_autoSaveDir);
+                using var protection = ProtectAutoSaveDirectory();
+                return ClearActiveGenerationCore();
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning("Failed to mark clean auto-save shutdown: {0}", ex);
+                return false;
+            }
         }
     }
 
@@ -617,6 +631,7 @@ public sealed class AutoSaveService : IAutoSaveService
 
         lock (_persistenceSync)
         {
+            using var protection = ProtectAutoSaveDirectory();
             RunStartupMaintenance();
         }
 
@@ -630,18 +645,23 @@ public sealed class AutoSaveService : IAutoSaveService
     {
         lock (_persistenceSync)
         {
-            var manifestPaths = GetManifestPaths();
-            if (manifestPaths.Count == 0)
-                return new RecoveryEntriesResult(true, Array.Empty<AutoSaveEntry>());
-
-            var entriesById = new Dictionary<string, AutoSaveEntry>(StringComparer.Ordinal);
-            var errors = new List<string>();
-            var resolvedEntries = LoadResolvedEntries(errors);
-            _lastRecoveryOrigins = new Dictionary<string, RecoveryOrigin>(StringComparer.Ordinal);
-            _lastRecoveryManifestPaths = manifestPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
-            _lastRecoveryContentPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try
             {
+                using var protection = ProtectAutoSaveDirectory();
+                var manifestPaths = GetManifestPaths();
+                if (manifestPaths.Count == 0)
+                    return new RecoveryEntriesResult(true, Array.Empty<AutoSaveEntry>());
+
+                var entriesById =
+                    new Dictionary<string, AutoSaveEntry>(StringComparer.Ordinal);
+                var errors = new List<string>();
+                var resolvedEntries = LoadResolvedEntries(errors);
+                _lastRecoveryOrigins =
+                    new Dictionary<string, RecoveryOrigin>(StringComparer.Ordinal);
+                _lastRecoveryManifestPaths =
+                    manifestPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+                _lastRecoveryContentPaths =
+                    new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var manifestPath in manifestPaths.OrderBy(_fileSystem.GetLastWriteTime))
                 {
                     ReadRecoveryManifest(
@@ -650,17 +670,20 @@ public sealed class AutoSaveService : IAutoSaveService
                         resolvedEntries,
                         errors);
                 }
+
+                return new RecoveryEntriesResult(
+                    errors.Count == 0,
+                    entriesById.Values.ToArray(),
+                    errors.Count == 0 ? null : string.Join(Environment.NewLine, errors));
             }
             catch (Exception ex)
             {
                 Trace.TraceWarning("Failed to enumerate auto-save recovery manifests: {0}", ex);
-                errors.Add($"Failed to enumerate recovery manifests: {ex.Message}");
+                return new RecoveryEntriesResult(
+                    false,
+                    Array.Empty<AutoSaveEntry>(),
+                    $"Failed to enumerate recovery manifests: {ex.Message}");
             }
-
-            return new RecoveryEntriesResult(
-                errors.Count == 0,
-                entriesById.Values.ToArray(),
-                errors.Count == 0 ? null : string.Join(Environment.NewLine, errors));
         }
     }
 
@@ -731,15 +754,9 @@ public sealed class AutoSaveService : IAutoSaveService
                     }
                     var content = item.Mode == FileOpenMode.Binary
                         ? string.Empty
-                        : string.IsNullOrEmpty(item.ContentFormat)
-                            ? _fileSystem.ReadAllText(contentPath)
-                            : LosslessTextSnapshotCodec
-                                .ReadAsync(
-                                    _fileSystem,
-                                    contentPath,
-                                    item.ContentFormat)
-                                .GetAwaiter()
-                                .GetResult();
+                        : ReadContentTextSafely(
+                            contentPath,
+                            item.ContentFormat);
                     entriesById[recoveryEntryId] = new AutoSaveEntry(
                         recoveryEntryId,
                         item.FileName,
@@ -783,6 +800,7 @@ public sealed class AutoSaveService : IAutoSaveService
         {
             try
             {
+                using var protection = ProtectAutoSaveDirectory();
                 RecordRecoveredEntriesCore(entryIds);
                 return true;
             }
@@ -815,6 +833,7 @@ public sealed class AutoSaveService : IAutoSaveService
         {
             try
             {
+                using var protection = ProtectAutoSaveDirectory();
                 if (allEntriesRecovered)
                     return ClearRecoveryFilesCore();
 
@@ -879,7 +898,16 @@ public sealed class AutoSaveService : IAutoSaveService
     {
         lock (_persistenceSync)
         {
-            return ClearRecoveryFilesCore();
+            try
+            {
+                using var protection = ProtectAutoSaveDirectory();
+                return ClearRecoveryFilesCore();
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceWarning("Failed to clear auto-save recovery files: {0}", ex);
+                return false;
+            }
         }
     }
 
@@ -1081,7 +1109,7 @@ public sealed class AutoSaveService : IAutoSaveService
                 try
                 {
                     if (_fileSystem.FileExists(contentPath))
-                        _fileSystem.DeleteFile(contentPath);
+                        DeleteContentFileSafely(contentPath);
                 }
                 catch (Exception ex)
                 {
@@ -1169,7 +1197,7 @@ public sealed class AutoSaveService : IAutoSaveService
             try
             {
                 if (_fileSystem.FileExists(contentPath))
-                    _fileSystem.DeleteFile(contentPath);
+                    DeleteContentFileSafely(contentPath);
             }
             catch (Exception ex)
             {
@@ -1258,7 +1286,7 @@ public sealed class AutoSaveService : IAutoSaveService
             try
             {
                 if (_fileSystem.FileExists(contentPath))
-                    _fileSystem.DeleteFile(contentPath);
+                    DeleteContentFileSafely(contentPath);
             }
             catch (Exception ex)
             {
@@ -1776,6 +1804,110 @@ public sealed class AutoSaveService : IAutoSaveService
         return true;
     }
 
+    private IDisposable ProtectAutoSaveDirectory()
+    {
+        EnsureAutoSaveDirectoryTreeSafe();
+        return _fileSystem is ISecureFileSystemService secureFileSystem
+            ? secureFileSystem.ProtectDirectoryTree(
+                _autoSaveDir,
+                _trustedAutoSaveRoot)
+            : EmptyProtection.Instance;
+    }
+
+    private void EnsureAutoSaveDirectoryTreeSafe()
+    {
+        var trustedRoot = _trustedAutoSaveRoot.TrimEnd(
+            Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar);
+        var directory = Path.GetFullPath(_autoSaveDir).TrimEnd(
+            Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar);
+        while (!string.Equals(
+                   directory,
+                   trustedRoot,
+                   StringComparison.OrdinalIgnoreCase))
+        {
+            if (_fileSystem.DirectoryExists(directory) &&
+                (_fileSystem.GetAttributes(directory) &
+                 FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidDataException(
+                    "The auto-save directory cannot traverse a reparse point.");
+            }
+
+            directory = Path.GetDirectoryName(directory) ??
+                throw new InvalidDataException(
+                    "The auto-save directory is outside the trusted root.");
+        }
+    }
+
+    private string ReadContentTextSafely(
+        string path,
+        string? contentFormat)
+    {
+        if (string.Equals(
+                contentFormat,
+                LosslessTextSnapshotCodec.Format,
+                StringComparison.Ordinal))
+        {
+            ValidateOwnedAutoSavePath(path);
+                using var framedProtection = ProtectAutoSaveDirectory();
+            using var stream =
+                    _fileSystem is ISecureFileSystemService secureFramedFileSystem
+                        ? secureFramedFileSystem.OpenReadNoFollow(path)
+                    : _fileSystem.OpenRead(path);
+            return LosslessTextSnapshotCodec.Read(stream);
+        }
+        if (!string.IsNullOrEmpty(contentFormat))
+            throw new InvalidDataException("The auto-save content format is unsupported.");
+
+        ValidateOwnedAutoSavePath(path);
+        using var protection = ProtectAutoSaveDirectory();
+        return _fileSystem is ISecureFileSystemService secureFileSystem
+            ? secureFileSystem.ReadAllTextNoFollow(path)
+            : _fileSystem.ReadAllText(path);
+    }
+
+    private void DeleteContentFileSafely(string path)
+    {
+        ValidateOwnedAutoSavePath(path);
+        using var protection = ProtectAutoSaveDirectory();
+        if (_fileSystem is ISecureFileSystemService secureFileSystem)
+            secureFileSystem.DeleteFileNoFollow(path);
+        else
+            _fileSystem.DeleteFile(path);
+    }
+
+    private void ValidateOwnedAutoSavePath(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var rootPath = Path.GetFullPath(_autoSaveDir).TrimEnd(
+            Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar);
+        if (!string.Equals(
+                Path.GetDirectoryName(fullPath),
+                rootPath,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "The auto-save content is outside the protected directory.");
+        }
+        if (_fileSystem.DirectoryExists(rootPath) &&
+            (_fileSystem.GetAttributes(rootPath) &
+             FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidDataException(
+                "The auto-save directory cannot be a reparse point.");
+        }
+        if (_fileSystem.FileExists(fullPath) &&
+            (_fileSystem.GetAttributes(fullPath) &
+             FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidDataException(
+                "The auto-save content cannot be a reparse point.");
+        }
+    }
+
     private void SaveResolvedEntries(Dictionary<string, HashSet<string>> resolvedEntries)
     {
         if (resolvedEntries.Count == 0)
@@ -1840,4 +1972,13 @@ public sealed class AutoSaveService : IAutoSaveService
 
     private sealed record RecoveryOrigin(string ManifestName, string EntryId);
     private sealed record CleanupIntent(string GenerationId, string[] ContentFiles);
+
+    private sealed class EmptyProtection : IDisposable
+    {
+        public static EmptyProtection Instance { get; } = new();
+
+        public void Dispose()
+        {
+        }
+    }
 }
