@@ -18,9 +18,6 @@ public sealed class MainWindowLifecycleCoordinator
     {
         ArgumentNullException.ThrowIfNull(autoSaveService);
         ArgumentNullException.ThrowIfNull(operations);
-        ArgumentNullException.ThrowIfNull(operations.HasUnsavedChanges);
-        ArgumentNullException.ThrowIfNull(operations.PrepareForExitAsync);
-        ArgumentNullException.ThrowIfNull(operations.CancelExitPreparation);
         ArgumentNullException.ThrowIfNull(operations.RestoreSessionAsync);
         ArgumentNullException.ThrowIfNull(operations.OpenStartupFileAsync);
         ArgumentNullException.ThrowIfNull(operations.GetWorkingDirectory);
@@ -109,6 +106,12 @@ public sealed class MainWindowLifecycleCoordinator
         try
         {
             await _operations.RestoreSessionAsync();
+            if (_operations.HasUnresolvedSessionEntries?.Invoke() == true)
+            {
+                issues.Add(new MainWindowStartupIssue(
+                    MainWindowStartupIssueKind.Startup,
+                    "Some files from the previous session could not be restored and will be retained for the next startup."));
+            }
 
             foreach (var path in startupFiles)
                 await _operations.OpenStartupFileAsync(path);
@@ -139,7 +142,8 @@ public sealed class MainWindowLifecycleCoordinator
     public async Task<MainWindowCloseResult> CloseAsync(
         Action beginPersistence,
         Action persistSession,
-        TimeSpan terminalShutdownTimeout)
+        TimeSpan terminalShutdownTimeout,
+        bool allowCloseBeforeStartup = false)
     {
         ArgumentNullException.ThrowIfNull(beginPersistence);
         ArgumentNullException.ThrowIfNull(persistSession);
@@ -152,38 +156,57 @@ public sealed class MainWindowLifecycleCoordinator
         if (previousState == 2)
             return new MainWindowCloseResult(MainWindowCloseOutcome.ReadyToClose);
 
+        var shouldPersistSession = true;
         try
         {
             Task<MainWindowStartupResult>? startupTask;
             lock (_startupLock)
                 startupTask = _startupTask;
-            if (startupTask != null)
-                await startupTask;
-
-            if (_operations.HasUnsavedChanges() &&
-                !await _operations.PrepareForExitAsync())
+            if (startupTask == null)
             {
-                Volatile.Write(ref _closeState, 0);
-                return new MainWindowCloseResult(MainWindowCloseOutcome.Cancelled);
+                if (!allowCloseBeforeStartup)
+                {
+                    Volatile.Write(ref _closeState, 0);
+                    return new MainWindowCloseResult(
+                        MainWindowCloseOutcome.StartupFailed,
+                        new InvalidOperationException(
+                            "FastEdit cannot replace the shutdown session before startup has begun."));
+                }
+
+                shouldPersistSession = false;
+            }
+            else
+            {
+                var startupResult = await startupTask;
+                if (startupResult.Outcome == MainWindowStartupOutcome.Failure)
+                {
+                    throw startupResult.Issues
+                        .Select(issue => issue.Exception)
+                        .FirstOrDefault(exception => exception != null) ??
+                        new InvalidOperationException(
+                            startupResult.Issues.FirstOrDefault()?.Message ??
+                            "FastEdit startup did not complete safely.");
+                }
             }
         }
         catch (Exception ex)
         {
-            _operations.CancelExitPreparation();
             Volatile.Write(ref _closeState, 0);
             return new MainWindowCloseResult(
-                MainWindowCloseOutcome.PreparationFailed,
+                MainWindowCloseOutcome.StartupFailed,
                 ex);
         }
 
         try
         {
-            beginPersistence();
-            persistSession();
+            if (shouldPersistSession)
+            {
+                beginPersistence();
+                persistSession();
+            }
         }
         catch (Exception ex)
         {
-            _operations.CancelExitPreparation();
             Volatile.Write(ref _closeState, 0);
             return new MainWindowCloseResult(
                 MainWindowCloseOutcome.PersistenceFailed,
@@ -273,16 +296,14 @@ public sealed class MainWindowLifecycleCoordinator
 }
 
 public sealed record MainWindowLifecycleOperations(
-    Func<bool> HasUnsavedChanges,
-    Func<Task<bool>> PrepareForExitAsync,
-    Action CancelExitPreparation,
     Func<Task> RestoreSessionAsync,
     Func<string, Task> OpenStartupFileAsync,
     Func<string?> GetWorkingDirectory,
     Func<string, Task> SetWorkingDirectoryAsync,
     Func<IReadOnlyList<AutoSaveEntry>, TabRecoveryResult> RecoverTabs,
     Func<IReadOnlyList<AutoSaveEntry>> CaptureRecoverySnapshot,
-    Func<CancellationToken, Task> ShutdownTerminalAsync);
+    Func<CancellationToken, Task> ShutdownTerminalAsync,
+    Func<bool>? HasUnresolvedSessionEntries = null);
 
 public enum MainWindowStartupOutcome
 {
@@ -309,8 +330,7 @@ public sealed record MainWindowStartupResult(
 public enum MainWindowCloseOutcome
 {
     InProgress,
-    Cancelled,
-    PreparationFailed,
+    StartupFailed,
     PersistenceFailed,
     ReadyToClose
 }

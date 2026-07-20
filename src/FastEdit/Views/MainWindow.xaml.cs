@@ -156,9 +156,6 @@ public partial class MainWindow : FluentWindow
         _lifecycleCoordinator = new MainWindowLifecycleCoordinator(
             _autoSaveService,
             new MainWindowLifecycleOperations(
-                _viewModel.HasUnsavedChanges,
-                _viewModel.PrepareForExitAsync,
-                _viewModel.CancelExitPreparation,
                 _viewModel.RestoreSessionAsync,
                 path => _viewModel.OpenFileCommand.ExecuteAsync(path),
                 () => _viewModel.FileTree.RootPath,
@@ -259,17 +256,17 @@ public partial class MainWindow : FluentWindow
         var result = await _lifecycleCoordinator.CloseAsync(
             () => IsEnabled = false,
             PersistSession,
-            TimeSpan.FromSeconds(5));
+            TimeSpan.FromSeconds(5),
+            allowCloseBeforeStartup: !IsLoaded);
 
         switch (result.Outcome)
         {
             case MainWindowCloseOutcome.InProgress:
-            case MainWindowCloseOutcome.Cancelled:
                 return;
-            case MainWindowCloseOutcome.PreparationFailed:
+            case MainWindowCloseOutcome.StartupFailed:
                 IsEnabled = true;
-                Trace.TraceError("Failed to prepare the session for shutdown: {0}", result.Error);
-                _viewModel.StatusText = "Unable to prepare the current session for exit; FastEdit remains open.";
+                Trace.TraceError("Startup did not complete before shutdown: {0}", result.Error);
+                _viewModel.StatusText = "Startup did not complete; FastEdit remains open.";
                 return;
             case MainWindowCloseOutcome.PersistenceFailed:
                 IsEnabled = true;
@@ -301,18 +298,16 @@ public partial class MainWindow : FluentWindow
         _viewModel!.SaveSession();
     }
 
-    internal void CaptureEditorState()
+    internal void CaptureEditorState() => CaptureEditorStates(this);
+
+    internal static void CaptureEditorStates(DependencyObject root)
     {
-        foreach (var editorHost in FindVisualChildren<EditorHost>(this)
-                     .Where(host => host.IsVisible))
-        {
+        foreach (var editorHost in FindVisualChildren<EditorHost>(root)
+                     .Where(host => host.Visibility == Visibility.Visible))
             editorHost.SaveStateToViewModel();
-        }
-        foreach (var largeFileViewer in FindVisualChildren<LargeFileViewer>(this)
-                     .Where(viewer => viewer.IsVisible))
-        {
+        foreach (var largeFileViewer in FindVisualChildren<LargeFileViewer>(root)
+                     .Where(viewer => viewer.Visibility == Visibility.Visible))
             largeFileViewer.CaptureStateToViewModel();
-        }
     }
 
     private void Exit_Click(object sender, RoutedEventArgs e)

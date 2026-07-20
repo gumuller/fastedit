@@ -40,3 +40,11 @@ public interface IFileSystemService
     Stream OpenFile(string path, FileMode mode, FileAccess access, FileShare share);
     IEnumerable<string> ReadLines(string path);
 }
+
+public interface ISecureFileSystemService
+{
+    IDisposable ProtectDirectoryTree(string path, string trustedRoot);
+    string ReadAllTextNoFollow(string path);
+    byte[] ReadAllBytesNoFollow(string path);
+    void DeleteFileNoFollow(string path);
+}
