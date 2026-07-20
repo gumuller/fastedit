@@ -20,6 +20,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     private readonly IFileSystemService _fileSystemService;
     private readonly IDialogService _dialogService;
     private VirtualizedByteBuffer? _byteBuffer;
+    private string? _binaryBackingPath;
     private LargeFileDocument? _largeFileDoc;
     private bool _disposed;
     private bool _isSettingContentBaseline;
@@ -148,6 +149,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         {
             Encoding = analysis.DetectedEncoding ?? "Binary";
             _byteBuffer = new VirtualizedByteBuffer(filePath);
+            _binaryBackingPath = filePath;
             _byteBuffer.ModificationsChanged += OnByteBufferModificationsChanged;
         }
         else if (Mode == FileOpenMode.LargeText)
@@ -243,10 +245,17 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
         {
             if (_byteBuffer != null)
             {
-                SaveBinaryBuffer(); // saves to original path
-                // For Save As in binary mode, copy file to new location
-                if (savePath != FilePath)
-                    _fileSystemService.CopyFile(FilePath, savePath, overwrite: true);
+                if (string.Equals(savePath, FilePath, StringComparison.Ordinal))
+                {
+                    SaveBinaryBuffer();
+                }
+                else
+                {
+                    _fileSystemService.WriteStreamAtomic(
+                        savePath,
+                        _byteBuffer.WriteSnapshot);
+                    ReplaceBinaryBuffer(savePath);
+                }
             }
             else
             {
@@ -328,8 +337,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
             SetContentBaseline(string.Empty, isModified: false);
             Encoding = "Binary";
             SyntaxLanguage = string.Empty;
-            _byteBuffer = new VirtualizedByteBuffer(FilePath);
-            _byteBuffer.ModificationsChanged += OnByteBufferModificationsChanged;
+            ReplaceBinaryBuffer(FilePath);
         }
     }
 
@@ -342,15 +350,131 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
 
     private void SaveBinaryBuffer()
     {
+        if (_byteBuffer == null || string.IsNullOrEmpty(FilePath))
+            throw new InvalidOperationException("Binary content is not available for saving.");
+
         _isApplyingBinaryBaseline = true;
         try
         {
-            _byteBuffer!.Save();
+            if (string.Equals(
+                    _binaryBackingPath,
+                    FilePath,
+                    StringComparison.Ordinal))
+            {
+                _byteBuffer.Save();
+            }
+            else
+            {
+                _fileSystemService.WriteStreamAtomic(
+                    FilePath,
+                    _byteBuffer.WriteSnapshot);
+                ReplaceBinaryBuffer(FilePath);
+            }
         }
         finally
         {
             _isApplyingBinaryBaseline = false;
         }
+    }
+
+    internal void RestoreTextSnapshot(
+            string filePath,
+            string fileName,
+            string content,
+            bool isModified,
+            int encodingCodePage,
+            bool hasBom)
+        {
+            ReleaseLoadedResources();
+            System.Text.Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+            _fileEncoding = System.Text.Encoding.GetEncoding(encodingCodePage);
+            _hasBom = hasBom;
+            FilePath = filePath;
+            FileName = fileName;
+            Mode = FileOpenMode.Text;
+            FileSize = _fileEncoding.GetByteCount(content);
+            SetContentBaseline(content, isModified);
+            Encoding = GetEncodingDisplayName(_fileEncoding, _hasBom);
+            SyntaxLanguage = string.IsNullOrEmpty(filePath)
+                ? string.Empty
+                : SyntaxLanguageResolver.Resolve(filePath);
+        }
+
+    internal void RestoreBinarySnapshot(
+            string filePath,
+            string fileName,
+            string snapshotPath,
+            bool isModified,
+            long hexOffset,
+            int bytesPerRow)
+        {
+            ReleaseLoadedResources();
+            FilePath = filePath;
+            FileName = fileName;
+            Mode = FileOpenMode.Binary;
+            Encoding = "Binary";
+            SyntaxLanguage = string.Empty;
+            HexOffset = hexOffset;
+            BytesPerRow = bytesPerRow;
+            ReplaceBinaryBuffer(snapshotPath);
+            FileSize = _byteBuffer!.Length;
+            IsModified = isModified;
+        }
+
+    internal void WriteBinarySnapshot(Stream destination)
+        {
+            if (_byteBuffer == null)
+                throw new InvalidOperationException("Binary content is not available.");
+            _byteBuffer.WriteSnapshot(destination);
+        }
+
+        internal void ReleaseBinarySnapshotForShutdown()
+        {
+            if (Mode != FileOpenMode.Binary || _byteBuffer == null)
+                return;
+
+            _byteBuffer.ModificationsChanged -= OnByteBufferModificationsChanged;
+            _byteBuffer.Dispose();
+            _byteBuffer = null;
+            _binaryBackingPath = null;
+        }
+
+        internal VirtualizedByteBuffer PrepareBinarySnapshot(string snapshotPath) =>
+            new(snapshotPath);
+
+        internal void RebaseBinarySnapshot(
+            VirtualizedByteBuffer preparedBuffer,
+            string snapshotPath,
+            bool isModified)
+        {
+            if (Mode != FileOpenMode.Binary)
+            {
+                preparedBuffer.Dispose();
+                return;
+            }
+
+            ReplaceBinaryBuffer(preparedBuffer, snapshotPath);
+            IsModified = isModified;
+        }
+
+    private void ReplaceBinaryBuffer(string backingPath)
+        {
+            ReplaceBinaryBuffer(new VirtualizedByteBuffer(backingPath), backingPath);
+        }
+
+        private void ReplaceBinaryBuffer(
+            VirtualizedByteBuffer replacement,
+            string backingPath)
+        {
+            if (_byteBuffer != null)
+            {
+                _byteBuffer.ModificationsChanged -= OnByteBufferModificationsChanged;
+                _byteBuffer.Dispose();
+            }
+
+            _byteBuffer = replacement;
+            _binaryBackingPath = backingPath;
+            _byteBuffer.ModificationsChanged += OnByteBufferModificationsChanged;
     }
 
     partial void OnContentChanged(string value)
@@ -397,6 +521,7 @@ public partial class EditorTabViewModel : ObservableObject, IDisposable
     {
         _byteBuffer?.Dispose();
         _byteBuffer = null;
+        _binaryBackingPath = null;
 
         _largeFileDoc?.Dispose();
         _largeFileDoc = null;

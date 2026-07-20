@@ -1,6 +1,7 @@
 using System.IO;
 using System.Text;
 using FastEdit.Infrastructure;
+using FastEdit.Services;
 using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
 using Moq;
@@ -180,6 +181,35 @@ public class DocumentSessionCoordinatorTests
     }
 
     [Fact]
+    public async Task PrepareDiscard_NamedTabPersistsCleanReferenceWithoutDirtySnapshot()
+    {
+        var discarded = CreateTab("saved.txt", @"C:\saved.txt");
+        discarded.SetContentBaseline("unsaved edit", isModified: true);
+        _settingsService.SetupProperty(
+            service => service.OpenFiles,
+            new List<SessionFile>());
+        _settingsService.SetupProperty(service => service.ActiveTabIndex, 0);
+        _sut.BeginShutdownPreparation();
+
+        var preparation = await _sut.PrepareUnsavedChangesAsync(
+            new[] { discarded },
+            new[] { discarded },
+            UnsavedChangesDecision.Discard,
+            recordShutdownDiscards: true);
+        _sut.PersistShutdownSession(new[] { discarded }, discarded);
+
+        Assert.True(preparation.CanContinue);
+        var persisted = Assert.Single(_settingsService.Object.OpenFiles);
+        Assert.Equal(discarded.FilePath, persisted.FilePath);
+        Assert.False(persisted.IsModified);
+        Assert.Null(persisted.SnapshotGeneration);
+        Assert.Null(persisted.SnapshotFile);
+        _fileSystemService.Verify(service => service.WriteAllTextAtomic(
+            It.IsAny<string>(),
+            "unsaved edit"), Times.Never);
+    }
+
+    [Fact]
     public async Task ShutdownSession_RestoresViewStateBeforeDuplicatePlanning()
     {
         var filePath = Path.GetTempFileName();
@@ -194,14 +224,23 @@ public class DocumentSessionCoordinatorTests
                 service => service.OpenFiles,
                 new List<SessionFile>());
             _settingsService.SetupProperty(service => service.ActiveTabIndex, 0);
+            string? snapshotPath = null;
+            _fileSystemService.Setup(service => service.WriteAllTextAtomic(
+                    It.IsAny<string>(),
+                    "same"))
+                .Callback<string, string>((path, _) => snapshotPath = path);
             _sut.PersistShutdownSession(new[] { original }, original);
             var persisted = Assert.Single(_settingsService.Object.OpenFiles);
             Assert.Equal(filePath, persisted.FilePath);
             Assert.Equal(17, persisted.CursorOffset);
             Assert.Equal(8.5, persisted.ScrollOffset);
             var restored = CreateTab();
-            _fileSystemService.Setup(service => service.FileExists(filePath))
-                .Returns(true);
+            _fileSystemService.Setup(service => service.FileExists(It.IsAny<string>()))
+                .Returns<string>(path =>
+                    path == filePath || path == snapshotPath);
+            _fileSystemService.Setup(service => service.ReadAllTextAsync(
+                    It.IsAny<string>()))
+                .ReturnsAsync("same");
             _fileService.Setup(service => service.ReadFileWithEncodingAsync(filePath))
                 .ReturnsAsync(new FileReadResult("same", Encoding.UTF8, false));
             _tabFactory.Setup(factory => factory.Create()).Returns(restored);
@@ -237,6 +276,528 @@ public class DocumentSessionCoordinatorTests
         {
             File.Delete(filePath);
         }
+    }
+
+    [Fact]
+    public async Task ShutdownSession_DirtyNamedTextRestoresContentAndEncodingWithoutWritingSource()
+    {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sourcePath = Path.Combine(workspace, "named.txt");
+            var snapshotRoot = Path.Combine(workspace, "snapshots");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllTextAsync(sourcePath, "disk");
+            var fileSystem = new FileSystemService();
+            var store = new TestShutdownSessionStore();
+            var original = new EditorTabViewModel(
+                _fileService.Object,
+                fileSystem,
+                _dialogService.Object);
+            _fileService.Setup(service => service.ReadFileWithEncodingAsync(sourcePath))
+                .ReturnsAsync(new FileReadResult("disk", Encoding.Unicode, true));
+            await original.LoadFileAsync(sourcePath);
+            original.Content = "unsaved utf-16 edit";
+            original.CursorOffset = 8;
+            original.ScrollOffset = 3.5;
+            var persistFactory = new Mock<IEditorTabFactory>();
+            var persister = new DocumentSessionCoordinator(
+                _settingsService.Object,
+                fileSystem,
+                persistFactory.Object,
+                store,
+                () => Guid.NewGuid().ToString("N"),
+                null,
+                () => "generation-one",
+                snapshotRoot);
+
+            persister.PersistShutdownSession(new[] { original }, original);
+
+            Assert.Equal("disk", await File.ReadAllTextAsync(sourcePath));
+            var persisted = Assert.Single(store.Current.Files);
+            Assert.True(persisted.IsModified);
+            Assert.Equal(Encoding.Unicode.CodePage, persisted.EncodingCodePage);
+            Assert.True(persisted.HasBom);
+            var restored = new EditorTabViewModel(
+                _fileService.Object,
+                fileSystem,
+                _dialogService.Object);
+            var restoreFactory = new Mock<IEditorTabFactory>();
+            restoreFactory.Setup(factory => factory.Create()).Returns(restored);
+            var restorer = new DocumentSessionCoordinator(
+                _settingsService.Object,
+                fileSystem,
+                restoreFactory.Object,
+                store,
+                () => Guid.NewGuid().ToString("N"),
+                null,
+                () => "generation-two",
+                snapshotRoot);
+
+            using var restoredSession = await restorer.RestoreShutdownSessionAsync();
+            var liveTabs = new List<EditorTabViewModel>();
+            var adoption = restorer.AdoptRestoredTabs(
+                restoredSession,
+                liveTabs,
+                liveTabs.Add);
+
+            Assert.Same(restored, adoption.SelectedTab);
+            Assert.Equal("unsaved utf-16 edit", restored.Content);
+            Assert.True(restored.IsModified);
+            Assert.Equal(Encoding.Unicode.CodePage, restored.FileEncoding.CodePage);
+            Assert.True(restored.HasBom);
+            Assert.Equal(8, restored.CursorOffset);
+            Assert.Equal(3.5, restored.ScrollOffset);
+
+            await restored.SaveCommand.ExecuteAsync(null);
+
+            _fileService.Verify(service => service.WriteFileWithEncodingAsync(
+                sourcePath,
+                "unsaved utf-16 edit",
+                It.Is<Encoding>(encoding =>
+                    encoding.CodePage == Encoding.Unicode.CodePage),
+                true));
+            restorer.Dispose();
+            original.Dispose();
+            restored.Dispose();
+            Directory.Delete(workspace, recursive: true);
+        }
+
+        [Fact]
+        public async Task ShutdownSession_CleanNamedTextPreservesExplicitTextModeAndContent()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sourcePath = Path.Combine(workspace, "ambiguous.dat");
+            var snapshotRoot = Path.Combine(workspace, "snapshots");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllBytesAsync(sourcePath, new byte[] { 0, 0, 0, 0 });
+            var fileSystem = new FileSystemService();
+            var store = new TestShutdownSessionStore();
+            var original = new EditorTabViewModel(
+                _fileService.Object,
+                fileSystem,
+                _dialogService.Object);
+            original.RestoreTextSnapshot(
+                sourcePath,
+                "ambiguous.dat",
+                "text interpretation",
+                isModified: false,
+                Encoding.UTF8.CodePage,
+                hasBom: false);
+            var factory = new Mock<IEditorTabFactory>();
+            var persister = new DocumentSessionCoordinator(
+                _settingsService.Object,
+                fileSystem,
+                factory.Object,
+                store,
+                () => Guid.NewGuid().ToString("N"),
+                null,
+                () => "text-generation",
+                snapshotRoot);
+            persister.PersistShutdownSession(new[] { original }, original);
+            var restored = new EditorTabViewModel(
+                _fileService.Object,
+                fileSystem,
+                _dialogService.Object);
+            factory.Setup(item => item.Create()).Returns(restored);
+            var restorer = new DocumentSessionCoordinator(
+                _settingsService.Object,
+                fileSystem,
+                factory.Object,
+                store,
+                () => Guid.NewGuid().ToString("N"),
+                null,
+                () => "next-generation",
+                snapshotRoot);
+
+            using var restoredSession = await restorer.RestoreShutdownSessionAsync();
+            var liveTabs = new List<EditorTabViewModel>();
+            restorer.AdoptRestoredTabs(restoredSession, liveTabs, liveTabs.Add);
+
+            Assert.Equal(FileOpenMode.Text, restored.Mode);
+            Assert.Equal("text interpretation", restored.Content);
+            Assert.False(restored.IsModified);
+            restorer.Dispose();
+            original.Dispose();
+            restored.Dispose();
+            Directory.Delete(workspace, recursive: true);
+        }
+
+        [Fact]
+        public async Task ShutdownSession_DirtyBinarySurvivesMissingSourceAndExplicitSave()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var sourcePath = Path.Combine(workspace, "data.bin");
+            var snapshotRoot = Path.Combine(workspace, "snapshots");
+            Directory.CreateDirectory(workspace);
+            await File.WriteAllBytesAsync(sourcePath, new byte[] { 0, 1, 0, 3 });
+            var fileSystem = new FileSystemService();
+            var store = new TestShutdownSessionStore();
+            var original = new EditorTabViewModel(
+                _fileService.Object,
+                fileSystem,
+                _dialogService.Object);
+            await original.LoadFileAsync(sourcePath);
+            original.ByteBuffer!.SetByte(1, 42);
+            original.HexOffset = 2;
+            original.BytesPerRow = 24;
+            var factory = new Mock<IEditorTabFactory>();
+            var persister = new DocumentSessionCoordinator(
+                _settingsService.Object,
+                fileSystem,
+                factory.Object,
+                store,
+                () => Guid.NewGuid().ToString("N"),
+                null,
+                () => "binary-generation",
+                snapshotRoot);
+
+            persister.PersistShutdownSession(new[] { original }, original);
+            var originalSnapshot = Path.Combine(
+                snapshotRoot,
+                store.Current.Files[0].SnapshotGeneration!,
+                store.Current.Files[0].SnapshotFile!);
+            original.Dispose();
+            File.Delete(sourcePath);
+
+            var restored = new EditorTabViewModel(
+                _fileService.Object,
+                fileSystem,
+                _dialogService.Object);
+            factory.Setup(item => item.Create()).Returns(restored);
+            var restorer = new DocumentSessionCoordinator(
+                _settingsService.Object,
+                fileSystem,
+                factory.Object,
+                store,
+                () => Guid.NewGuid().ToString("N"),
+                null,
+                () => "next-generation",
+                snapshotRoot);
+            using var restoredSession = await restorer.RestoreShutdownSessionAsync();
+            var liveTabs = new List<EditorTabViewModel>();
+            restorer.AdoptRestoredTabs(restoredSession, liveTabs, liveTabs.Add);
+
+            Assert.Equal(FileOpenMode.Binary, restored.Mode);
+            Assert.True(restored.IsModified);
+            Assert.Equal(2, restored.HexOffset);
+            Assert.Equal(24, restored.BytesPerRow);
+            Assert.Equal(
+                new byte[] { 0, 42, 0, 3 },
+                restored.ByteBuffer!.GetBytes(0, 4).ToArray());
+
+            restorer.PersistShutdownSession(liveTabs, restored);
+
+            Assert.False(File.Exists(originalSnapshot));
+            await restored.SaveCommand.ExecuteAsync(null);
+
+            Assert.Equal(new byte[] { 0, 42, 0, 3 }, await File.ReadAllBytesAsync(sourcePath));
+            Assert.False(restored.IsModified);
+            restorer.Dispose();
+            restored.Dispose();
+            Directory.Delete(workspace, recursive: true);
+        }
+
+        [Fact]
+        public async Task ShutdownSession_CleanUntitledRemainsCleanAndFailedEntryCarriesForward()
+        {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var snapshotRoot = Path.Combine(workspace, "snapshots");
+            var validDirectory = Path.Combine(snapshotRoot, "valid-generation");
+            Directory.CreateDirectory(validDirectory);
+            await File.WriteAllTextAsync(
+                Path.Combine(validDirectory, "tab-valid.txt"),
+                "clean draft");
+            var unresolved = new SessionFile
+            {
+                FilePath = @"C:\missing.txt",
+                FileName = "missing.txt",
+                TabIdentity = "missing",
+                IsModified = true,
+                SnapshotGeneration = "missing-generation",
+                SnapshotFile = "tab-missing.txt"
+            };
+            var valid = new SessionFile
+            {
+                FilePath = "Untitled-1",
+                FileName = "Untitled-1",
+                TabIdentity = "valid",
+                IsUntitled = true,
+                IsModified = false,
+                IsActive = true,
+                SnapshotGeneration = "valid-generation",
+                SnapshotFile = "tab-valid.txt"
+            };
+            var store = new TestShutdownSessionStore(
+                new ShutdownSessionState(new[] { unresolved, valid }, 1));
+            var fileSystem = new FileSystemService();
+            var restored = new EditorTabViewModel(
+                _fileService.Object,
+                fileSystem,
+                _dialogService.Object);
+            var factory = new Mock<IEditorTabFactory>();
+            factory.Setup(item => item.Create()).Returns(restored);
+            var generations = new Queue<string>(new[] { "next-generation" });
+            var sut = new DocumentSessionCoordinator(
+                _settingsService.Object,
+                fileSystem,
+                factory.Object,
+                store,
+                () => Guid.NewGuid().ToString("N"),
+                null,
+                generations.Dequeue,
+                snapshotRoot);
+
+            using var restoredSession = await sut.RestoreShutdownSessionAsync();
+            var liveTabs = new List<EditorTabViewModel>();
+            var adoption = sut.AdoptRestoredTabs(
+                restoredSession,
+                liveTabs,
+                liveTabs.Add);
+
+            Assert.Same(restored, adoption.SelectedTab);
+            Assert.Equal("clean draft", restored.Content);
+            Assert.False(restored.IsModified);
+
+            sut.PersistShutdownSession(liveTabs, restored);
+
+            Assert.Equal(2, store.Current.Files.Count);
+            Assert.Contains(
+                store.Current.Files,
+                file => file.TabIdentity == "missing" &&
+                    file.SnapshotGeneration == "missing-generation");
+            var republished = Assert.Single(
+                store.Current.Files,
+                file => file.TabIdentity == "valid");
+            Assert.False(republished.IsModified);
+            Assert.True(republished.IsActive);
+            restored.Dispose();
+            Directory.Delete(workspace, recursive: true);
+    }
+
+    [Fact]
+    public void ShutdownSession_PublicationFailurePreservesPreviousAndRemovesPrivateGeneration()
+    {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var snapshotRoot = Path.Combine(workspace, "snapshots");
+            var oldDirectory = Path.Combine(snapshotRoot, "old-generation");
+            Directory.CreateDirectory(oldDirectory);
+            var oldSnapshot = Path.Combine(oldDirectory, "tab-old.txt");
+            File.WriteAllText(oldSnapshot, "last good");
+            var previous = new SessionFile
+            {
+                FilePath = "Untitled-old",
+                FileName = "Untitled-old",
+                TabIdentity = "old",
+                IsUntitled = true,
+                IsModified = true,
+                SnapshotGeneration = "old-generation",
+                SnapshotFile = "tab-old.txt",
+                SnapshotGenerationFiles = new List<string> { "tab-old.txt" }
+            };
+            var store = new TestShutdownSessionStore(
+                new ShutdownSessionState(new[] { previous }, 0))
+            {
+                PublicationFailure = new IOException("settings unavailable")
+            };
+            var fileSystem = new FileSystemService();
+            var tab = new EditorTabViewModel(
+                _fileService.Object,
+                fileSystem,
+                _dialogService.Object)
+            {
+                FileName = "Untitled-new"
+            };
+            tab.SetContentBaseline("new draft", isModified: true);
+            var factory = new Mock<IEditorTabFactory>();
+            var sut = new DocumentSessionCoordinator(
+                _settingsService.Object,
+                fileSystem,
+                factory.Object,
+                store,
+                () => Guid.NewGuid().ToString("N"),
+                null,
+                () => "new-generation",
+                snapshotRoot);
+
+            Assert.Throws<IOException>(() =>
+                sut.PersistShutdownSession(new[] { tab }, tab));
+
+            Assert.True(File.Exists(oldSnapshot));
+            Assert.False(Directory.Exists(
+                Path.Combine(snapshotRoot, "new-generation")));
+            Assert.Equal("old-generation", Assert.Single(store.Current.Files).SnapshotGeneration);
+            tab.Dispose();
+            Directory.Delete(workspace, recursive: true);
+    }
+
+    [Fact]
+    public async Task ShutdownSession_ConcurrentPublishersKeepFinalReferencedGeneration()
+    {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var appData = Path.Combine(workspace, "settings");
+            var snapshotRoot = Path.Combine(workspace, "snapshots");
+            Directory.CreateDirectory(appData);
+            var fileSystem = new FileSystemService();
+            var firstStore = new SettingsService(fileSystem, appData);
+            var secondStore = new SettingsService(fileSystem, appData);
+            var firstTab = new EditorTabViewModel(
+                _fileService.Object,
+                fileSystem,
+                _dialogService.Object)
+            {
+                FileName = "Untitled-first"
+            };
+            firstTab.SetContentBaseline("first", isModified: true);
+            var secondTab = new EditorTabViewModel(
+                _fileService.Object,
+                fileSystem,
+                _dialogService.Object)
+            {
+                FileName = "Untitled-second"
+            };
+            secondTab.SetContentBaseline("second", isModified: true);
+            var factory = new Mock<IEditorTabFactory>();
+            var firstCoordinator = new DocumentSessionCoordinator(
+                firstStore,
+                fileSystem,
+                factory.Object,
+                firstStore,
+                () => Guid.NewGuid().ToString("N"),
+                null,
+                () => "first-generation",
+                snapshotRoot);
+            var secondCoordinator = new DocumentSessionCoordinator(
+                secondStore,
+                fileSystem,
+                factory.Object,
+                secondStore,
+                () => Guid.NewGuid().ToString("N"),
+                null,
+                () => "second-generation",
+                snapshotRoot);
+
+            await Task.WhenAll(
+                Task.Run(() =>
+                    firstCoordinator.PersistShutdownSession(
+                        new[] { firstTab },
+                        firstTab)),
+                Task.Run(() =>
+                    secondCoordinator.PersistShutdownSession(
+                        new[] { secondTab },
+                        secondTab)));
+
+            var finalSession = new SettingsService(
+                fileSystem,
+                appData).ReadShutdownSession();
+            Assert.Equal(2, finalSession.Files.Count);
+            foreach (var finalFile in finalSession.Files)
+            {
+                var finalPath = Path.Combine(
+                    snapshotRoot,
+                    finalFile.SnapshotGeneration!,
+                    finalFile.SnapshotFile!);
+                Assert.True(File.Exists(finalPath));
+                Assert.Equal(
+                    finalFile.FileName == "Untitled-first" ? "first" : "second",
+                    File.ReadAllText(finalPath));
+            }
+            firstTab.Dispose();
+            secondTab.Dispose();
+            Directory.Delete(workspace, recursive: true);
+    }
+
+    [Fact]
+    public async Task ShutdownSession_GenerationLeaseDefersRetirementUntilAllRestorersRelease()
+    {
+            var workspace = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            var appData = Path.Combine(workspace, "settings");
+            var snapshotRoot = Path.Combine(workspace, "snapshots");
+            Directory.CreateDirectory(appData);
+            var fileSystem = new FileSystemService();
+            var initialStore = new SettingsService(fileSystem, appData);
+            var original = new EditorTabViewModel(
+                _fileService.Object,
+                fileSystem,
+                _dialogService.Object)
+            {
+                FileName = "Untitled-1"
+            };
+            original.SetContentBaseline("shared recovery", isModified: true);
+            var emptyFactory = new Mock<IEditorTabFactory>();
+            var initialCoordinator = new DocumentSessionCoordinator(
+                initialStore,
+                fileSystem,
+                emptyFactory.Object,
+                initialStore,
+                () => Guid.NewGuid().ToString("N"),
+                null,
+                () => "shared-generation",
+                snapshotRoot,
+                () => "original-owner");
+            initialCoordinator.PersistShutdownSession(new[] { original }, original);
+            var sharedSnapshot = Path.Combine(
+                snapshotRoot,
+                "shared-generation",
+                $"tab-{original.AutoSaveIdentity}.txt");
+
+            var firstStore = new SettingsService(fileSystem, appData);
+            var firstTab = new EditorTabViewModel(
+                _fileService.Object,
+                fileSystem,
+                _dialogService.Object);
+            var firstFactory = new Mock<IEditorTabFactory>();
+            firstFactory.Setup(factory => factory.Create()).Returns(firstTab);
+            var firstCoordinator = new DocumentSessionCoordinator(
+                firstStore,
+                fileSystem,
+                firstFactory.Object,
+                firstStore,
+                () => Guid.NewGuid().ToString("N"),
+                null,
+                () => "first-generation",
+                snapshotRoot,
+                () => "first-owner");
+            var secondStore = new SettingsService(fileSystem, appData);
+            var secondTab = new EditorTabViewModel(
+                _fileService.Object,
+                fileSystem,
+                _dialogService.Object);
+            var secondFactory = new Mock<IEditorTabFactory>();
+            secondFactory.Setup(factory => factory.Create()).Returns(secondTab);
+            var secondCoordinator = new DocumentSessionCoordinator(
+                secondStore,
+                fileSystem,
+                secondFactory.Object,
+                secondStore,
+                () => Guid.NewGuid().ToString("N"),
+                null,
+                () => "second-generation",
+                snapshotRoot,
+                () => "second-owner");
+
+            using var firstRestore = await firstCoordinator.RestoreShutdownSessionAsync();
+            using var secondRestore = await secondCoordinator.RestoreShutdownSessionAsync();
+            var firstLive = new List<EditorTabViewModel>();
+            var secondLive = new List<EditorTabViewModel>();
+            firstCoordinator.AdoptRestoredTabs(firstRestore, firstLive, firstLive.Add);
+            secondCoordinator.AdoptRestoredTabs(secondRestore, secondLive, secondLive.Add);
+
+            firstCoordinator.PersistShutdownSession(firstLive, firstTab);
+
+            Assert.True(File.Exists(sharedSnapshot));
+
+            secondCoordinator.PersistShutdownSession(secondLive, secondTab);
+
+            Assert.False(File.Exists(sharedSnapshot));
+            Assert.Equal(
+                2,
+                new SettingsService(fileSystem, appData)
+                    .ReadShutdownSession()
+                    .Files
+                    .Count);
+            original.Dispose();
+            firstTab.Dispose();
+            secondTab.Dispose();
+            Directory.Delete(workspace, recursive: true);
     }
 
     [Fact]
@@ -859,4 +1420,38 @@ public class DocumentSessionCoordinatorTests
             FileName = fileName,
             FilePath = filePath
         };
+
+    private sealed class TestShutdownSessionStore : IShutdownSessionStore
+    {
+        public TestShutdownSessionStore(ShutdownSessionState? initial = null)
+        {
+            Current = initial ?? new ShutdownSessionState(
+                Array.Empty<SessionFile>(),
+                0);
+        }
+
+        public ShutdownSessionState Current { get; private set; }
+
+        public Exception? PublicationFailure { get; init; }
+
+        public ShutdownSessionState ReadShutdownSession(
+            Action<ShutdownSessionState>? whileLocked = null)
+        {
+            whileLocked?.Invoke(Current);
+            return Current;
+        }
+
+        public ShutdownSessionPublication PublishShutdownSession(
+            ShutdownSessionState session,
+            Action<ShutdownSessionPublication>? whileLocked = null)
+        {
+            if (PublicationFailure != null)
+                throw PublicationFailure;
+            var previous = Current;
+            Current = session;
+            var publication = new ShutdownSessionPublication(previous, session);
+            whileLocked?.Invoke(publication);
+            return publication;
+        }
+    }
 }

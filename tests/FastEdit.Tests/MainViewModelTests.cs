@@ -1198,6 +1198,51 @@ public class MainViewModelTests
     }
 
     [Fact]
+    public async Task RestoreSession_PartialFailureThenSaveCarriesUnresolvedEntryForward()
+    {
+        var unresolved = new SessionFile
+        {
+            FilePath = @"C:\missing.txt",
+            FileName = "missing.txt",
+            TabIdentity = "missing",
+            SnapshotOwner = "previous-owner",
+            IsModified = true,
+            SnapshotGeneration = "missing-generation",
+            SnapshotFile = "tab-missing.txt"
+        };
+        var restoredEntry = new SessionFile
+        {
+            FilePath = "Untitled-1",
+            FileName = "Untitled-1",
+            TabIdentity = "restored",
+            IsUntitled = true,
+            Content = "draft",
+            IsActive = true
+        };
+        _settingsService.Setup(service => service.OpenFiles)
+            .Returns(new List<SessionFile> { unresolved, restoredEntry });
+        _settingsService.Setup(service => service.ActiveTabIndex).Returns(1);
+        var restoredTab = CreateMockTab("Untitled-1");
+        _tabFactory.Setup(factory => factory.CreateUntitled("draft"))
+            .Returns(restoredTab);
+
+        await _sut.RestoreSessionAsync();
+        _sut.SaveSession();
+
+        Assert.Same(restoredTab, Assert.Single(_sut.Tabs));
+        Assert.Same(restoredTab, _sut.SelectedTab);
+        _settingsService.VerifySet(service => service.OpenFiles =
+            It.Is<List<SessionFile>>(files =>
+                files.Count == 2 &&
+                files.Any(file =>
+                    file.TabIdentity == "missing" &&
+                    file.SnapshotGeneration == "missing-generation") &&
+                files.Any(file =>
+                    file.TabIdentity == restoredTab.AutoSaveIdentity &&
+                    file.Content == null)));
+    }
+
+    [Fact]
     public async Task RestoreSession_LoadFailure_LogsWarningAndSkipsTab()
     {
         using var trace = new TraceCapture();

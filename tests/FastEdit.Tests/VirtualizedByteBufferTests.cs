@@ -61,6 +61,21 @@ public class VirtualizedByteBufferTests : IDisposable
     }
 
     [Fact]
+    public void WriteSnapshot_IncludesUncachedModifiedBytesWithoutChangingSource()
+    {
+        var path = CreateTempFile(new byte[] { 0, 1, 2, 3 });
+        using var buffer = new VirtualizedByteBuffer(path);
+        buffer.SetByte(1, 42);
+        using var snapshot = new MemoryStream();
+
+        buffer.WriteSnapshot(snapshot);
+
+        Assert.Equal(new byte[] { 0, 42, 2, 3 }, snapshot.ToArray());
+        Assert.Equal(new byte[] { 0, 1, 2, 3 }, File.ReadAllBytes(path));
+        Assert.True(buffer.HasModifications);
+    }
+
+    [Fact]
     public void HasModifications_Tracks_Changes()
     {
         var path = CreateTempFile(new byte[] { 0x00 });

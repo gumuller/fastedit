@@ -17,10 +17,12 @@ public interface IFileSystemService
     void WriteAllText(string path, string content);
     void WriteAllText(string path, string content, Encoding encoding);
     void WriteAllTextAtomic(string path, string content);
+    void WriteStreamAtomic(string path, Action<Stream> write);
     void WriteAllBytes(string path, byte[] bytes);
     void CopyFile(string source, string destination, bool overwrite = false);
     void MoveFile(string source, string destination, bool overwrite = false);
     void DeleteFile(string path);
+    void DeleteDirectory(string path, bool recursive = false);
     void CreateDirectory(string path);
     string GetTempPath();
     string CombinePath(params string[] paths);
@@ -35,5 +37,6 @@ public interface IFileSystemService
     IEnumerable<string> EnumerateDirectories(string path);
     Stream OpenRead(string path);
     Stream OpenWrite(string path);
+    Stream OpenFile(string path, FileMode mode, FileAccess access, FileShare share);
     IEnumerable<string> ReadLines(string path);
 }

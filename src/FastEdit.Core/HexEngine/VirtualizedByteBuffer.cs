@@ -107,6 +107,32 @@ public class VirtualizedByteBuffer : IDisposable
             return _modifications.ContainsKey(offset);
     }
 
+    public void WriteSnapshot(Stream destination)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        lock (_modificationsLock)
+        {
+            const int chunkSize = 64 * 1024;
+            var modifications = _modifications.OrderBy(item => item.Key).ToArray();
+            var modificationIndex = 0;
+            for (long offset = 0; offset < _fileLength; offset += chunkSize)
+            {
+                var count = (int)Math.Min(chunkSize, _fileLength - offset);
+                var chunk = GetBytes(offset, count).ToArray();
+                while (modificationIndex < modifications.Length &&
+                       modifications[modificationIndex].Key < offset + count)
+                {
+                    var modification = modifications[modificationIndex++];
+                    chunk[modification.Key - offset] = modification.Value;
+                }
+
+                destination.Write(chunk);
+            }
+        }
+    }
+
     public void Save()
     {
         KeyValuePair<long, byte>[] modifications;
