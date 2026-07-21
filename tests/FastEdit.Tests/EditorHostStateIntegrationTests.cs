@@ -1,7 +1,9 @@
 using System.IO;
 using System.Threading;
 using System.Windows;
+using System.Windows.Input;
 using System.Windows.Threading;
+using FastEdit.Infrastructure;
 using FastEdit.Services;
 using FastEdit.Services.Interfaces;
 using FastEdit.ViewModels;
@@ -180,6 +182,86 @@ public class EditorHostStateIntegrationTests
                 secondBinary?.Dispose();
                 firstLarge?.Dispose();
                 secondLarge?.Dispose();
+                Directory.Delete(workspace, recursive: true);
+            }
+        });
+    }
+
+    [Fact]
+    public async Task HexNoSelectionRoundTripsAcrossTabSwitchWithoutEnablingEdit()
+    {
+        await RunOnStaThreadAsync(async () =>
+        {
+            EnsureApplicationResources();
+            var workspace = Path.Combine(
+                Path.GetTempPath(),
+                Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(workspace);
+            EditorTabViewModel? first = null;
+            EditorTabViewModel? second = null;
+            try
+            {
+                var fileSystem = new FileSystemService();
+                var firstPath = Path.Combine(workspace, "first.bin");
+                var secondPath = Path.Combine(workspace, "second.bin");
+                File.WriteAllBytes(firstPath, new byte[] { 0x12, 0x34 });
+                File.WriteAllBytes(secondPath, new byte[] { 0x56, 0x78 });
+                first = CreateBinaryTab(
+                    fileSystem,
+                    firstPath,
+                    hexOffset: -1,
+                    scrollOffset: 0,
+                    bytesPerRow: 8);
+                second = CreateBinaryTab(
+                    fileSystem,
+                    secondPath,
+                    hexOffset: long.MaxValue,
+                    scrollOffset: 0,
+                    bytesPerRow: 8);
+                var host = new EditorHost { Width = 500, Height = 300 };
+                host.DataContext = first;
+                host.Measure(new Size(500, 300));
+                host.Arrange(new Rect(0, 0, 500, 300));
+                host.UpdateLayout();
+                await Dispatcher.Yield(DispatcherPriority.Loaded);
+                var hexEditor = Assert.IsType<HexEditorControl>(
+                    host.FindName("HexEditor"));
+
+                Assert.Equal(-1, hexEditor.SelectedOffset);
+                Assert.False(hexEditor.CanEditSelection);
+
+                host.DataContext = second;
+                host.UpdateLayout();
+                await Dispatcher.Yield(DispatcherPriority.Loaded);
+
+                Assert.Equal(-1, first.HexOffset);
+                Assert.Equal(
+                    second.ByteBuffer!.Length - 1,
+                    hexEditor.SelectedOffset);
+
+                host.DataContext = first;
+                host.UpdateLayout();
+                await Dispatcher.Yield(DispatcherPriority.Loaded);
+
+                Assert.Equal(-1, hexEditor.SelectedOffset);
+                Assert.False(hexEditor.CanEditSelection);
+                var decision = HexEditorKeyInputPolicy.Decide(
+                    Key.D1,
+                    ModifierKeys.None,
+                    isSearchVisible: false,
+                    isEditorInputSource: true,
+                    hasSelection: hexEditor.CanEditSelection,
+                    selectedOffset: hexEditor.SelectedOffset,
+                    bufferLength: first.ByteBuffer!.Length,
+                    bytesPerRow: first.BytesPerRow,
+                    visibleRows: 1);
+                Assert.Equal(HexEditorKeyAction.None, decision.Action);
+                Assert.Equal(0x12, first.ByteBuffer.GetByte(0));
+            }
+            finally
+            {
+                first?.Dispose();
+                second?.Dispose();
                 Directory.Delete(workspace, recursive: true);
             }
         });

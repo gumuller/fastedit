@@ -21,6 +21,7 @@ public class SettingsService : ISettingsService, IShutdownSessionStore
     private readonly string _tempDir;
     private readonly string _settingsMutexName;
     private AppSettings _settings;
+    private PendingNonSessionSettings _pendingNonSessionSettings;
 
     public event EventHandler? AutoSaveIntervalChanged;
 
@@ -84,7 +85,11 @@ public class SettingsService : ISettingsService, IShutdownSessionStore
     public List<string> RecentFiles
     {
         get => _settings.RecentFiles;
-        set => _settings.RecentFiles = value;
+        set
+        {
+            _settings.RecentFiles = value;
+            _pendingNonSessionSettings |= PendingNonSessionSettings.RecentFiles;
+        }
     }
 
     public bool WordWrapEnabled
@@ -120,31 +125,51 @@ public class SettingsService : ISettingsService, IShutdownSessionStore
     public double WindowLeft
     {
         get => _settings.WindowLeft;
-        set => _settings.WindowLeft = value;
+        set
+        {
+            _settings.WindowLeft = value;
+            _pendingNonSessionSettings |= PendingNonSessionSettings.WindowLeft;
+        }
     }
 
     public double WindowTop
     {
         get => _settings.WindowTop;
-        set => _settings.WindowTop = value;
+        set
+        {
+            _settings.WindowTop = value;
+            _pendingNonSessionSettings |= PendingNonSessionSettings.WindowTop;
+        }
     }
 
     public double WindowWidth
     {
         get => _settings.WindowWidth;
-        set => _settings.WindowWidth = value;
+        set
+        {
+            _settings.WindowWidth = value;
+            _pendingNonSessionSettings |= PendingNonSessionSettings.WindowWidth;
+        }
     }
 
     public double WindowHeight
     {
         get => _settings.WindowHeight;
-        set => _settings.WindowHeight = value;
+        set
+        {
+            _settings.WindowHeight = value;
+            _pendingNonSessionSettings |= PendingNonSessionSettings.WindowHeight;
+        }
     }
 
     public bool WindowMaximized
     {
         get => _settings.WindowMaximized;
-        set => _settings.WindowMaximized = value;
+        set
+        {
+            _settings.WindowMaximized = value;
+            _pendingNonSessionSettings |= PendingNonSessionSettings.WindowMaximized;
+        }
     }
 
     public bool CheckForUpdatesOnStartup
@@ -249,6 +274,7 @@ public class SettingsService : ISettingsService, IShutdownSessionStore
             }
 
             SaveSettings(_settings);
+            _pendingNonSessionSettings = PendingNonSessionSettings.None;
         });
     }
 
@@ -273,6 +299,7 @@ public class SettingsService : ISettingsService, IShutdownSessionStore
         {
             var latest = LoadSettingsStrict();
             var previous = CreateShutdownSessionState(latest);
+            MergePendingNonSessionSettings(latest);
             var replacedOwners = session.ReplacedOwners?
                 .Where(owner => !string.IsNullOrWhiteSpace(owner))
                 .ToHashSet(StringComparer.Ordinal) ??
@@ -308,6 +335,7 @@ public class SettingsService : ISettingsService, IShutdownSessionStore
                     incomingFiles.Count - 1);
             SaveSettings(latest);
             _settings = latest;
+            _pendingNonSessionSettings = PendingNonSessionSettings.None;
             var publication = new ShutdownSessionPublication(
                 previous,
                 CreateShutdownSessionState(latest));
@@ -330,6 +358,40 @@ public class SettingsService : ISettingsService, IShutdownSessionStore
     {
         var json = JsonSerializer.Serialize(settings, SerializerOptions);
         _fileSystem.WriteAllTextAtomic(_settingsPath, json);
+    }
+
+    private void MergePendingNonSessionSettings(AppSettings latest)
+    {
+        if (_pendingNonSessionSettings.HasFlag(
+                PendingNonSessionSettings.RecentFiles))
+        {
+            latest.RecentFiles = _settings.RecentFiles.ToList();
+        }
+        if (_pendingNonSessionSettings.HasFlag(
+                PendingNonSessionSettings.WindowLeft))
+        {
+            latest.WindowLeft = _settings.WindowLeft;
+        }
+        if (_pendingNonSessionSettings.HasFlag(
+                PendingNonSessionSettings.WindowTop))
+        {
+            latest.WindowTop = _settings.WindowTop;
+        }
+        if (_pendingNonSessionSettings.HasFlag(
+                PendingNonSessionSettings.WindowWidth))
+        {
+            latest.WindowWidth = _settings.WindowWidth;
+        }
+        if (_pendingNonSessionSettings.HasFlag(
+                PendingNonSessionSettings.WindowHeight))
+        {
+            latest.WindowHeight = _settings.WindowHeight;
+        }
+        if (_pendingNonSessionSettings.HasFlag(
+                PendingNonSessionSettings.WindowMaximized))
+        {
+            latest.WindowMaximized = _settings.WindowMaximized;
+        }
     }
 
     private static ShutdownSessionState CreateShutdownSessionState(
@@ -448,5 +510,17 @@ public class SettingsService : ISettingsService, IShutdownSessionStore
         public double WindowWidth { get; set; } = 1100;
         public double WindowHeight { get; set; } = 700;
         public bool WindowMaximized { get; set; }
+    }
+
+    [Flags]
+    private enum PendingNonSessionSettings
+    {
+        None = 0,
+        RecentFiles = 1 << 0,
+        WindowLeft = 1 << 1,
+        WindowTop = 1 << 2,
+        WindowWidth = 1 << 3,
+        WindowHeight = 1 << 4,
+        WindowMaximized = 1 << 5
     }
 }

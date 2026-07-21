@@ -113,6 +113,76 @@ public class SettingsServiceTests
     }
 
     [Fact]
+    public void PublishShutdownSession_MergesPendingGeometryIntoLatestDurableSettings()
+    {
+        var appDataPath = Path.Combine(
+            Path.GetTempPath(),
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(appDataPath);
+        try
+        {
+            var fileSystem = new FileSystemService();
+            var seed = new SettingsService(fileSystem, appDataPath)
+            {
+                WindowLeft = 10,
+                WindowTop = 20,
+                WindowWidth = 800,
+                WindowHeight = 600,
+                WindowMaximized = false
+            };
+            seed.PublishShutdownSession(new ShutdownSessionState(
+                new[]
+                {
+                    new SessionFile
+                    {
+                        FilePath = "old.txt",
+                        TabIdentity = "old",
+                        SnapshotOwner = "old-owner"
+                    }
+                },
+                0));
+
+            var publisher = new SettingsService(fileSystem, appDataPath)
+            {
+                WindowLeft = 110,
+                WindowTop = 120,
+                WindowWidth = 1280,
+                WindowHeight = 720,
+                WindowMaximized = true
+            };
+            var unrelatedWriter = new SettingsService(fileSystem, appDataPath);
+            unrelatedWriter.ThemeName = "Light";
+
+            publisher.PublishShutdownSession(new ShutdownSessionState(
+                new[]
+                {
+                    new SessionFile
+                    {
+                        FilePath = "new.txt",
+                        TabIdentity = "new",
+                        SnapshotOwner = "new-owner"
+                    }
+                },
+                0,
+                new[] { "old-owner" }));
+
+            var reloaded = new SettingsService(fileSystem, appDataPath);
+            var session = reloaded.ReadShutdownSession();
+            Assert.Equal(110, reloaded.WindowLeft);
+            Assert.Equal(120, reloaded.WindowTop);
+            Assert.Equal(1280, reloaded.WindowWidth);
+            Assert.Equal(720, reloaded.WindowHeight);
+            Assert.True(reloaded.WindowMaximized);
+            Assert.Equal("Light", reloaded.ThemeName);
+            Assert.Equal("new", Assert.Single(session.Files).TabIdentity);
+        }
+        finally
+        {
+            Directory.Delete(appDataPath, recursive: true);
+        }
+    }
+
+    [Fact]
     public void LegacyStorePublishesThroughVersionedDurableSessionApi()
     {
         var appDataPath = Path.Combine(

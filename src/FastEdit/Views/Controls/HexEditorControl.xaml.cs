@@ -27,6 +27,10 @@ public partial class HexEditorControl : UserControl
     private long _selectedOffset = -1;
     private bool _editingHighNibble = true;
 
+    internal long SelectedOffset => _selectedOffset;
+    internal bool CanEditSelection =>
+        _viewModel?.ByteBuffer != null && _selectedOffset >= 0;
+
     // Cached brushes for performance
     private Brush? _offsetBrush;
     private Brush? _bytesBrush;
@@ -123,7 +127,8 @@ public partial class HexEditorControl : UserControl
         }
 
         viewModel.BytesPerRow = Math.Max(1, bytesPerRow);
-        _selectedOffset = viewModel.ByteBuffer.Length == 0
+        _selectedOffset =
+            viewModel.ByteBuffer.Length == 0 || selectedOffset < 0
             ? -1
             : Math.Clamp(selectedOffset, 0, viewModel.ByteBuffer.Length - 1);
         UpdateScrollBar();
@@ -218,7 +223,7 @@ public partial class HexEditorControl : UserControl
             Keyboard.Modifiers,
             HexSearchBar.Visibility == Visibility.Visible,
             ReferenceEquals(e.OriginalSource, HexCanvas) || ReferenceEquals(e.OriginalSource, this),
-            buffer != null && _selectedOffset >= 0,
+            CanEditSelection,
             _selectedOffset,
             buffer?.Length ?? 0,
             _viewModel?.BytesPerRow ?? 1,
