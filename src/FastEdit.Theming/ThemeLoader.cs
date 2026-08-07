@@ -55,7 +55,7 @@ public class ThemeLoader
         }
 
         // Sort by preferred display order; unknown themes sort alphabetically at end
-        var orderedNames = new[] { "Light", "Dark", "Nord", "RetroGreen", "SolarizedLight", "SolarizedDark", "Monokai", "Dracula", "OneDark" };
+        var orderedNames = new[] { "Light", "Dark", "Nord", "RetroGreen", "SolarizedLight", "SolarizedDark", "Monokai", "Dracula", "OneDark", "TokyoNight", "TokyoNightStorm", "TokyoNightDay" };
         _themes.Sort((a, b) =>
         {
             var indexA = Array.FindIndex(orderedNames, n => n.Equals(a.Name, StringComparison.OrdinalIgnoreCase));

@@ -143,10 +143,26 @@ public class ThemeLoaderTests
     [InlineData("SolarizedLight")]
     [InlineData("Nord")]
     [InlineData("RetroGreen")]
+    [InlineData("TokyoNight")]
+    [InlineData("TokyoNightStorm")]
+    [InlineData("TokyoNightDay")]
     public void Built_In_Theme_Exists(string themeName)
     {
         var loader = new ThemeLoader();
         Assert.NotNull(loader.GetTheme(themeName));
+    }
+
+    [Theory]
+    [InlineData("TokyoNight", true)]
+    [InlineData("TokyoNightStorm", true)]
+    [InlineData("TokyoNightDay", false)]
+    public void Tokyo_Night_Variants_Have_Expected_Darkness(string themeName, bool expectedIsDark)
+    {
+        var loader = new ThemeLoader();
+        var theme = loader.GetTheme(themeName);
+
+        Assert.NotNull(theme);
+        Assert.Equal(expectedIsDark, theme!.IsDark);
     }
 
     private static void AssertValidHexColor(string? color, string context)

@@ -55,7 +55,7 @@ A fast, lightweight text and hex editor for Windows, built with WPF (.NET 8), Av
 
 ### UI & Theming
 - **Windows 11 Fluent Design** with Mica backdrop
-- **9 Built-in Themes** — Dark, Light, Nord, RetroGreen, Dracula, Monokai, One Dark, Solarized Dark, Solarized Light
+- **12 Built-in Themes** — Dark, Light, Nord, RetroGreen, Dracula, Monokai, One Dark, Solarized Dark, Solarized Light, Tokyo Night, Tokyo Night Storm, Tokyo Night Day
 - **Custom Themes** — drop JSON files in `%AppData%/FastEdit/Themes/`
 - **Document Minimap** — scrollable code overview sidebar
 - **Zoom** — Ctrl+Plus/Minus/0 or Ctrl+Scroll
