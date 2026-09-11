@@ -26,11 +26,15 @@ public partial class MainWindow : FluentWindow
     private readonly MainWindowLifecycleCoordinator _lifecycleCoordinator;
     private CommandRegistry? _commandRegistry;
 
+    // Explorer panel state
+    private const double DefaultExplorerWidth = 250;
+    private const double MinExplorerWidth = 100;
+    private const double MaxExplorerWidth = 400;
+
     // Zen mode state
     private WindowState _preZenWindowState;
     private WindowStyle _preZenWindowStyle;
-    private GridLength _preZenFileTreeWidth;
-    private GridLength _savedExplorerWidth = new GridLength(250);
+    private GridLength _savedExplorerWidth = new GridLength(DefaultExplorerWidth);
 
     public MainViewModel MainViewModel { get; }
     public ISettingsService SettingsService => _settingsService;
@@ -192,6 +196,8 @@ public partial class MainWindow : FluentWindow
             MaxRestoreButton.ToolTip = "Restore Down";
         }
 
+        RestoreExplorerState();
+
         var startupResult = await _lifecycleCoordinator.StartAsync(
             App.StartupFiles,
             App.HasAnotherRunningInstance,
@@ -233,6 +239,23 @@ public partial class MainWindow : FluentWindow
             DialogIcon.Warning);
     }
 
+    private void RestoreExplorerState()
+    {
+        _savedExplorerWidth = new GridLength(
+            Math.Clamp(_settingsService.ExplorerWidth, MinExplorerWidth, MaxExplorerWidth));
+
+        if (_settingsService.ExplorerVisible)
+        {
+            // The panel already renders expanded, so only the width needs applying.
+            FileTreeColumn.Width = _savedExplorerWidth;
+        }
+        else if (_viewModel != null)
+        {
+            // Raises PropertyChanged, which collapses the panel and shows the rail.
+            _viewModel.IsExplorerVisible = false;
+        }
+    }
+
     private void SaveWindowState()
     {
         var settings = _settingsService;
@@ -244,6 +267,24 @@ public partial class MainWindow : FluentWindow
             settings.WindowWidth = Width;
             settings.WindowHeight = Height;
         }
+
+        settings.ExplorerVisible = _viewModel?.IsExplorerVisible ?? true;
+        settings.ExplorerWidth = GetExplorerWidthForPersistence();
+    }
+
+    /// <summary>
+    /// The live column width is only meaningful while the Explorer is expanded; when it is
+    /// hidden (or Zen mode has zeroed the column) the last real width lives in the saved field.
+    /// </summary>
+    private double GetExplorerWidthForPersistence()
+    {
+        var width = _viewModel?.IsExplorerVisible == true && _viewModel?.IsZenMode != true
+            ? FileTreeColumn.Width
+            : _savedExplorerWidth;
+
+        return width.IsAbsolute && width.Value > 0
+            ? Math.Clamp(width.Value, MinExplorerWidth, MaxExplorerWidth)
+            : DefaultExplorerWidth;
     }
 
     private async void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
@@ -533,12 +574,14 @@ public partial class MainWindow : FluentWindow
     {
         _preZenWindowState = WindowState;
         _preZenWindowStyle = WindowStyle;
-        _preZenFileTreeWidth = FileTreeColumn.Width;
+        if (_viewModel?.IsExplorerVisible == true)
+            _savedExplorerWidth = FileTreeColumn.Width;
 
         // Hide chrome
         MenuBar.Visibility = Visibility.Collapsed;
         FileTreePanel.Visibility = Visibility.Collapsed;
         TreeSplitter.Visibility = Visibility.Collapsed;
+        ExplorerRail.Visibility = Visibility.Collapsed;
         MainStatusBar.Visibility = Visibility.Collapsed;
         TitleBarGrid.Visibility = Visibility.Collapsed;
         FileTreeColumn.Width = new GridLength(0);
@@ -558,13 +601,13 @@ public partial class MainWindow : FluentWindow
     {
         // Restore chrome
         MenuBar.Visibility = Visibility.Visible;
-        FileTreePanel.Visibility = Visibility.Visible;
-        TreeSplitter.Visibility = Visibility.Visible;
         MainStatusBar.Visibility = Visibility.Visible;
         TitleBarGrid.Visibility = Visibility.Visible;
-        FileTreeColumn.Width = _preZenFileTreeWidth;
         FileTreeColumn.MinWidth = 0;
-        FileTreeColumn.MaxWidth = 400;
+
+        // Return the Explorer to the state it was in before Zen mode instead of
+        // force-showing it, which would leave it out of sync with IsExplorerVisible.
+        ToggleExplorerPanel(_viewModel?.IsExplorerVisible ?? true);
 
         // Restore window state
         WindowStyle = _preZenWindowStyle;
@@ -577,14 +620,16 @@ public partial class MainWindow : FluentWindow
         {
             FileTreePanel.Visibility = Visibility.Visible;
             TreeSplitter.Visibility = Visibility.Visible;
+            ExplorerRail.Visibility = Visibility.Collapsed;
             FileTreeColumn.Width = _savedExplorerWidth;
-            FileTreeColumn.MaxWidth = 400;
+            FileTreeColumn.MaxWidth = MaxExplorerWidth;
         }
         else
         {
             _savedExplorerWidth = FileTreeColumn.Width;
             FileTreePanel.Visibility = Visibility.Collapsed;
             TreeSplitter.Visibility = Visibility.Collapsed;
+            ExplorerRail.Visibility = Visibility.Visible;
             FileTreeColumn.Width = new GridLength(0);
             FileTreeColumn.MaxWidth = 0;
         }

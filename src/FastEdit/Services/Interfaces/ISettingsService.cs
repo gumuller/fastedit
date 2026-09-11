@@ -24,6 +24,8 @@ public interface ISettingsService
     double WindowWidth { get; set; }
     double WindowHeight { get; set; }
     bool WindowMaximized { get; set; }
+    bool ExplorerVisible { get; set; }
+    double ExplorerWidth { get; set; }
     void Save();
     void AddRecentFile(string filePath);
 }

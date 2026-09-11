@@ -183,6 +183,77 @@ public class SettingsServiceTests
     }
 
     [Fact]
+    public void ExplorerState_DefaultsToVisibleWithDefaultWidth()
+    {
+        var fileSystem = new Mock<IFileSystemService>();
+        var appDataPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+
+        var sut = new SettingsService(fileSystem.Object, appDataPath);
+
+        Assert.True(sut.ExplorerVisible);
+        Assert.Equal(250, sut.ExplorerWidth);
+    }
+
+    [Fact]
+    public void PublishShutdownSession_MergesPendingExplorerStateIntoLatestDurableSettings()
+    {
+        var appDataPath = Path.Combine(
+            Path.GetTempPath(),
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(appDataPath);
+        try
+        {
+            var fileSystem = new FileSystemService();
+            var seed = new SettingsService(fileSystem, appDataPath)
+            {
+                ExplorerVisible = true,
+                ExplorerWidth = 250
+            };
+            seed.PublishShutdownSession(new ShutdownSessionState(
+                new[]
+                {
+                    new SessionFile
+                    {
+                        FilePath = "old.txt",
+                        TabIdentity = "old",
+                        SnapshotOwner = "old-owner"
+                    }
+                },
+                0));
+
+            var publisher = new SettingsService(fileSystem, appDataPath)
+            {
+                ExplorerVisible = false,
+                ExplorerWidth = 180
+            };
+            var unrelatedWriter = new SettingsService(fileSystem, appDataPath);
+            unrelatedWriter.ThemeName = "Light";
+
+            publisher.PublishShutdownSession(new ShutdownSessionState(
+                new[]
+                {
+                    new SessionFile
+                    {
+                        FilePath = "new.txt",
+                        TabIdentity = "new",
+                        SnapshotOwner = "new-owner"
+                    }
+                },
+                0,
+                new[] { "old-owner" }));
+
+            var reloaded = new SettingsService(fileSystem, appDataPath);
+            Assert.False(reloaded.ExplorerVisible);
+            Assert.Equal(180, reloaded.ExplorerWidth);
+            Assert.Equal("Light", reloaded.ThemeName);
+        }
+        finally
+        {
+            Directory.Delete(appDataPath, recursive: true);
+        }
+    }
+
+    [Fact]
     public void LegacyStorePublishesThroughVersionedDurableSessionApi()
     {
         var appDataPath = Path.Combine(
