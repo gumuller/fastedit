@@ -1336,6 +1336,48 @@ public partial class EditorHost : UserControl
             ["Slash"] = syntax.Tag,
             ["Assignment"] = syntax.Operator,
             ["UnknownAttribute"] = syntax.AttributeName,
+
+            // PowerShell
+            ["Variable"] = syntax.Variable,
+            ["Command"] = syntax.Function,
+            ["Operators"] = syntax.Operator,
+
+            // C++
+            ["BooleanConstants"] = syntax.Constant,
+            ["CompoundKeywords"] = syntax.Keyword,
+            ["ControlFlow"] = syntax.Keyword,
+            ["ExceptionHandling"] = syntax.Keyword,
+            ["Friend"] = syntax.Keyword,
+            ["JumpKeywords"] = syntax.Keyword,
+            ["LoopKeywords"] = syntax.Keyword,
+            ["Namespace"] = syntax.Type,
+            ["This"] = syntax.Keyword,
+
+            // Java
+            ["AccessKeywords"] = syntax.Keyword,
+            ["AccessModifiers"] = syntax.Keyword,
+            ["CommentTags"] = syntax.Comment,
+            ["ExceptionHandlingStatements"] = syntax.Keyword,
+            ["IterationStatements"] = syntax.Keyword,
+            ["JavaDocTags"] = syntax.Comment,
+            ["JumpStatements"] = syntax.Keyword,
+            ["Literals"] = syntax.Constant,
+            ["Package"] = syntax.Type,
+            ["SelectionStatements"] = syntax.Keyword,
+            ["ValueTypes"] = syntax.Type,
+            ["Void"] = syntax.Type,
+
+            // CSS
+            ["Selector"] = syntax.Tag,
+            ["Class"] = syntax.Type,
+            ["Property"] = syntax.AttributeName,
+            ["Value"] = syntax.AttributeValue,
+            ["Colon"] = syntax.Operator,
+            ["CurlyBraces"] = syntax.Operator,
+
+            // Shared across languages
+            ["MethodName"] = syntax.Function,   // C++, Java
+            ["ReferenceTypes"] = syntax.Type,   // PowerShell, Java
         };
     }
 

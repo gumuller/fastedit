@@ -172,6 +172,26 @@ public class SettingsService : ISettingsService, IShutdownSessionStore
         }
     }
 
+    public bool ExplorerVisible
+    {
+        get => _settings.ExplorerVisible;
+        set
+        {
+            _settings.ExplorerVisible = value;
+            _pendingNonSessionSettings |= PendingNonSessionSettings.ExplorerVisible;
+        }
+    }
+
+    public double ExplorerWidth
+    {
+        get => _settings.ExplorerWidth;
+        set
+        {
+            _settings.ExplorerWidth = value;
+            _pendingNonSessionSettings |= PendingNonSessionSettings.ExplorerWidth;
+        }
+    }
+
     public bool CheckForUpdatesOnStartup
     {
         get => _settings.CheckForUpdatesOnStartup;
@@ -392,6 +412,16 @@ public class SettingsService : ISettingsService, IShutdownSessionStore
         {
             latest.WindowMaximized = _settings.WindowMaximized;
         }
+        if (_pendingNonSessionSettings.HasFlag(
+                PendingNonSessionSettings.ExplorerVisible))
+        {
+            latest.ExplorerVisible = _settings.ExplorerVisible;
+        }
+        if (_pendingNonSessionSettings.HasFlag(
+                PendingNonSessionSettings.ExplorerWidth))
+        {
+            latest.ExplorerWidth = _settings.ExplorerWidth;
+        }
     }
 
     private static ShutdownSessionState CreateShutdownSessionState(
@@ -510,6 +540,8 @@ public class SettingsService : ISettingsService, IShutdownSessionStore
         public double WindowWidth { get; set; } = 1100;
         public double WindowHeight { get; set; } = 700;
         public bool WindowMaximized { get; set; }
+        public bool ExplorerVisible { get; set; } = true;
+        public double ExplorerWidth { get; set; } = 250;
     }
 
     [Flags]
@@ -521,6 +553,8 @@ public class SettingsService : ISettingsService, IShutdownSessionStore
         WindowTop = 1 << 2,
         WindowWidth = 1 << 3,
         WindowHeight = 1 << 4,
-        WindowMaximized = 1 << 5
+        WindowMaximized = 1 << 5,
+        ExplorerVisible = 1 << 6,
+        ExplorerWidth = 1 << 7
     }
 }

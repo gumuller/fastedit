@@ -328,6 +328,7 @@
         <!-- Main Content -->
         <Grid Grid.Row="2">
             <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="ExplorerRailColumn" Width="Auto"/>
                 <ColumnDefinition x:Name="FileTreeColumn" Width="250" MinWidth="0" MaxWidth="400"/>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
@@ -339,8 +340,35 @@
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
+            <!-- Collapsed Explorer Rail: the only way back once the Explorer is hidden -->
+            <Border x:Name="ExplorerRail" Grid.Column="0"
+                    Visibility="Collapsed"
+                    Background="{DynamicResource PanelBackgroundBrush}"
+                    BorderBrush="{DynamicResource PanelBorderBrush}"
+                    BorderThickness="0,0,1,0">
+                <Button Click="ToggleExplorer_Click"
+                        Background="Transparent" BorderThickness="0"
+                        Foreground="{DynamicResource TabForegroundBrush}"
+                        Padding="6,10" Cursor="Hand" Focusable="False"
+                        VerticalAlignment="Stretch" VerticalContentAlignment="Top"
+                        ToolTip="Show Explorer (Ctrl+B)"
+                        AutomationProperties.Name="Show Explorer">
+                    <StackPanel Orientation="Vertical" VerticalAlignment="Top">
+                        <TextBlock Text="&#xE8B7;"
+                                   FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                   FontSize="14" HorizontalAlignment="Center"/>
+                        <TextBlock Text="EXPLORER" FontSize="10" FontWeight="SemiBold"
+                                   Margin="0,10,0,0" HorizontalAlignment="Center">
+                            <TextBlock.LayoutTransform>
+                                <RotateTransform Angle="90"/>
+                            </TextBlock.LayoutTransform>
+                        </TextBlock>
+                    </StackPanel>
+                </Button>
+            </Border>
+
             <!-- File Tree Panel -->
-            <Border x:Name="FileTreePanel" Grid.Column="0" Background="{DynamicResource PanelBackgroundBrush}">
+            <Border x:Name="FileTreePanel" Grid.Column="1" Background="{DynamicResource PanelBackgroundBrush}">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -407,14 +435,14 @@
             </Border>
 
             <!-- Splitter -->
-            <GridSplitter x:Name="TreeSplitter" Grid.Column="1"
+            <GridSplitter x:Name="TreeSplitter" Grid.Column="2"
                           Width="4"
                           HorizontalAlignment="Center"
                           VerticalAlignment="Stretch"
                           Background="{DynamicResource PanelBorderBrush}"/>
 
             <!-- Editor Area -->
-            <Grid Grid.Column="2">
+            <Grid Grid.Column="3">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition x:Name="SideBySideSplitterCol" Width="0"/>
@@ -511,13 +539,13 @@
 
             <!-- Find In Files Panel -->
             <controls:FindInFilesPanel x:Name="FindInFilesPanel"
-                                       Grid.Row="1" Grid.ColumnSpan="3"
+                                       Grid.Row="1" Grid.ColumnSpan="4"
                                        Height="250"
                                        Visibility="Collapsed"/>
 
             <!-- Line Filter Panel -->
             <controls:FilterPanel x:Name="LineFilterPanel"
-                                  Grid.Row="2" Grid.ColumnSpan="3"
+                                  Grid.Row="2" Grid.ColumnSpan="4"
                                   Height="200"
                                   Visibility="Collapsed"/>
         </Grid>
