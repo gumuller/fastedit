@@ -191,21 +191,43 @@ public class CommandRunnerServiceTests
         await using var sut = new CommandRunnerService();
         await StartReadyShellAsync(sut);
         var output = new StringBuilder();
-        sut.OutputReceived += text => output.Append(text);
+        var stdoutSeen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stderrSeen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        sut.OutputReceived += text =>
+        {
+            output.Append(text);
+            var allOutput = output.ToString();
+            if (allOutput.Contains("O1", StringComparison.Ordinal))
+                stdoutSeen.TrySetResult();
+            if (allOutput.Contains("E1", StringComparison.Ordinal))
+                stderrSeen.TrySetResult();
+        };
+        var stderrReleasePath = Path.Combine(Path.GetTempPath(), $"fastedit-stderr-{Guid.NewGuid():N}.ready");
+        try
+        {
+            var escapedPath = stderrReleasePath.Replace("'", "''");
+            var completed = WaitForNextCompletionAsync(sut);
+            await sut.ExecuteCommandAsync(
+                "[Console]::Out.Write('O1'); [Console]::Out.Flush(); " +
+                $"while (-not (Test-Path -LiteralPath '{escapedPath}')) {{ Start-Sleep -Milliseconds 10 }}; " +
+                "[Console]::Error.WriteLine('E1')");
+            await stdoutSeen.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.False(completed.IsCompleted);
+            File.WriteAllText(stderrReleasePath, string.Empty);
+            await Task.WhenAll(stderrSeen.Task.WaitAsync(TimeSpan.FromSeconds(10)), completed);
 
-        var completed = WaitForNextCompletionAsync(sut);
-        await sut.ExecuteCommandAsync(
-            "[Console]::Out.Write('O1'); [Console]::Out.Flush(); " +
-            "Start-Sleep -Milliseconds 200; [Console]::Error.WriteLine('E1')");
-        await completed;
-
-        var text = output.ToString();
-        Assert.Contains("O1", text);
-        Assert.Contains("E1", text);
-        Assert.True(
-            text.IndexOf("O1", StringComparison.Ordinal) <
-            text.IndexOf("E1", StringComparison.Ordinal),
-            $"Expected stdout before stderr, but received: {text}");
+            var text = output.ToString();
+            Assert.Contains("O1", text);
+            Assert.Contains("E1", text);
+            Assert.True(
+                text.IndexOf("O1", StringComparison.Ordinal) <
+                text.IndexOf("E1", StringComparison.Ordinal),
+                $"Expected stdout before stderr, but received: {text}");
+        }
+        finally
+        {
+            File.Delete(stderrReleasePath);
+        }
     }
 
     [Fact]
@@ -227,14 +249,20 @@ public class CommandRunnerServiceTests
         await using var sut = new CommandRunnerService();
         await StartReadyShellAsync(sut);
         var output = new StringBuilder();
-        sut.OutputReceived += text => output.Append(text);
+        var stderrSeen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        sut.OutputReceived += text =>
+        {
+            output.Append(text);
+            if (output.ToString().Contains("$ProgressPreference", StringComparison.Ordinal))
+                stderrSeen.TrySetResult();
+        };
 
         var completed = WaitForNextCompletionAsync(sut);
         await sut.ExecuteCommandAsync(
             "Write-Output '$OutputEncoding'; " +
             "Write-Output '[Console]::OutputEncoding'; " +
             "[Console]::Error.WriteLine('$ProgressPreference')");
-        await completed;
+        await Task.WhenAll(stderrSeen.Task.WaitAsync(TimeSpan.FromSeconds(10)), completed);
 
         var text = output.ToString();
         Assert.Contains("$OutputEncoding", text);
