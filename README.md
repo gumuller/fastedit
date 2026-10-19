@@ -133,12 +133,21 @@ runs directly on pushes to `master`, without requiring pull requests.
 | **Run workflow** | Full E2E by default; uncheck `full_ui` for smoke only. Produces unsigned packages after checks pass |
 | Push a `vX.Y.Z` tag | Full validation, then signed packaging and GitHub release publication |
 
-Desktop tests use FlaUI/UIA3 against the actual self-contained application on
-GitHub-hosted `windows-2022` (x64) and `windows-11-arm` (ARM64) runners. Smoke tests
+Desktop tests use FlaUI/UIA3 against the actual self-contained x64 application on
+a GitHub-hosted `windows-2022` runner. Smoke tests
 exercise editing/saving, Replace All, and UTF-8 text/hex round trips. Full E2E also
 checks every built-in theme, theme persistence, tabs and unsaved edits after a
 clean restart, and autosave recovery after a process crash. UI tests run serially
-within each desktop; the two architectures run on separate VMs.
+within the desktop. Unit/functional tests and compilation run natively on both
+`windows-2022` (x64) and `windows-11-arm` (ARM64).
+
+Native ARM64 desktop input is not currently gated: the hosted Windows 11 ARM
+image displays a first-logon privacy screen that blocks the app, reproduced in
+our CI and tracked in
+[actions/runner-images#14069](https://github.com/actions/runner-images/issues/14069).
+Enabling ARM64 desktop coverage requires a fixed hosted image or a dedicated
+interactive ARM64 runner; the tests do not dismiss OS consent screens or kill
+unrelated system processes.
 
 Each run uploads functional results/coverage and desktop TRX reports, screenshots,
 UI trees, application logs, and the synthetic test profile. The full theme test
@@ -146,9 +155,10 @@ also captures each theme for visual inspection; these are not pixel-baseline
 visual regression tests. Installer install/uninstall behavior and manual
 usability/high-DPI checks are not covered by this initial suite.
 
-Packaging downloads the binaries that passed desktop testing and uses
-`deploy\build.ps1 -PackageOnly`, rather than recompiling them. Ordinary CI does not
-increment `build.counter` or publish a release.
+Packaging downloads the CI-built applications after both native functional
+suites and x64 desktop testing pass, then uses `deploy\build.ps1 -PackageOnly`
+rather than recompiling them. Ordinary CI does not increment `build.counter` or
+publish a release.
 
 ### Signed Releases
 
@@ -165,9 +175,9 @@ certificate is missing or invalid; it never creates a replacement signing key.
 For a release, increment `build.counter` once, commit and push that change to
 `master`, then push the matching tag (for example, counter `18` means `v1.1.18`).
 The tag must match the tracked version. The release job waits for both
-architectures' functional and full UI checks, signs the tested applications and
-installers, verifies their signatures, uploads all five assets to a draft, and
-only then publishes it.
+architectures' functional checks and the full x64 UI suite, signs the built
+applications and installers, verifies their signatures, uploads all five assets
+to a draft, and only then publishes it.
 
 ## Optional Local Development
 

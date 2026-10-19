@@ -20,6 +20,7 @@ internal sealed class DesktopApp : IDisposable
     private readonly string _executable;
     private readonly string _profile;
     private readonly string _diagnostics;
+    private readonly string _session;
     private Process? _process;
     private Window? _window;
 
@@ -55,21 +56,24 @@ internal sealed class DesktopApp : IDisposable
                     throw new InvalidOperationException("Close existing FastEdit processes before running desktop tests.");
         }
 
-        var session = Guid.NewGuid().ToString("N");
-        WorkingDirectory = Path.Combine(Path.GetTempPath(), "FastEdit.UiTests", session);
+        _session = Guid.NewGuid().ToString("N");
+        WorkingDirectory = Path.Combine(Path.GetTempPath(), "FastEdit.UiTests", _session);
         _diagnostics = Path.Combine(
             Environment.GetEnvironmentVariable("FASTEDIT_UI_ARTIFACTS") ??
             Path.Combine(Environment.CurrentDirectory, "TestResults", "desktop"),
-            session);
+            _session);
         _automation = new UIA3Automation();
         Directory.CreateDirectory(WorkingDirectory);
         Directory.CreateDirectory(_diagnostics);
         Directory.CreateDirectory(_profile);
+        File.WriteAllText(Path.Combine(_profile, ".ui-tests-owner"), _session);
         File.WriteAllText(Path.Combine(_profile, "settings.json"), JsonSerializer.Serialize(new
         {
             CheckForUpdatesOnStartup = false,
             AutoSaveIntervalSeconds = 1,
             LastOpenedFolder = WorkingDirectory,
+            WindowLeft = 10,
+            WindowTop = 10,
             WindowWidth = 1000,
             WindowHeight = 700
         }));
@@ -137,7 +141,14 @@ internal sealed class DesktopApp : IDisposable
         Find("TextEditor");
     }
 
-    public void FocusEditor() => Find("TextEditor").Click();
+    public void FocusEditor()
+    {
+        EnsureRunning();
+        _window!.Focus();
+        Until(() => User32.GetForegroundWindow() == _window.Properties.NativeWindowHandle.Value,
+            "Another window is blocking the test application; keyboard and mouse input will not be sent.");
+        Find("TextEditor").Click();
+    }
 
     public void ReplaceDocument(string text)
     {
@@ -146,7 +157,11 @@ internal sealed class DesktopApp : IDisposable
         Keyboard.Type(text);
     }
 
-    public void Save() => Shortcut(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_S);
+    public void Save()
+    {
+        FocusEditor();
+        Shortcut(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_S);
+    }
 
     public static void Shortcut(params VirtualKeyShort[] keys) => Keyboard.TypeSimultaneously(keys);
 
@@ -252,7 +267,7 @@ internal sealed class DesktopApp : IDisposable
             if (remaining-- <= 0 || depth > 12)
                 return;
             tree.Append(' ', depth * 2).AppendLine(
-                $"{element.ControlType} id={element.AutomationId} name={element.Name} offscreen={element.IsOffscreen}");
+                $"{element.ControlType} id={element.AutomationId} name={element.Name} enabled={element.IsEnabled} offscreen={element.IsOffscreen}");
             foreach (var child in element.FindAllChildren())
                 Dump(child, depth + 1);
         }
@@ -284,6 +299,8 @@ internal sealed class DesktopApp : IDisposable
             }
             _automation.Dispose();
             File.WriteAllLines(Path.Combine(_diagnostics, "application.log"), _log);
+            if (File.ReadAllText(Path.Combine(_profile, ".ui-tests-owner")) != _session)
+                throw new InvalidOperationException("Refusing to clean a profile not owned by this desktop test.");
             foreach (var file in Directory.GetFiles(_profile, "*", SearchOption.AllDirectories))
             {
                 var destination = Path.Combine(_diagnostics, "profile", Path.GetRelativePath(_profile, file));

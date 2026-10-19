@@ -585,7 +585,7 @@
                     <TextBlock Text="{Binding SelectedTab.IndentInfo}" Foreground="{DynamicResource StatusBarForegroundBrush}" Margin="0,0,16,0"/>
                     <Button Content="{Binding SelectedTab.Mode, Converter={StaticResource FileOpenModeToDisplayConverter}}"
                             AutomationProperties.AutomationId="EditorMode"
-                            Command="{Binding SelectedTab.ToggleModeAsyncCommand}"
+                            Command="{Binding SelectedTab.ToggleModeCommand}"
                             Foreground="{DynamicResource StatusBarForegroundBrush}"
                             Background="Transparent"
                             BorderThickness="0"

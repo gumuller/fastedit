@@ -2,6 +2,7 @@ using System.IO;
 using System.Text;
 using System.Threading;
 using FastEdit.Core.LargeFile;
+using Moq;
 
 namespace FastEdit.Tests;
 
@@ -344,16 +345,22 @@ public class LargeFileDocumentTests : IDisposable
     [Fact]
     public async Task BuildIndex_Can_Be_Cancelled()
     {
-        // 50MB of data so cancellation has time to fire.
         var sb = new StringBuilder();
         for (int i = 0; i < 500_000; i++) sb.AppendLine("some line content here");
         var path = CreateTextFile(sb.ToString(), new UTF8Encoding(false), false);
         using var doc = new LargeFileDocument(path);
 
         using var cts = new CancellationTokenSource();
-        cts.CancelAfter(1); // cancel almost immediately
+        var progress = new Mock<IProgress<double>>();
+        progress.Setup(p => p.Report(It.IsAny<double>()))
+            .Callback<double>(value =>
+            {
+                if (value < 1)
+                    cts.Cancel();
+            });
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            async () => await doc.BuildIndexAsync(null, cts.Token));
+            async () => await doc.BuildIndexAsync(progress.Object, cts.Token));
+        Assert.False(doc.HasBuiltIndex);
     }
 
     [Fact]
