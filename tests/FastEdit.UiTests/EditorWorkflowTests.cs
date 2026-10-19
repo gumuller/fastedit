@@ -140,8 +140,7 @@ public sealed class EditorWorkflowTests
         app.Crash();
         Assert.Equal("original on disk", File.ReadAllText(path));
 
-        app.Start();
-        app.AcceptCrashRecovery();
+        app.StartWithRecovery();
         app.WaitForEditor(Path.GetFileName(path));
         app.Save();
         DesktopApp.Until(() => File.ReadAllText(path) == recovered,

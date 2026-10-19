@@ -7,7 +7,6 @@ using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Capturing;
 using FlaUI.Core.Definitions;
 using FlaUI.Core.Input;
-using FlaUI.Core.Patterns;
 using FlaUI.Core.WindowsAPI;
 using FlaUI.UIA3;
 using Xunit.Abstractions;
@@ -89,7 +88,11 @@ internal sealed class DesktopApp : IDisposable
         return path;
     }
 
-    public void Start(params string[] files)
+    public void Start(params string[] files) => Start(recover: false, files);
+
+    public void StartWithRecovery() => Start(recover: true, Array.Empty<string>());
+
+    private void Start(bool recover, string[] files)
     {
         if (_process != null)
             throw new InvalidOperationException("The previous application process has not been stopped.");
@@ -112,6 +115,9 @@ internal sealed class DesktopApp : IDisposable
         _log.Enqueue($"Started process {_process.Id}: {string.Join(" ", files)}");
         _process.BeginOutputReadLine();
         _process.BeginErrorReadLine();
+
+        if (recover)
+            AcceptCrashRecovery();
 
         Until(() =>
         {
@@ -176,12 +182,16 @@ internal sealed class DesktopApp : IDisposable
     public MenuItem OpenThemeMenu()
     {
         Find("ViewMenu").AsMenuItem().Expand();
-        if (Find("ThemeMenu", requireVisible: false).IsOffscreen)
+        var menu = Find("ThemeMenu", requireVisible: false).AsMenuItem();
+        Until(() =>
         {
-            Find("SubMenuScrollViewer").Patterns.Scroll.Pattern
-                .SetScrollPercent(ScrollPatternConstants.NoScroll, 100);
-        }
-        var menu = Find("ThemeMenu").AsMenuItem();
+            if (!menu.IsOffscreen)
+                return true;
+            var scrollDown = _window!.Popup?.FindFirstDescendant(cf => cf.ByAutomationId("PART_ButtonScrollDown"));
+            Assert.NotNull(scrollDown);
+            scrollDown.AsButton().Invoke();
+            return false;
+        }, "The Theme submenu could not be scrolled into view.");
         menu.Expand();
         return menu;
     }
@@ -193,13 +203,13 @@ internal sealed class DesktopApp : IDisposable
         WaitForName("ThemeStatus", name);
     }
 
-    public void AcceptCrashRecovery()
+    private void AcceptCrashRecovery()
     {
         AutomationElement? dialog = null;
         Until(() =>
         {
             dialog = _automation.GetDesktop().FindFirstDescendant(cf =>
-                cf.ByProcessId(_process!.Id).And(cf.ByName("Crash Recovery")));
+                cf.ByProcessId(_process!.Id).And(cf.ByControlType(ControlType.Window)).And(cf.ByName("Crash Recovery")));
             return dialog != null;
         }, "The crash recovery confirmation did not appear.");
         var yes = dialog!.FindFirstDescendant(cf => cf.ByControlType(ControlType.Button).And(cf.ByName("Yes")));
@@ -268,16 +278,23 @@ internal sealed class DesktopApp : IDisposable
 
         var tree = new StringBuilder();
         var remaining = 500;
-        foreach (var window in _automation.GetDesktop().FindAllChildren(cf => cf.ByProcessId(_process.Id)))
-            Dump(window, 0);
-        File.WriteAllText(Path.Combine(_diagnostics, "ui-tree.txt"), tree.ToString());
+        try
+        {
+            foreach (var window in _automation.GetDesktop().FindAllChildren(cf => cf.ByProcessId(_process.Id)))
+                Dump(window, 0);
+        }
+        finally
+        {
+            File.WriteAllText(Path.Combine(_diagnostics, "ui-tree.txt"), tree.ToString());
+        }
 
         void Dump(AutomationElement element, int depth)
         {
             if (remaining-- <= 0 || depth > 12)
                 return;
+            var id = element.Properties.AutomationId.TryGetValue(out var automationId) ? automationId : "<unsupported>";
             tree.Append(' ', depth * 2).AppendLine(
-                $"{element.ControlType} id={element.AutomationId} name={element.Name} enabled={element.IsEnabled} offscreen={element.IsOffscreen}");
+                $"{element.ControlType} id={id} name={element.Name} enabled={element.IsEnabled} offscreen={element.IsOffscreen}");
             foreach (var child in element.FindAllChildren())
                 Dump(child, depth + 1);
         }
