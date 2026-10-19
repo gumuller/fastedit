@@ -1,4 +1,7 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
+using System.IO;
+using System.Security;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -15,8 +18,10 @@ public partial class SettingsWindow : Wpf.Ui.Controls.FluentWindow
     private readonly ISettingsService _settingsService;
     private readonly IKeyBindingService _keyBindingService;
     private readonly IDialogService _dialogService;
+    private readonly IShellIntegrationService _shellIntegrationService;
     private readonly ObservableCollection<KeyBindingEntry> _shortcutEntries = new();
     private KeyBindingEntry? _recordingEntry;
+    private bool? _initialShellIntegrationEnabled;
 
     public bool ShortcutsChanged { get; private set; }
 
@@ -24,12 +29,14 @@ public partial class SettingsWindow : Wpf.Ui.Controls.FluentWindow
         MainViewModel viewModel,
         ISettingsService settingsService,
         IKeyBindingService keyBindingService,
-        IDialogService dialogService)
+        IDialogService dialogService,
+        IShellIntegrationService shellIntegrationService)
     {
         _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
         _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
         _keyBindingService = keyBindingService ?? throw new ArgumentNullException(nameof(keyBindingService));
         _dialogService = dialogService ?? throw new ArgumentNullException(nameof(dialogService));
+        _shellIntegrationService = shellIntegrationService ?? throw new ArgumentNullException(nameof(shellIntegrationService));
 
         InitializeComponent();
 
@@ -84,6 +91,17 @@ public partial class SettingsWindow : Wpf.Ui.Controls.FluentWindow
         // General
         CheckUpdatesCheck.IsChecked = _settingsService.CheckForUpdatesOnStartup;
         AutoSaveBox.Text = _settingsService.AutoSaveIntervalSeconds.ToString();
+        try
+        {
+            _initialShellIntegrationEnabled = _shellIntegrationService.IsEnabled;
+            ExplorerIntegrationCheck.IsChecked = _initialShellIntegrationEnabled;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SecurityException or InvalidOperationException)
+        {
+            Trace.TraceWarning("Could not read Explorer integration: {0}", ex);
+            ExplorerIntegrationCheck.IsEnabled = false;
+            ExplorerIntegrationHint.Text = $"Explorer integration is unavailable: {ex.Message}";
+        }
     }
 
     private void LoadShortcuts()
@@ -152,6 +170,24 @@ public partial class SettingsWindow : Wpf.Ui.Controls.FluentWindow
 
     private void Save_Click(object sender, RoutedEventArgs e)
     {
+        if (_initialShellIntegrationEnabled is bool initial &&
+            (ExplorerIntegrationCheck.IsChecked == true) != initial)
+        {
+            try
+            {
+                _shellIntegrationService.SetEnabled(ExplorerIntegrationCheck.IsChecked == true);
+                _initialShellIntegrationEnabled = ExplorerIntegrationCheck.IsChecked == true;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SecurityException or InvalidOperationException)
+            {
+                Trace.TraceError("Could not update Explorer integration: {0}", ex);
+                _dialogService.ShowMessage(
+                    $"Could not update the Explorer context menu.\n\n{ex.Message}",
+                    "Explorer Integration", DialogButtons.Ok, DialogIcon.Error);
+                return;
+            }
+        }
+
         // Editor settings
         if (double.TryParse(FontSizeBox.Text, out var fontSize))
         {

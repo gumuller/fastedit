@@ -8,6 +8,18 @@
 !define APP_NAME "FastEdit"
 !define APP_EXEC "FastEdit.exe"
 !define PUBLISHER "FastEdit"
+!define SHELL_KEY "Software\Classes\*\shell\FastEdit"
+
+!macro RemoveOwnedExplorerEntry ROOT
+    ReadRegStr $0 ${ROOT} "${SHELL_KEY}\command" ""
+    StrCmp $0 '"$INSTDIR\${APP_EXEC}" "%1"' remove_shell_${ROOT}
+    StrCmp $0 "" 0 keep_shell_${ROOT}
+    ReadRegStr $0 ${ROOT} "${SHELL_KEY}" "FastEditExecutable"
+    StrCmp $0 "$INSTDIR\${APP_EXEC}" remove_shell_${ROOT} keep_shell_${ROOT}
+    remove_shell_${ROOT}:
+        DeleteRegKey ${ROOT} "${SHELL_KEY}"
+    keep_shell_${ROOT}:
+!macroend
 
 !ifndef VERSION
     !define VERSION "1.0.0"
@@ -83,10 +95,12 @@ Section "Install"
     IntFmt $0 "0x%08X" $0
     WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "EstimatedSize" "$0"
 
-    ; Register file associations (optional — open with FastEdit)
-    WriteRegStr HKCR "*\shell\FastEdit" "" "Open with FastEdit"
-    WriteRegStr HKCR "*\shell\FastEdit" "Icon" "$INSTDIR\fastedit.ico"
-    WriteRegStr HKCR "*\shell\FastEdit\command" "" '"$INSTDIR\${APP_EXEC}" "%1"'
+    WriteRegStr HKLM "${SHELL_KEY}" "" "Edit with FastEdit"
+    WriteRegStr HKLM "${SHELL_KEY}" "Icon" "$INSTDIR\fastedit.ico"
+    WriteRegStr HKLM "${SHELL_KEY}" "MultiSelectModel" "Document"
+    WriteRegStr HKLM "${SHELL_KEY}" "FastEditExecutable" "$INSTDIR\${APP_EXEC}"
+    WriteRegStr HKLM "${SHELL_KEY}\command" "" '"$INSTDIR\${APP_EXEC}" "%1"'
+    System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 SectionEnd
 
 ; ---- Uninstall Section ----
@@ -102,5 +116,7 @@ Section "Uninstall"
 
     ; Remove registry keys
     DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
-    DeleteRegKey HKCR "*\shell\FastEdit"
+    !insertmacro RemoveOwnedExplorerEntry HKCU
+    !insertmacro RemoveOwnedExplorerEntry HKLM
+    System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 SectionEnd

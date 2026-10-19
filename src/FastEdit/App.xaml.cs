@@ -87,6 +87,7 @@ public partial class App : Application
                 services.AddSingleton<IUpdateService, UpdateService>();
                 services.AddSingleton<IGitService, GitService>();
                 services.AddSingleton<IKeyBindingService, KeyBindingService>();
+                services.AddSingleton<IShellIntegrationService, ShellIntegrationService>();
                 services.AddSingleton<ILineFilterService, LineFilterService>();
                 services.AddSingleton<DocumentSessionCoordinator>();
 

@@ -64,6 +64,7 @@ A fast, lightweight text and hex editor for Windows, built with WPF (.NET 8), Av
 
 ### File Management
 - **Drag & Drop** files and folders
+- **Explorer Integration** — optional per-user **Edit with FastEdit** command, including portable builds
 - **Recent Files** menu (last 10)
 - **Save As** (Ctrl+Shift+S)
 - **Print** (Ctrl+P) — print current document
@@ -99,6 +100,24 @@ A fast, lightweight text and hex editor for Windows, built with WPF (.NET 8), Av
 | Print | Ctrl+P |
 | Select Next Occurrence | Ctrl+D |
 | Select All Occurrences | Ctrl+Shift+L |
+
+## File Explorer Context Menu
+
+Open **File → Settings → Integration**, check **Edit with FastEdit (this copy)**,
+and save. Right-click a file and choose **Edit with FastEdit**. On Windows 11,
+choose **Show more options** first.
+
+The setting applies to your Windows account, needs no administrator privileges,
+and does not change default file associations. Uncheck it and save to hide the
+entry for your account, including the entry supplied by an installed build.
+Portable copies are supported; after moving one, enable integration again from
+its new location. Merely opening or saving unrelated settings does not register
+or disable a different copy.
+
+The installer supplies the classic entry for all users. Uninstall removes its
+machine-wide registration and the current account's matching per-user override,
+without deleting a command that points at another portable copy. Other Windows
+accounts can disable their own overrides through Settings before uninstalling.
 
 ## Installing (Signed Builds)
 
@@ -137,7 +156,9 @@ Desktop tests use FlaUI/UIA3 against the actual self-contained x64 application o
 a GitHub-hosted `windows-2022` runner. Smoke tests
 exercise editing/saving, Replace All, and UTF-8 text/hex round trips. Full E2E also
 checks every built-in theme, theme persistence, tabs and unsaved edits after a
-clean restart, and autosave recovery after a process crash. UI tests run serially
+clean restart, autosave recovery after a process crash, and enabling, invoking,
+and disabling the Explorer file verb through Settings. The application and test
+files use paths with spaces to exercise shell argument quoting. UI tests run serially
 within the desktop. Unit/functional tests and compilation run natively on both
 `windows-2022` (x64) and `windows-11-arm` (ARM64).
 
@@ -152,8 +173,9 @@ unrelated system processes.
 Each run uploads functional results/coverage and desktop TRX reports, screenshots,
 UI trees, application logs, and the synthetic test profile. The full theme test
 also captures each theme for visual inspection; these are not pixel-baseline
-visual regression tests. Installer install/uninstall behavior and manual
-usability/high-DPI checks are not covered by this initial suite.
+visual regression tests. Packaging also exercises the x64 installer's Explorer
+registration and uninstall ownership in a disposable VM. Other installer UI,
+native ARM64 installation, and manual usability/high-DPI checks are not covered.
 
 Packaging downloads the CI-built applications after both native functional
 suites and x64 desktop testing pass, then uses `deploy\build.ps1 -PackageOnly`

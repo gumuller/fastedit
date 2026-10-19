@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
         Title="Settings"
+        AutomationProperties.AutomationId="SettingsWindow"
         Width="520"
         Height="680"
         WindowStartupLocation="CenterOwner"
@@ -214,6 +215,22 @@
                 </ScrollViewer>
             </TabItem>
 
+            <TabItem Header="Integration" x:Name="IntegrationTab">
+                <StackPanel Margin="16">
+                    <TextBlock Text="File Explorer" FontWeight="SemiBold" FontSize="16"
+                               Margin="0,0,0,12" Foreground="{DynamicResource WindowForegroundBrush}"/>
+                    <CheckBox x:Name="ExplorerIntegrationCheck" Margin="0,4"
+                              Foreground="{DynamicResource WindowForegroundBrush}"
+                              Content="Edit with FastEdit (this copy)"/>
+                    <TextBlock x:Name="ExplorerIntegrationHint" Margin="0,8,0,0"
+                               Foreground="{DynamicResource WindowForegroundBrush}" TextWrapping="Wrap"
+                               Text="Adds a file right-click command for your Windows account. On Windows 11, choose Show more options. Your default apps are not changed."/>
+                    <TextBlock Margin="0,12,0,0" Foreground="{DynamicResource WindowForegroundBrush}"
+                               TextWrapping="Wrap"
+                               Text="Works with installed and portable builds. If you move a portable copy, enable integration again from its new location."/>
+                </StackPanel>
+            </TabItem>
+
             <!-- Keyboard Shortcuts -->
             <TabItem Header="Keyboard Shortcuts">
                 <Grid Margin="4">
@@ -250,7 +267,8 @@
 
         <!-- Bottom buttons -->
         <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-            <Button Content="Save" Click="Save_Click" IsDefault="True" Padding="24,8" Margin="0,0,8,0"/>
+            <Button Content="Save" Click="Save_Click" IsDefault="True" Padding="24,8" Margin="0,0,8,0"
+                    AutomationProperties.AutomationId="SaveSettings"/>
             <Button Content="Cancel" Click="Cancel_Click" IsCancel="True" Padding="24,8"/>
         </StackPanel>
     </Grid>

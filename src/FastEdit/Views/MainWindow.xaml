@@ -179,7 +179,7 @@
             <Menu.Resources>
                 <Style TargetType="{x:Type Separator}" BasedOn="{StaticResource FastEditMenuSeparatorStyle}"/>
             </Menu.Resources>
-            <MenuItem Header="_File">
+            <MenuItem Header="_File" AutomationProperties.AutomationId="FileMenu">
                 <MenuItem Header="_New" Command="{Binding NewFileCommand}" InputGestureText="Ctrl+N"/>
                 <MenuItem Header="_Open..." Command="{Binding OpenFileCommand}" InputGestureText="Ctrl+O"/>
                 <MenuItem Header="Open _Folder..." Command="{Binding OpenFolderCommand}"/>
@@ -207,7 +207,8 @@
                 <Separator/>
                 <MenuItem Header="_Close Tab" Command="{Binding CloseTabCommand}" InputGestureText="Ctrl+W"/>
                 <Separator/>
-                <MenuItem Header="_Settings..." Click="Settings_Click" InputGestureText="Ctrl+,"/>
+                <MenuItem Header="_Settings..." Click="Settings_Click" InputGestureText="Ctrl+,"
+                          AutomationProperties.AutomationId="OpenSettings"/>
                 <Separator/>
                 <MenuItem Header="E_xit" Click="Exit_Click"/>
             </MenuItem>

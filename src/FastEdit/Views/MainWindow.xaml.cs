@@ -20,6 +20,7 @@ public partial class MainWindow : FluentWindow
     private FindInFilesViewModel? _findInFilesVm;
     private readonly ISettingsService _settingsService;
     private readonly IKeyBindingService _keyBindingService;
+    private readonly IShellIntegrationService _shellIntegrationService;
     private readonly IAutoSaveService _autoSaveService;
     private readonly IDialogService _dialogService;
     private readonly IFileSystemService _fileSystemService;
@@ -50,6 +51,7 @@ public partial class MainWindow : FluentWindow
         FindInFilesViewModel findInFilesVm,
         ISettingsService settingsService,
         IKeyBindingService keyBindingService,
+        IShellIntegrationService shellIntegrationService,
         IAutoSaveService autoSaveService,
         IDialogService dialogService,
         IFileSystemService fileSystemService,
@@ -63,6 +65,7 @@ public partial class MainWindow : FluentWindow
         _findInFilesVm = findInFilesVm ?? throw new ArgumentNullException(nameof(findInFilesVm));
         _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
         _keyBindingService = keyBindingService ?? throw new ArgumentNullException(nameof(keyBindingService));
+        _shellIntegrationService = shellIntegrationService ?? throw new ArgumentNullException(nameof(shellIntegrationService));
         _autoSaveService = autoSaveService ?? throw new ArgumentNullException(nameof(autoSaveService));
         _dialogService = dialogService ?? throw new ArgumentNullException(nameof(dialogService));
         _fileSystemService = fileSystemService ?? throw new ArgumentNullException(nameof(fileSystemService));
@@ -383,7 +386,8 @@ public partial class MainWindow : FluentWindow
     private void ShowSettingsDialog()
     {
         if (_viewModel == null) return;
-        var dialog = new SettingsWindow(_viewModel, _settingsService, _keyBindingService, _dialogService)
+        var dialog = new SettingsWindow(
+            _viewModel, _settingsService, _keyBindingService, _dialogService, _shellIntegrationService)
         {
             Owner = this
         };

@@ -3,6 +3,7 @@ using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
 using FlaUI.Core.Input;
 using FlaUI.Core.WindowsAPI;
+using Microsoft.Win32;
 using Xunit.Abstractions;
 
 [assembly: CollectionBehavior(DisableTestParallelization = true)]
@@ -123,6 +124,64 @@ public sealed class EditorWorkflowTests
         app.Save();
         DesktopApp.Until(() => File.ReadAllText(second) == "unsaved text restored after shutdown",
             "The restarted application did not restore and save the unsaved document.");
+    }
+
+    [Fact]
+    [Trait("Category", "E2E")]
+    public void Explorer_Menu_Can_Be_Enabled_Used_And_Disabled_From_Settings()
+    {
+        using var app = new DesktopApp(_output);
+        const string verbPath = @"Software\Classes\*\shell\FastEdit";
+        using (var existingUser = Registry.CurrentUser.OpenSubKey(verbPath))
+            Assert.Null(existingUser);
+        using (var existingMachine = Registry.LocalMachine.OpenSubKey(verbPath))
+            Assert.Null(existingMachine);
+        const string userChoice = @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.txt\UserChoice";
+        var originalDefault = Registry.GetValue(userChoice, "ProgId", null);
+        var path = app.CreateFile("Explorer file & spaces.txt", "opened by the Explorer verb");
+        try
+        {
+            app.Start();
+            app.SetExplorerIntegration(true);
+            using (var command = Registry.CurrentUser.OpenSubKey(verbPath + @"\command"))
+            {
+                Assert.NotNull(command);
+                Assert.Equal($"\"{app.ExecutablePath}\" \"%1\"", command.GetValue(null));
+            }
+            app.Close();
+
+            app.StartFromExplorerVerb(path);
+            app.WaitForEditor(Path.GetFileName(path));
+            app.ReplaceDocument("edited after opening from Explorer");
+            app.Save();
+            DesktopApp.Until(() => File.ReadAllText(path) == "edited after opening from Explorer",
+                "The Explorer verb did not open the selected file for editing.");
+            app.SetExplorerIntegration(false);
+            using (var verb = Registry.CurrentUser.OpenSubKey(verbPath))
+            {
+                Assert.NotNull(verb);
+                Assert.Equal(string.Empty, verb.GetValue("LegacyDisable"));
+            }
+            Assert.Equal(originalDefault, Registry.GetValue(userChoice, "ProgId", null));
+            app.Close();
+        }
+        finally
+        {
+            bool ownsEntry;
+            using (var verb = Registry.CurrentUser.OpenSubKey(verbPath))
+            {
+                ownsEntry = verb != null;
+                if (verb != null)
+                {
+                    Assert.True(string.Equals(
+                        app.ExecutablePath, verb.GetValue("FastEditExecutable") as string,
+                        StringComparison.OrdinalIgnoreCase),
+                        "Refusing to remove an Explorer registration not owned by this test.");
+                }
+            }
+            if (ownsEntry)
+                Registry.CurrentUser.DeleteSubKeyTree(verbPath);
+        }
     }
 
     [Fact]

@@ -26,6 +26,7 @@ internal sealed class DesktopApp : IDisposable
     private Window? _window;
 
     public string WorkingDirectory { get; }
+    public string ExecutablePath => _executable;
     public string AutoSaveDirectory => Path.Combine(_profile, "AutoSave");
 
     public DesktopApp(ITestOutputHelper output)
@@ -119,14 +120,45 @@ internal sealed class DesktopApp : IDisposable
         if (recover)
             AcceptCrashRecovery();
 
+        WaitForMainWindow();
+    }
+
+    public void StartFromExplorerVerb(string file)
+    {
+        if (_process != null)
+            throw new InvalidOperationException("The previous application process has not been stopped.");
+        _process = Process.Start(new ProcessStartInfo(file)
+        {
+            UseShellExecute = true,
+            Verb = "FastEdit"
+        }) ?? throw new InvalidOperationException("The Explorer verb did not start FastEdit.");
+        _log.Enqueue($"Explorer verb started process {_process.Id}: {file}");
+        WaitForMainWindow();
+    }
+
+    private void WaitForMainWindow()
+    {
         Until(() =>
         {
             EnsureRunning();
             _window = _automation.GetDesktop()
-                .FindFirstChild(cf => cf.ByProcessId(_process.Id).And(cf.ByAutomationId("FastEditWindow")))
+                .FindFirstChild(cf => cf.ByProcessId(_process!.Id).And(cf.ByAutomationId("FastEditWindow")))
                 ?.AsWindow();
             return _window != null;
         }, "The FastEdit main window did not appear.");
+    }
+
+    public void SetExplorerIntegration(bool enabled)
+    {
+        Find("FileMenu").AsMenuItem().Expand();
+        Find("OpenSettings").AsMenuItem().Invoke();
+        Find("IntegrationTab").Patterns.SelectionItem.Pattern.Select();
+        var checkbox = Find("ExplorerIntegrationCheck").AsCheckBox();
+        Assert.True(checkbox.IsEnabled, "Explorer integration is unavailable in Settings.");
+        checkbox.IsChecked = enabled;
+        Find("SaveSettings").AsButton().Invoke();
+        Until(() => _window!.FindFirstDescendant(cf => cf.ByAutomationId("SettingsWindow")) == null,
+            "Settings did not close after applying Explorer integration.");
     }
 
     public AutomationElement Find(string automationId, bool requireVisible = true)
