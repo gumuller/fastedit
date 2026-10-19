@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using FlaUI.Core.AutomationElements;
@@ -145,7 +146,7 @@ internal sealed class DesktopApp : IDisposable
     {
         EnsureRunning();
         _window!.Focus();
-        Until(() => User32.GetForegroundWindow() == _window.Properties.NativeWindowHandle.Value,
+        Until(() => GetForegroundWindow() == _window.Properties.NativeWindowHandle.Value,
             "Another window is blocking the test application; keyboard and mouse input will not be sent.");
         Find("TextEditor").Click();
     }
@@ -242,6 +243,9 @@ internal sealed class DesktopApp : IDisposable
         }
         Assert.Fail(failureMessage);
     }
+
+    [DllImport("user32.dll", ExactSpelling = true)]
+    private static extern IntPtr GetForegroundWindow();
 
     private void EnsureRunning()
     {
