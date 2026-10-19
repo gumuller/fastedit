@@ -199,6 +199,7 @@ jobs:
           .\deploy\build.ps1 -Version $version -PackageOnly
 
       - name: Exercise signing without the release private key
+        timeout-minutes: 2
         run: |
           $testExe = Join-Path $env:RUNNER_TEMP 'FastEdit-signing-test.exe'
           $testCert = Join-Path $env:RUNNER_TEMP 'FastEdit-signing-test.cer'
@@ -210,16 +211,19 @@ jobs:
             & pwsh -NoProfile -File .\deploy\sign.ps1 -Files $testExe `
               -CertificateThumbprint $certificate.Thumbprint -ExportCertTo $testCert
             if ($LASTEXITCODE -ne 0) { throw "Signing with the explicit test certificate failed." }
-            Import-Certificate -FilePath $testCert -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
-            Import-Certificate -FilePath $testCert -CertStoreLocation Cert:\CurrentUser\TrustedPublisher | Out-Null
+            Write-Host 'Trusting the disposable certificate on this isolated build VM.'
+            Import-Certificate -FilePath $testCert -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+            Import-Certificate -FilePath $testCert -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
+            Write-Host 'Verifying the test signature.'
             $signature = Get-AuthenticodeSignature -FilePath $testExe
             if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -ne $certificate.Thumbprint) {
               throw "The test signature is invalid or uses the wrong certificate."
             }
+            Write-Host 'The signature is valid; removing the test certificate and key.'
           }
           finally {
             foreach ($store in @('Root', 'TrustedPublisher')) {
-              $path = "Cert:\CurrentUser\$store\$($certificate.Thumbprint)"
+              $path = "Cert:\LocalMachine\$store\$($certificate.Thumbprint)"
               if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path }
             }
             Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -DeleteKey
@@ -316,10 +320,11 @@ jobs:
           -PackageOnly -Sign -CertificateThumbprint '${{ steps.signing.outputs.thumbprint }}'
 
       - name: Verify signatures
+        timeout-minutes: 2
         run: |
           $certificate = '.\deploy\output\FastEdit-SelfSigned.cer'
-          Import-Certificate -FilePath $certificate -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
-          Import-Certificate -FilePath $certificate -CertStoreLocation Cert:\CurrentUser\TrustedPublisher | Out-Null
+          Import-Certificate -FilePath $certificate -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+          Import-Certificate -FilePath $certificate -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
           $files = @(
             '.\deploy\output\publish-x64\FastEdit.exe',
             '.\deploy\output\publish-arm64\FastEdit.exe',

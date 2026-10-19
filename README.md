@@ -160,7 +160,8 @@ suites and x64 desktop testing pass, then uses `deploy\build.ps1 -PackageOnly`
 rather than recompiling them. Ordinary CI does not increment `build.counter` or
 publish a release. It also exercises signing on a disposable copy with a one-day
 test certificate, without accessing the release private key or signing the
-unsigned package artifacts.
+unsigned package artifacts. Test-certificate trust is installed only on the
+isolated hosted VM, and the test certificate and private key are removed afterward.
 
 ### Signed Releases
 
