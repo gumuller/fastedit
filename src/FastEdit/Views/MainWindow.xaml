@@ -9,6 +9,7 @@
         xmlns:infra="clr-namespace:FastEdit.Infrastructure"
         mc:Ignorable="d"
         x:Name="RootWindow"
+        AutomationProperties.AutomationId="FastEditWindow"
         Title="FastEdit"
         Height="700"
         Width="1100"
@@ -112,6 +113,7 @@
                                            Margin="0,0,4,0" VerticalAlignment="Center"
                                            Foreground="{DynamicResource TabForegroundBrush}"/>
                                 <TextBlock Text="{Binding FileName}" Margin="0,0,8,0"
+                                           AutomationProperties.AutomationId="TabTitle"
                                            Foreground="{DynamicResource TabForegroundBrush}"
                                            VerticalAlignment="Center" FontSize="12"/>
                                 <TextBlock Text="●" Visibility="{Binding IsModified, Converter={StaticResource BoolToVisibilityConverter}}"
@@ -285,7 +287,7 @@
                     <MenuItem Header="Windows 1252" Command="{Binding ChangeEncodingCommand}" CommandParameter="windows-1252"/>
                 </MenuItem>
             </MenuItem>
-            <MenuItem Header="_View">
+            <MenuItem Header="_View" AutomationProperties.AutomationId="ViewMenu">
                 <MenuItem Header="_Word Wrap" IsCheckable="True" IsChecked="{Binding IsWordWrapEnabled, Mode=TwoWay}"/>
                 <MenuItem Header="Show _Whitespace" IsCheckable="True" IsChecked="{Binding IsWhitespaceVisible, Mode=TwoWay}"/>
                 <MenuItem Header="Code _Folding" IsCheckable="True" IsChecked="{Binding IsFoldingEnabled, Mode=TwoWay}"/>
@@ -308,10 +310,12 @@
                 <MenuItem Header="Compare _Files..." Command="{Binding CompareFilesCommand}"/>
                 <MenuItem Header="Command _Palette" Command="{Binding CommandPaletteCommand}" InputGestureText="Ctrl+Shift+P"/>
                 <Separator/>
-                <MenuItem Header="_Theme" ItemsSource="{Binding AvailableThemes}">
+                <MenuItem Header="_Theme" ItemsSource="{Binding AvailableThemes}"
+                          AutomationProperties.AutomationId="ThemeMenu">
                     <MenuItem.ItemContainerStyle>
                         <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
                             <Setter Property="Header" Value="{Binding DisplayName}"/>
+                            <Setter Property="AutomationProperties.AutomationId" Value="{Binding Name, StringFormat=Theme.{0}}"/>
                             <Setter Property="Command" Value="{Binding Data.ChangeThemeCommand, Source={StaticResource ViewModelProxy}}"/>
                             <Setter Property="CommandParameter" Value="{Binding Name}"/>
                         </Style>
@@ -565,7 +569,8 @@
         <!-- Status Bar -->
         <StatusBar x:Name="MainStatusBar" Grid.Row="5" Style="{StaticResource EditorStatusBarStyle}">
             <StatusBarItem>
-                <TextBlock Text="{Binding StatusText}" Foreground="{DynamicResource StatusBarForegroundBrush}"/>
+                <TextBlock Text="{Binding StatusText}" Foreground="{DynamicResource StatusBarForegroundBrush}"
+                           AutomationProperties.AutomationId="StatusText"/>
             </StatusBarItem>
             <StatusBarItem HorizontalAlignment="Right">
                 <StackPanel Orientation="Horizontal">
@@ -579,6 +584,7 @@
                     <TextBlock Text="{Binding SelectedTab.Encoding}" Foreground="{DynamicResource StatusBarForegroundBrush}" Margin="0,0,16,0"/>
                     <TextBlock Text="{Binding SelectedTab.IndentInfo}" Foreground="{DynamicResource StatusBarForegroundBrush}" Margin="0,0,16,0"/>
                     <Button Content="{Binding SelectedTab.Mode, Converter={StaticResource FileOpenModeToDisplayConverter}}"
+                            AutomationProperties.AutomationId="EditorMode"
                             Command="{Binding SelectedTab.ToggleModeAsyncCommand}"
                             Foreground="{DynamicResource StatusBarForegroundBrush}"
                             Background="Transparent"
@@ -589,7 +595,8 @@
                             ToolTip="Toggle between Text and Hex mode"
                             Cursor="Hand"
                             Visibility="{Binding SelectedTab, Converter={StaticResource NullToCollapsedConverter}}"/>
-                    <TextBlock Text="{Binding CurrentThemeName}" Foreground="{DynamicResource StatusBarForegroundBrush}"/>
+                    <TextBlock Text="{Binding CurrentThemeName}" Foreground="{DynamicResource StatusBarForegroundBrush}"
+                               AutomationProperties.AutomationId="ThemeStatus"/>
                 </StackPanel>
             </StatusBarItem>
         </StatusBar>

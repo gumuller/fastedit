@@ -14,6 +14,8 @@ param(
 
     [string]$FriendlyName = "FastEdit Code Signing",
 
+    [string]$CertificateThumbprint,
+
     [string]$ExportCertTo,
 
     [string]$TimestampUrl = "http://timestamp.digicert.com"
@@ -34,10 +36,20 @@ if (-not $signtool) {
 Write-Host "Using signtool: $signtool" -ForegroundColor Gray
 
 # ---- Find or create the code-signing certificate ----
-$cert = Get-ChildItem Cert:\CurrentUser\My |
-    Where-Object { $_.Subject -eq $CertSubject -and $_.HasPrivateKey -and $_.NotAfter -gt (Get-Date) } |
-    Sort-Object NotAfter -Descending |
-    Select-Object -First 1
+if ($CertificateThumbprint) {
+    $cert = Get-Item -LiteralPath "Cert:\CurrentUser\My\$CertificateThumbprint"
+    if (-not $cert.HasPrivateKey -or $cert.NotAfter -le (Get-Date) -or
+        $cert.NotBefore -gt (Get-Date) -or
+        $cert.EnhancedKeyUsageList.ObjectId -notcontains "1.3.6.1.5.5.7.3.3") {
+        throw "The selected certificate is not a valid code-signing certificate with a private key."
+    }
+}
+else {
+    $cert = Get-ChildItem Cert:\CurrentUser\My |
+        Where-Object { $_.Subject -eq $CertSubject -and $_.HasPrivateKey -and $_.NotAfter -gt (Get-Date) } |
+        Sort-Object NotAfter -Descending |
+        Select-Object -First 1
+}
 
 if (-not $cert) {
     Write-Host "Creating new self-signed code-signing certificate..." -ForegroundColor Yellow
@@ -79,8 +91,7 @@ if ($ExportCertTo) {
 $failed = 0
 foreach ($file in $Files) {
     if (-not (Test-Path $file)) {
-        Write-Host "  SKIP (not found): $file" -ForegroundColor Yellow
-        continue
+        throw "The file to sign was not found: $file"
     }
 
     Write-Host ""

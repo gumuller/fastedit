@@ -120,7 +120,56 @@ Releases are signed with a **self-signed certificate** (no cost, trusted once). 
 
 Verify the cert thumbprint of any downloaded `.cer` matches the one printed in the [release notes](https://github.com/gumuller/fastedit/releases/latest) before importing.
 
-## Building
+## Automated Builds and Tests
+
+GitHub Actions is the default build and validation path; a local build is not
+required. The [CI workflow](https://github.com/gumuller/fastedit/actions/workflows/ci.yml)
+runs directly on pushes to `master`, without requiring pull requests.
+
+| Trigger | Validation and output |
+|---|---|
+| Push to `master` | Native x64 and ARM64 builds, all unit/functional tests, desktop UI smoke tests, and unsigned installer/portable artifacts |
+| Nightly at 03:00 UTC | Native builds, all unit/functional tests, and the full desktop E2E suite |
+| **Run workflow** | Full E2E by default; uncheck `full_ui` for smoke only. Produces unsigned packages after checks pass |
+| Push a `vX.Y.Z` tag | Full validation, then signed packaging and GitHub release publication |
+
+Desktop tests use FlaUI/UIA3 against the actual self-contained application on
+GitHub-hosted `windows-2022` (x64) and `windows-11-arm` (ARM64) runners. Smoke tests
+exercise editing/saving, Replace All, and UTF-8 text/hex round trips. Full E2E also
+checks every built-in theme, theme persistence, tabs and unsaved edits after a
+clean restart, and autosave recovery after a process crash. UI tests run serially
+within each desktop; the two architectures run on separate VMs.
+
+Each run uploads functional results/coverage and desktop TRX reports, screenshots,
+UI trees, application logs, and the synthetic test profile. The full theme test
+also captures each theme for visual inspection; these are not pixel-baseline
+visual regression tests. Installer install/uninstall behavior and manual
+usability/high-DPI checks are not covered by this initial suite.
+
+Packaging downloads the binaries that passed desktop testing and uses
+`deploy\build.ps1 -PackageOnly`, rather than recompiling them. Ordinary CI does not
+increment `build.counter` or publish a release.
+
+### Signed Releases
+
+Configure the GitHub Actions **release** environment with the existing signing
+certificate as a password-protected PFX using these secrets:
+
+- `FASTEDIT_SIGNING_PFX_BASE64`: the base64-encoded PFX, including its private key.
+- `FASTEDIT_SIGNING_PFX_PASSWORD`: the PFX password.
+
+Configure required reviewers on that environment if release approval is desired.
+Never commit the PFX or its password. The tag workflow fails explicitly if the
+certificate is missing or invalid; it never creates a replacement signing key.
+
+For a release, increment `build.counter` once, commit and push that change to
+`master`, then push the matching tag (for example, counter `18` means `v1.1.18`).
+The tag must match the tracked version. The release job waits for both
+architectures' functional and full UI checks, signs the tested applications and
+installers, verifies their signatures, uploads all five assets to a draft, and
+only then publishes it.
+
+## Optional Local Development
 
 ```bash
 # Clone the repository
@@ -134,7 +183,7 @@ dotnet build --configuration Release
 # Run
 dotnet run --project src/FastEdit
 
-# Run all tests
+# Run unit and functional tests (does not interact with your desktop)
 dotnet test --configuration Release
 ```
 
@@ -148,6 +197,22 @@ file. Release packaging must select a version explicitly:
 # Or package a supplied version without changing build.counter
 .\deploy\build.ps1 -Version 1.2.0
 ```
+
+The desktop test project is intentionally separate from `FastEdit.sln`, so
+ordinary `dotnet test` never drives your desktop. To debug desktop tests locally,
+use a dedicated unlocked Windows account with no existing `%AppData%\FastEdit`
+directory or running FastEdit process:
+
+```powershell
+$env:FASTEDIT_UI_TESTS = "1"
+$env:FASTEDIT_UI_APP = "C:\path\to\published\FastEdit.exe"
+dotnet test .\tests\FastEdit.UiTests\FastEdit.UiTests.csproj -c Release
+```
+
+The harness refuses existing profiles, owns and removes only its newly created
+test profile and temporary documents, and keeps diagnostics in `TestResults`.
+An interactive desktop is required; a Windows service/session-0 runner is not
+suitable. Local builds/tests and manual UI checks remain optional.
 
 ## Requirements
 
@@ -169,7 +234,8 @@ FastEdit.sln
 │   ├── FastEdit.Core/         # Core engine (hex editor, binary detection)
 │   └── FastEdit.Theming/      # Theme definitions and loader
 └── tests/
-    └── FastEdit.Tests/        # Unit test suite
+    ├── FastEdit.Tests/        # Unit and functional tests
+    └── FastEdit.UiTests/      # Isolated desktop smoke and E2E tests
 ```
 
 ## Custom Themes

@@ -3,8 +3,10 @@
 param(
     [string]$Version,
     [switch]$IncrementBuildCounter,
+    [switch]$PackageOnly,
     [switch]$SkipInstaller,
-    [switch]$Sign
+    [switch]$Sign,
+    [string]$CertificateThumbprint
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,9 +23,17 @@ if ($IncrementBuildCounter -and -not [string]::IsNullOrWhiteSpace($Version)) {
 if (-not $IncrementBuildCounter -and [string]::IsNullOrWhiteSpace($Version)) {
     throw "Specify -Version <version> or -IncrementBuildCounter."
 }
+if ($PackageOnly -and $IncrementBuildCounter) {
+    throw "Package-only builds must use the version of the already tested binaries."
+}
+if ($CertificateThumbprint -and -not $Sign) {
+    throw "Specify -Sign when selecting a signing certificate."
+}
 
-# Clean output
-if (Test-Path $OutputDir) { Remove-Item $OutputDir -Recurse -Force }
+# Package-only builds preserve the published binaries downloaded from CI.
+if (-not $PackageOnly -and (Test-Path $OutputDir)) {
+    Remove-Item -LiteralPath $OutputDir -Recurse -Force
+}
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 
 if ($IncrementBuildCounter) {
@@ -44,6 +54,26 @@ if ($IncrementBuildCounter) {
 
 Write-Host "=== FastEdit Build v$Version ===" -ForegroundColor Cyan
 
+$certificateArgs = if ($CertificateThumbprint) {
+    @("-CertificateThumbprint", $CertificateThumbprint)
+} else {
+    @()
+}
+
+if ($PackageOnly) {
+    foreach ($rid in $Runtimes) {
+        $arch = $rid.Replace("win-", "")
+        $exe = Join-Path $OutputDir "publish-$arch\FastEdit.exe"
+        if (-not (Test-Path -LiteralPath $exe)) {
+            throw "Missing tested binary: $exe"
+        }
+        $binaryVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($exe).FileVersion
+        if (([version]$binaryVersion).ToString(3) -ne ([version]$Version).ToString(3)) {
+            throw "The $arch binary version '$binaryVersion' does not match '$Version'."
+        }
+    }
+}
+
 foreach ($rid in $Runtimes) {
     $arch = $rid.Replace("win-", "")
     $publishDir = Join-Path $OutputDir "publish-$arch"
@@ -53,20 +83,21 @@ foreach ($rid in $Runtimes) {
     Write-Host ""
     Write-Host "--- Building $arch ---" -ForegroundColor Yellow
 
-    # Publish both architectures with the one version selected above.
-    dotnet publish $ProjectPath `
-        -c Release `
-        -r $rid `
-        --self-contained true `
-        -p:PublishSingleFile=false `
-        -p:PublishTrimmed=false `
-        -p:IncludeNativeLibrariesForSelfExtract=true `
-        -p:ReleaseVersion=$Version `
-        -o $publishDir
+    if (-not $PackageOnly) {
+        # Publish both architectures with the one version selected above.
+        dotnet publish $ProjectPath `
+            -c Release `
+            -r $rid `
+            --self-contained true `
+            -p:PublishSingleFile=false `
+            -p:PublishTrimmed=false `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:ReleaseVersion=$Version `
+            -o $publishDir
 
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "ERROR: Build failed for $arch" -ForegroundColor Red
-        exit 1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Build failed for $arch."
+        }
     }
 
     # Sign the app binary before zipping so the portable zip contains a signed exe
@@ -74,7 +105,7 @@ foreach ($rid in $Runtimes) {
         Write-Host "Signing $arch binaries..." -ForegroundColor Magenta
         $exeToSign = Join-Path $publishDir "FastEdit.exe"
         $exportArg = if ($rid -eq $Runtimes[0]) { @("-ExportCertTo", $PublicCertPath) } else { @() }
-        & pwsh -NoProfile -File $SignScript -Files $exeToSign @exportArg
+        & pwsh -NoProfile -File $SignScript -Files $exeToSign @exportArg @certificateArgs
         if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: signing failed for $arch" -ForegroundColor Red; exit 1 }
     }
 
@@ -104,20 +135,18 @@ if (-not $SkipInstaller) {
             & $nsisExe /DVERSION=$Version /DARCH=$arch "/DPUBLISH_DIR=$publishDir" "/DOUTPUT_DIR=$OutputDir" $nsiScript
 
             if ($LASTEXITCODE -ne 0) {
-                Write-Host "WARNING: NSIS failed for $arch" -ForegroundColor Red
+                throw "NSIS failed for $arch."
             }
             elseif ($Sign) {
                 $setupExe = Join-Path $OutputDir "FastEdit-$Version-$arch-setup.exe"
                 Write-Host "Signing installer: $setupExe" -ForegroundColor Magenta
-                & pwsh -NoProfile -File $SignScript -Files $setupExe
-                if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: installer signing failed for $arch" -ForegroundColor Red }
+                & pwsh -NoProfile -File $SignScript -Files $setupExe @certificateArgs
+                if ($LASTEXITCODE -ne 0) { throw "Installer signing failed for $arch." }
             }
         }
     }
     else {
-        Write-Host ""
-        Write-Host "NSIS not found. Skipping installer creation." -ForegroundColor Yellow
-        Write-Host "Install NSIS from https://nsis.sourceforge.io/Download" -ForegroundColor Yellow
+        throw "NSIS not found. Install NSIS or explicitly use -SkipInstaller."
     }
 }
 
