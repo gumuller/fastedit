@@ -158,7 +158,9 @@ usability/high-DPI checks are not covered by this initial suite.
 Packaging downloads the CI-built applications after both native functional
 suites and x64 desktop testing pass, then uses `deploy\build.ps1 -PackageOnly`
 rather than recompiling them. Ordinary CI does not increment `build.counter` or
-publish a release.
+publish a release. It also exercises signing on a disposable copy with a one-day
+test certificate, without accessing the release private key or signing the
+unsigned package artifacts.
 
 ### Signed Releases
 

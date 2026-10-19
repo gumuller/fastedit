@@ -85,7 +85,6 @@ jobs:
           path: artifacts\app
           if-no-files-found: error
           retention-days: 7
-          compression-level: 0
 
       - name: Upload desktop test runner
         uses: actions/upload-artifact@v7
@@ -194,8 +193,40 @@ jobs:
 
       - name: Package without rebuilding or changing the version
         run: |
-          $version = "1.1.$((Get-Content build.counter -Raw).Trim())"
+          $exe = (Resolve-Path .\deploy\output\publish-x64\FastEdit.exe).Path
+          $binaryVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($exe).FileVersion
+          $version = ([version]$binaryVersion).ToString(3)
           .\deploy\build.ps1 -Version $version -PackageOnly
+
+      - name: Exercise signing without the release private key
+        run: |
+          $testExe = Join-Path $env:RUNNER_TEMP 'FastEdit-signing-test.exe'
+          $testCert = Join-Path $env:RUNNER_TEMP 'FastEdit-signing-test.cer'
+          $certificate = New-SelfSignedCertificate -Type CodeSigningCert `
+            -Subject 'CN=FastEdit CI signing test' -CertStoreLocation Cert:\CurrentUser\My `
+            -NotAfter (Get-Date).AddDays(1)
+          try {
+            Copy-Item .\deploy\output\publish-x64\FastEdit.exe $testExe
+            & pwsh -NoProfile -File .\deploy\sign.ps1 -Files $testExe `
+              -CertificateThumbprint $certificate.Thumbprint -ExportCertTo $testCert
+            if ($LASTEXITCODE -ne 0) { throw "Signing with the explicit test certificate failed." }
+            Import-Certificate -FilePath $testCert -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
+            Import-Certificate -FilePath $testCert -CertStoreLocation Cert:\CurrentUser\TrustedPublisher | Out-Null
+            $signature = Get-AuthenticodeSignature -FilePath $testExe
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -ne $certificate.Thumbprint) {
+              throw "The test signature is invalid or uses the wrong certificate."
+            }
+          }
+          finally {
+            foreach ($store in @('Root', 'TrustedPublisher')) {
+              $path = "Cert:\CurrentUser\$store\$($certificate.Thumbprint)"
+              if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path }
+            }
+            Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -DeleteKey
+            foreach ($path in @($testExe, $testCert)) {
+              if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path }
+            }
+          }
 
       - uses: actions/upload-artifact@v7
         with:
@@ -228,7 +259,9 @@ jobs:
             throw "Release tags must have the form v1.1.18."
           }
           $version = $Matches[1]
-          $expected = "1.1.$((Get-Content build.counter -Raw).Trim())"
+          [xml]$project = Get-Content .\src\FastEdit\FastEdit.csproj -Raw
+          $prefix = $project.Project.PropertyGroup.VersionPrefix
+          $expected = "$prefix.$((Get-Content build.counter -Raw).Trim())"
           if ($version -ne $expected) {
             throw "Tag version '$version' does not match build.counter ('$expected')."
           }
