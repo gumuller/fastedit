@@ -16,7 +16,7 @@ if ((Test-Path -LiteralPath $userKey) -or (Test-Path -LiteralPath $machineKey)) 
     throw "Refusing to replace an existing FastEdit Explorer registration."
 }
 
-foreach ($ownership in @("installed", "another-copy", "stale-marker")) {
+foreach ($ownership in @("installed", "disabled", "another-copy", "stale-marker")) {
     $installDirectory = Join-Path $env:RUNNER_TEMP "FastEdit shell smoke $([guid]::NewGuid().ToString('N'))"
     $installedExe = Join-Path $installDirectory "FastEdit.exe"
     $owner = if ($ownership -ne "another-copy") {
@@ -26,6 +26,8 @@ foreach ($ownership in @("installed", "another-copy", "stale-marker")) {
     }
     $commandTarget = if ($ownership -eq "installed") {
         $installedExe
+    } elseif ($ownership -eq "disabled") {
+        $null
     } else {
         Join-Path $env:RUNNER_TEMP "another portable copy\FastEdit.exe"
     }
@@ -43,14 +45,23 @@ foreach ($ownership in @("installed", "another-copy", "stale-marker")) {
         $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($verb)
         try {
             $key.SetValue("FastEditExecutable", $owner)
-            $commandKey = $key.CreateSubKey("command")
-            try {
-                $commandKey.SetValue("", "`"$commandTarget`" `"%1`"")
-            } finally {
-                $commandKey.Dispose()
+            if ($ownership -eq "disabled") {
+                $key.SetValue("LegacyDisable", "")
+            } else {
+                $commandKey = $key.CreateSubKey("command")
+                try {
+                    $commandKey.SetValue("", "`"$commandTarget`" `"%1`"")
+                } finally {
+                    $commandKey.Dispose()
+                }
             }
         } finally {
             $key.Dispose()
+        }
+        if ($ownership -eq "disabled" -and
+            [Microsoft.Win32.Registry]::GetValue(
+                "HKEY_CLASSES_ROOT\*\shell\FastEdit", "LegacyDisable", $null) -ne "") {
+            throw "The per-user opt-out did not hide the installed Explorer entry."
         }
 
         $uninstaller = Join-Path $installDirectory "Uninstall.exe"
@@ -60,7 +71,7 @@ foreach ($ownership in @("installed", "another-copy", "stale-marker")) {
         if (Test-Path -LiteralPath $machineKey) {
             throw "The uninstaller left its machine-wide Explorer registration behind."
         }
-        if ($ownership -eq "installed") {
+        if ($ownership -in @("installed", "disabled")) {
             if (Test-Path -LiteralPath $userKey) {
                 throw "The uninstaller left its own per-user Explorer registration behind."
             }

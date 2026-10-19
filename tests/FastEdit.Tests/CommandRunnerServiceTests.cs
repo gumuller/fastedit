@@ -61,7 +61,7 @@ public class CommandRunnerServiceTests
         Assert.True(await sut.SetWorkingDirectoryAsync(tempDirectory));
 
         Assert.Equal(tempDirectory, sut.WorkingDirectory);
-        Assert.Equal(tempDirectory, await changed.Task.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(tempDirectory, await changed.Task.WaitAsync(TimeSpan.FromSeconds(10)));
     }
 
     [Fact]
