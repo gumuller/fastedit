@@ -102,8 +102,14 @@
                         CornerRadius="8"
                         Padding="4"
                         SnapsToDevicePixels="True">
-                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Cycle"
-                                    KeyboardNavigation.TabNavigation="Cycle"/>
+                    <ScrollViewer x:Name="SubMenuScrollViewer"
+                                  CanContentScroll="True"
+                                  Focusable="False"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  VerticalScrollBarVisibility="Auto">
+                        <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Cycle"
+                                        KeyboardNavigation.TabNavigation="Cycle"/>
+                    </ScrollViewer>
                 </Border>
             </Popup>
         </Grid>
@@ -293,8 +299,14 @@
                             CornerRadius="8"
                             Padding="4"
                             SnapsToDevicePixels="True">
-                        <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Cycle"
-                                        KeyboardNavigation.TabNavigation="Cycle"/>
+                        <ScrollViewer x:Name="SubMenuScrollViewer"
+                                      CanContentScroll="True"
+                                      Focusable="False"
+                                      HorizontalScrollBarVisibility="Disabled"
+                                      VerticalScrollBarVisibility="Auto">
+                            <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Cycle"
+                                            KeyboardNavigation.TabNavigation="Cycle"/>
+                        </ScrollViewer>
                     </Border>
                 </Popup>
             </Grid>

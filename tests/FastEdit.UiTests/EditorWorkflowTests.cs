@@ -1,3 +1,4 @@
+using System.Text.Json;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
 using FlaUI.Core.Input;
@@ -134,7 +135,7 @@ public sealed class EditorWorkflowTests
         app.Start(path);
         app.WaitForEditor(Path.GetFileName(path));
         app.ReplaceDocument(recovered);
-        DesktopApp.Until(() => HasPublishedAutoSave(app.AutoSaveDirectory, recovered),
+        DesktopApp.Until(() => HasPublishedAutoSave(app.AutoSaveDirectory, path, recovered.Length),
             "A recoverable autosave was not published before the crash.");
         app.Crash();
         Assert.Equal("original on disk", File.ReadAllText(path));
@@ -147,18 +148,27 @@ public sealed class EditorWorkflowTests
             "Crash recovery did not restore and save the autosaved content.");
     }
 
-    private static bool HasPublishedAutoSave(string directory, string expectedContent)
+    private static bool HasPublishedAutoSave(string directory, string filePath, int expectedCursorOffset)
     {
         if (!Directory.Exists(directory))
             return false;
         try
         {
-            foreach (var content in Directory.GetFiles(directory, "*.txt"))
+            foreach (var manifestPath in Directory.GetFiles(directory, "manifest-*.json"))
             {
-                if (File.ReadAllText(content) == expectedContent &&
-                    Directory.GetFiles(directory, "manifest-*.json").Any(manifest =>
-                        File.ReadAllText(manifest).Contains(Path.GetFileName(content), StringComparison.Ordinal)))
-                    return true;
+                using var manifest = JsonDocument.Parse(File.ReadAllText(manifestPath));
+                foreach (var entry in manifest.RootElement.EnumerateArray())
+                {
+                    if (string.Equals(entry.GetProperty("FilePath").GetString(), filePath, StringComparison.OrdinalIgnoreCase) &&
+                        entry.GetProperty("IsModified").GetBoolean() &&
+                        entry.GetProperty("CursorOffset").GetInt32() == expectedCursorOffset)
+                    {
+                        var contentFile = entry.GetProperty("ContentFile").GetString() ??
+                            throw new InvalidDataException("The autosave manifest has no content file.");
+                        if (File.Exists(Path.Combine(directory, contentFile)))
+                            return true;
+                    }
+                }
             }
         }
         catch (FileNotFoundException)

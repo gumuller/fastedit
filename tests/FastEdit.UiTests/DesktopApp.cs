@@ -7,6 +7,7 @@ using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Capturing;
 using FlaUI.Core.Definitions;
 using FlaUI.Core.Input;
+using FlaUI.Core.Patterns;
 using FlaUI.Core.WindowsAPI;
 using FlaUI.UIA3;
 using Xunit.Abstractions;
@@ -122,14 +123,14 @@ internal sealed class DesktopApp : IDisposable
         }, "The FastEdit main window did not appear.");
     }
 
-    public AutomationElement Find(string automationId)
+    public AutomationElement Find(string automationId, bool requireVisible = true)
     {
         AutomationElement? element = null;
         Until(() =>
         {
             EnsureRunning();
             element = _window!.FindFirstDescendant(cf => cf.ByAutomationId(automationId));
-            return element != null && !element.IsOffscreen;
+            return element != null && (!requireVisible || !element.IsOffscreen);
         }, $"Visible UI element '{automationId}' was not found.");
         return element!;
     }
@@ -175,6 +176,11 @@ internal sealed class DesktopApp : IDisposable
     public MenuItem OpenThemeMenu()
     {
         Find("ViewMenu").AsMenuItem().Expand();
+        if (Find("ThemeMenu", requireVisible: false).IsOffscreen)
+        {
+            Find("SubMenuScrollViewer").Patterns.Scroll.Pattern
+                .SetScrollPercent(ScrollPatternConstants.NoScroll, 100);
+        }
         var menu = Find("ThemeMenu").AsMenuItem();
         menu.Expand();
         return menu;
